@@ -61,12 +61,12 @@ export function setupIssues(env: SetupEnv): SetupIssue[] {
     issues.push({
       level: 'blocker',
       title: 'No way to authenticate',
-      detail: 'Service mode needs a stored token; portal mode is off, so no delegated ns_t will arrive either.',
-      fix: 'Either `wrangler secret put NS_API_TOKEN` (service mode), or set vars.PORTAL_MODE = "1" to take the caller\'s ns_t instead.',
+      detail: 'Standalone mode needs a stored token; portal backend mode is off, so no delegated ns_t will arrive either.',
+      fix: 'Either `wrangler secret put NS_API_TOKEN` (standalone mode), or set vars.PORTAL_MODE = "1" to take the caller\'s ns_t instead.',
     });
   }
 
-  // Required for the delegated path — which portal mode always uses, and service mode uses whenever a
+  // Required for the delegated path — which portal backend mode always uses, and standalone mode uses whenever a
   // caller sends a Bearer token. It has no default on purpose: a default issuer would accept tokens
   // minted by a portal you don't control.
   if ((portal || set(env.NS_API_TOKEN)) && (!set(iss) || iss === PLACEHOLDER_ISS)) {
@@ -74,8 +74,8 @@ export function setupIssues(env: SetupEnv): SetupIssue[] {
       level: portal ? 'blocker' : 'warning',
       title: 'NS_PORTAL_ISS is not configured',
       detail: portal
-        ? 'Portal mode validates every ns_t against this, so all requests will be refused (fail-closed).'
-        : 'Service mode works without it, but any caller sending a Bearer ns_t will be refused.',
+        ? 'Portal backend mode validates every ns_t against this, so all requests will be refused (fail-closed).'
+        : 'Standalone mode works without it, but any caller sending a Bearer ns_t will be refused.',
       fix: 'Set vars.NS_PORTAL_ISS to the Manager Portal host that issues your ns_t. Comma-separate several hosts if one backend has more than one portal hostname.',
     });
   }

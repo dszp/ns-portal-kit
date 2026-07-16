@@ -20,15 +20,15 @@ Objects), so it deploys clean.
 carries the calling user's own login token and no credential is stored at all. Want both? Click the
 button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
 
-> **Portal mode needs an injection script that isn't published yet.** It's the backend half: nothing
+> **Portal backend mode needs an injection script that isn't published yet.** It's the backend half: nothing
 > calls it until JS running inside your Manager Portal does. A reference script is planned; until then
-> portal mode means writing that yourself. Service mode is complete and works today.
+> portal backend mode means writing that yourself. Standalone mode is complete and works today.
 
 - **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu → queue
   → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. Comes with a
   viewer: theme picker, pan/zoom, PNG export. *Both modes.*
 - **Ringotel app status** — a reseller banner, a per-user app column, and an app column on the domain
-  list. *Portal mode only* — these live inside the Manager Portal.
+  list. *Portal backend mode only* — these live inside the Manager Portal.
 - **Enrichment on the diagrams** — app presence and desk-phone model/registration shown inline on agent
   lines. *Both modes, optional.*
 
@@ -63,7 +63,7 @@ Then configure for a real deploy (the button asks for all of this on its form in
 # 1. point it at your NetSapiens server
 #    edit wrangler.jsonc -> vars.NS_SERVER   (and NS_PORTAL_ISS for delegated auth)
 
-# 2. give it a token (service mode — reads any domain the token is scoped to)
+# 2. give it a token (standalone mode — reads any domain the token is scoped to)
 wrangler secret put NS_API_TOKEN
 
 # 3. copy the local-dev template and fill in what you need
@@ -87,7 +87,7 @@ Everything else is off until you turn it on.
 
 ## Two auth modes
 
-**Service mode** — a stored `NS_API_TOKEN` reads any domain the token is scoped to, which enables the
+**Standalone mode** — a stored `NS_API_TOKEN` reads any domain the token is scoped to, which enables the
 domain browser and the viewer SPA. The token's NetSapiens scope is the real boundary, so a broad
 (reseller) token can read your whole fleet.
 
@@ -96,15 +96,15 @@ domain browser and the viewer SPA. The token's NetSapiens scope is the real boun
 > Cloudflare Access check (it fails closed, so a direct-route or `*.workers.dev` hit is refused even
 > with a valid token configured), and/or `ALLOWED_DOMAINS` to bound it at the app layer.
 
-**Portal mode** (`PORTAL_MODE=1`) — no stored credential at all. It has no UI: it's the **backend half
+**Portal backend mode** (`PORTAL_MODE=1`) — no stored credential at all. It has no UI: it's the **backend half
 of a Manager Portal add-on**. You inject JavaScript into your portal; that JS reads the logged-in
 user's `ns_t` (which the portal already issued), sends it here, and this Worker forwards it to
 NetSapiens verbatim — so every read runs **as that user**, with their scope enforced by the platform
 rather than by us. Your JS then updates the live page with what comes back.
 
 **You supply that JavaScript today** — a reference implementation is planned but not published yet, so
-portal mode is currently the advanced path. Service mode needs nothing extra.
-[The full flow, with a diagram →](./SETUP.md#4-portal-mode-what-it-actually-is)
+portal backend mode is currently the advanced path. Standalone mode needs nothing extra.
+[The full flow, with a diagram →](./SETUP.md#4-portal-backend-mode-what-it-actually-is)
 
 ## Configuration
 
@@ -114,7 +114,7 @@ A working deployment needs **three** settings:
 |---|---|---|
 | `NS_SERVER` | `vars` in `wrangler.jsonc` | your NetSapiens API host, e.g. `api.example.com` |
 | `NS_PORTAL_ISS` | `vars` in `wrangler.jsonc` | the Manager Portal host that issues your `ns_t` |
-| `NS_API_TOKEN` | secret | a NetSapiens API token (service mode; blank for portal mode) |
+| `NS_API_TOKEN` | secret | a NetSapiens API token (standalone mode; blank for portal backend mode) |
 
 Everything else is **optional and off unless set** — access gating, domain scoping, branding, Ringotel
 app status, device details.

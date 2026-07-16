@@ -1,7 +1,7 @@
 /**
- * What a portal-mode Worker says at `/`.
+ * What a portal-backend-mode Worker says at `/`.
  *
- * Portal mode is the backend half of an injected add-on, so it has no UI and the internal SPA is
+ * Portal backend mode is the backend half of an injected add-on, so it has no UI and the internal SPA is
  * deliberately withheld (a tooling surface shouldn't exist on a user-facing endpoint, and its fetches
  * carry no ns_t anyway). It still answers 404 — but a bare 404 is a dead end for whoever just deployed
  * this and opened the URL to see if it worked. So: 404 with an explanation.
@@ -12,10 +12,10 @@ import { page } from './pageShell.js';
 
 export function portalModeHtml(productName = 'NS Portal Kit'): string {
   return page({
-    title: `${productName} — portal mode`,
+    title: `${productName} — portal backend mode`,
     heading: 'This is working. It just has no page.',
     intro:
-      'This Worker is running in portal mode, which is the BACKEND half of a Manager Portal add-on. It ' +
+      'This Worker is running in portal backend mode, which is the BACKEND half of a Manager Portal add-on. It ' +
       'has no interface of its own by design — it answers API calls from JavaScript running inside your ' +
       'Manager Portal, and serves nothing to a browser that visits it directly.',
     items: [
@@ -40,7 +40,7 @@ export function portalModeHtml(productName = 'NS Portal Kit'): string {
         level: 'step',
         title: 'Wanted the viewer instead?',
         body: [
-          'The domain-browser UI is service mode: clear PORTAL_MODE, set an NS_API_TOKEN, and put Cloudflare ' +
+          'The domain-browser UI is standalone mode: clear PORTAL_MODE, set an NS_API_TOKEN, and put Cloudflare ' +
             'Access in front of it. That is the one to start with.',
         ],
       },

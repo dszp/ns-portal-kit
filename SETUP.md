@@ -11,7 +11,7 @@ rest only matter if you want the feature they turn on.
 
 This decides which settings you need. Everything else follows from it.
 
-| | **Service mode** | **Portal mode** |
+| | **Standalone mode** | **Portal backend mode** |
 |---|---|---|
 | What you get | **call-flow diagrams, and only those** — a standalone viewer you open | the diagrams **embedded in your Manager Portal**, plus the other add-on features |
 | Who authenticates | a token you store | the calling user's own `ns_t` |
@@ -21,23 +21,23 @@ This decides which settings you need. Everything else follows from it.
 | Needs injected JavaScript | no | **yes — and it isn't published yet** |
 | Ready to use today | **yes** | only if you write that JS yourself |
 
-**Service mode gives you the diagram viewer and nothing else.** No Ringotel banner, no per-user app
+**Standalone mode gives you the diagram viewer and nothing else.** No Ringotel banner, no per-user app
 column, no domain-list column — those live *inside* the Manager Portal, so they only exist in portal
-mode. (The diagrams themselves can still be *enriched*: set `RINGOTEL_API_KEY` and app presence appears
+backend mode. (The diagrams themselves can still be *enriched*: set `RINGOTEL_API_KEY` and app presence appears
 inline on agent lines, `NS_DEVICE_DETAILS=1` adds phone models. That's decoration on a diagram, not the
 separate features.)
 
-**Portal mode is where the rest lives** — the diagrams show up in the portal your users already use,
+**Portal backend mode is where the rest lives** — the diagrams show up in the portal your users already use,
 alongside the other add-ons, because injected JS can change any page it runs on.
 
-**Service mode is the default** and the simpler place to start. A stored token answers *any* request
+**Standalone mode is the default** and the simpler place to start. A stored token answers *any* request
 that reaches the Worker, so put it behind a gate — see `ACCESS_AUD`.
 
-**Portal mode is the advanced path today** — it needs an injection script that isn't published yet (see
-[section 4](#4-portal-mode-what-it-actually-is)). **Portal mode holds no NetSapiens credential at all.** Each request carries the caller's `ns_t`, which
+**Portal backend mode is the advanced path today** — it needs an injection script that isn't published yet (see
+[section 4](#4-portal-backend-mode-what-it-actually-is)). **Portal backend mode holds no NetSapiens credential at all.** Each request carries the caller's `ns_t`, which
 is passed through to NetSapiens as-is; the platform validates it and enforces that user's own scope.
 There's no SPA — it's a backend for JS **you** inject into the Manager Portal. **[How that actually
-works, with a diagram →](#4-portal-mode-what-it-actually-is)**
+works, with a diagram →](#4-portal-backend-mode-what-it-actually-is)**
 
 **You can run both**, and that's the usual end state — they're two Workers, not two phases. See
 [Running both](#5-running-both-the-usual-end-state).
@@ -48,19 +48,19 @@ works, with a diagram →](#4-portal-mode-what-it-actually-is)**
 |---|---|---|
 | **`NS_SERVER`** | `vars` in `wrangler.jsonc` | `api.yourprovider.com` |
 | **`NS_PORTAL_ISS`** | `vars` in `wrangler.jsonc` | `manage.yourcompany.com` |
-| **`NS_API_TOKEN`** *(service mode)* | secret | a NetSapiens API token |
+| **`NS_API_TOKEN`** *(standalone mode)* | secret | a NetSapiens API token |
 
 `NS_SERVER` — your NetSapiens API host, no scheme, no path. Requests go to
 `https://{NS_SERVER}/ns-api/v2`. Ships as `api.example.com`, which is a placeholder, not a default.
 
 `NS_PORTAL_ISS` — the Manager Portal hostname that issues your `ns_t` tokens (the `iss` claim in them).
-**Required whenever a request might carry a Bearer `ns_t`** — always in portal mode, and in service mode
+**Required whenever a request might carry a Bearer `ns_t`** — always in portal backend mode, and in standalone mode
 if anyone sends one. It has **no default on purpose**: a default would mean accepting tokens minted by
 a portal you don't control. Comma-separate if several portal hostnames front the same backend —
 `manage.a.com,manage.b.com` — matched **exactly**, no wildcards (`*.a.com` is a literal that matches
 nothing).
 
-`NS_API_TOKEN` — service mode only. **Leave blank in portal mode.**
+`NS_API_TOKEN` — standalone mode only. **Leave blank in portal backend mode.**
 
 **Not sure if you're done?** Open `/`. If anything required is missing it lists exactly what, with the
 fix. `GET /health` reports `{"ok":true,"configured":false}`. Both say only *whether* a value is set,
@@ -77,7 +77,7 @@ Everything below is off unless set. Blank/absent is always a safe answer.
 | `ACCESS_AUD` | Access application AUD tag | **Turns on** the in-Worker Cloudflare Access check. Fails closed. |
 | `ACCESS_TEAM_DOMAIN` | `yourteam.cloudflareaccess.com` | Your Zero Trust team domain. Required with `ACCESS_AUD`. |
 
-Strongly recommended for service mode. Without it, anyone who reaches the Worker gets whatever the
+Strongly recommended for standalone mode. Without it, anyone who reaches the Worker gets whatever the
 stored token can read. Both values are public identifiers — safe in `vars`.
 
 ### Limit which domains are visible
@@ -91,7 +91,7 @@ Comma-separated NetSapiens domain names, exactly as NetSapiens has them. A domai
 or carry a territory suffix (`acme.12345.service`) — use whichever form is real for you. These are an
 app-layer bound *on top of* the token's own scope, not a replacement for it.
 
-### Portal mode
+### Portal backend mode
 
 | Setting | Value | Meaning |
 |---|---|---|
@@ -137,9 +137,9 @@ Truthy values anywhere above are `1`, `true`, `yes`, `on`.
 
 ---
 
-## 4. Portal mode: what it actually is
+## 4. Portal backend mode: what it actually is
 
-Service mode is a tool **you** open. Portal mode has no UI of its own — it's a **backend for JavaScript
+Standalone mode is a tool **you** open. Portal backend mode has no UI of its own — it's a **backend for JavaScript
 injected into your Manager Portal**, so your users get extra features inside the portal they already
 use, without logging in anywhere else.
 
@@ -166,11 +166,11 @@ sequenceDiagram
 
 The parts worth understanding:
 
-- **You must supply the JavaScript, and that's real work today.** This repo is the backend half. Portal
+- **You must supply the JavaScript, and that's real work today.** This repo is the backend half. Portal backend
   mode does nothing on its own — nothing calls it until JS you inject into your portal does. **A
   reference injection script is planned but is not published yet**, so right now this means writing it
   yourself: reading the `ns_t` the portal stored, calling the Worker, and updating the page. How you
-  inject it depends on your NetSapiens portal. If that's more than you want to take on, use service
+  inject it depends on your NetSapiens portal. If that's more than you want to take on, use standalone
   mode — it's complete and needs nothing extra.
 - **The `ns_t` is the logged-in user's own session token**, which the portal has already issued and
   stored in the browser. Your JS reads it and forwards it; it doesn't create or manage logins.
@@ -276,7 +276,7 @@ npx wrangler deploy --env internal
 npx wrangler deploy --env portal
 ```
 
-The portal Worker gets no token at all — that's the point of portal mode.
+The portal Worker gets no token at all — that's the point of portal backend mode.
 
 **Two gotchas that bite everyone:**
 

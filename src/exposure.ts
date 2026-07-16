@@ -17,7 +17,7 @@
  *   3. `ALLOW_UNGATED_SERVICE_TOKEN` is truthy — a deliberate opt-out, for someone who has put their
  *      own protection in front (mTLS, a WAF, an authenticating proxy) and doesn't need ours.
  *
- * DELEGATED / PORTAL MODE IS UNAFFECTED, and that's the point: there the caller supplies their own
+ * DELEGATED / PORTAL BACKEND MODE IS UNAFFECTED, and that's the point: there the caller supplies their own
  * `ns_t`, so there is no ambient authority to protect. The gate exists precisely and only where the
  * Worker would otherwise lend out a credential the caller never proved they should have.
  */

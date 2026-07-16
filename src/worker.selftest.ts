@@ -139,12 +139,12 @@ const ok = (c: boolean, m: string) => {
   ok((await dcall(`/flow?kind=${kind}&ref=${ref}`)).status === 401, '[delegated] missing token → 401');
   ok((await dcall(`/flow?kind=bogus&ref=1`, { Authorization: `Bearer ${tok}` })).status === 400, '[delegated] bad entity → 400');
 
-  // ================= SERVICE mode (internal viewer) =================
-  // ALLOW_UNGATED_SERVICE_TOKEN: these cases test SERVICE-MODE BEHAVIOUR, not deployment posture. The
+  // ================= STANDALONE mode (internal viewer) =================
+  // ALLOW_UNGATED_SERVICE_TOKEN: these cases test STANDALONE-MODE BEHAVIOUR, not deployment posture. The
   // Worker otherwise refuses to use a stored token on a non-local host with no Access in front (the
   // gate in src/exposure.ts) -- correctly, and these requests come from https://w.dev. Opting out here
   // keeps the gate's own coverage in one place (see the [gate] cases below) instead of smeared across
-  // every service-mode assertion.
+  // every standalone-mode assertion.
   const sEnv = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '', ALLOW_UNGATED_SERVICE_TOKEN: '1' };
   const scall = (path: string, method = 'GET') => worker.fetch(new Request(`https://w.dev${path}`, { method }), sEnv as any, ctx);
 
@@ -220,7 +220,7 @@ const ok = (c: boolean, m: string) => {
     ok(true, '[ringotel] enabled enrichment skipped — no ###r devices in this fixture');
   }
 
-  // ================= /ringotel/org route (service mode; ?refresh bypasses cross-test cache) =================
+  // ================= /ringotel/org route (standalone mode; ?refresh bypasses cross-test cache) =================
   rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
   rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
@@ -235,7 +235,7 @@ const ok = (c: boolean, m: string) => {
   ok(roNone.status === 200 && roNoneB.active === false && roNoneB.eligible === true, '[ringotel/org] NS-readable but no Ringotel org → {active:false,eligible:true}');
   // The fleet-wide Ringotel key must not answer for a domain this token cannot read in NS.
   ok((await roCall(`/ringotel/org?domain=forbidden.example&refresh=ringotel`)).status === 403,
-    '[ringotel/org] domain NOT readable in NS → 403 (service mode is bounded by NS scope too)');
+    '[ringotel/org] domain NOT readable in NS → 403 (standalone mode is bounded by NS scope too)');
   ok((await roCall(`/ringotel/org?domain=${domain}`, sEnv)).status === 404, '[ringotel/org] no RINGOTEL_API_KEY → 404 (gate)');
 
   const ru = await roCall(`/ringotel/users?domain=${domain}&refresh=ringotel`);

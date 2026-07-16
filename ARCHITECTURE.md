@@ -21,12 +21,12 @@ CLI, or in a browser. Ringotel talks through
 
 ## Auth
 
-**Service mode** — a stored token reads any domain it's scoped to. The token's NetSapiens scope is the
+**Standalone mode** — a stored token reads any domain it's scoped to. The token's NetSapiens scope is the
 real boundary; `ALLOWED_DOMAINS` is an app-layer gate on top. Pair it with Cloudflare Access
 (`ACCESS_AUD`): the in-Worker check fails closed, so the token only ever answers requests that already
 passed the Zero Trust policy — a `*.workers.dev` or direct-route bypass is refused.
 
-**Portal mode** — delegated only, no service-token fallback. `verify → toPrincipal → can()` gates every
+**Portal backend mode** — delegated only, no service-token fallback. `verify → toPrincipal → can()` gates every
 request; resellers unlock cross-domain reads, everyone else is domain-locked.
 
 ### `ns_t` validation, and why it looks paranoid

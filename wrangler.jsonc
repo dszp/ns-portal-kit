@@ -6,7 +6,7 @@
   // viewer with nothing else running.
   //
   // Secrets are NEVER in this file — set them per environment with `wrangler secret put <NAME>`:
-  //   NS_API_TOKEN     service-mode API token (service deployments only; omit for portal mode)
+  //   NS_API_TOKEN     standalone-mode API token (service deployments only; omit for portal backend mode)
   //   RINGOTEL_API_KEY enables the Ringotel integration (absent ⇒ it does not run at all)
   //   RINGOTEL_LABEL / RINGOTEL_LABEL_SHORT   white-label display names (default "Ringotel")
   //   BRAND_NAME       your company name (default: unbranded, "NS Portal Kit")
@@ -34,19 +34,19 @@
     // (exact match, no wildcards).
     "NS_PORTAL_ISS": "manage.example.com",
 
-    // ── Which mode? Leave BOTH blank for service mode (an internal tool for your own team). ──
+    // ── Which mode? Leave BOTH blank for standalone mode (an internal tool for your own team). ──
     // These are here, rather than commented out, so the "Deploy to Cloudflare" form asks for them —
-    // which is what lets you stand up a portal-mode deployment without ever touching a terminal.
+    // which is what lets you stand up a portal-backend-mode deployment without ever touching a terminal.
     //
     // PORTAL_MODE "1" = delegated only: no stored token, every request carries the calling user's own
     // ns_t.
     //
-    // NOT A STARTING POINT YET. Portal mode is only half of a feature: it does nothing until JS you
+    // NOT A STARTING POINT YET. Portal backend mode is only half of a feature: it does nothing until JS you
     // inject into your Manager Portal calls it. A reference injection script is planned but NOT
     // published, so today this means writing that yourself. Leave blank unless that's what you're
     // doing. See SETUP.md.
     "PORTAL_MODE": "",
-    // Portal mode only: the browser origin your injected JS runs on — normally your Manager Portal.
+    // Portal backend mode only: the browser origin your injected JS runs on — normally your Manager Portal.
     "ALLOWED_ORIGINS": ""
 
     // ── Optional. Uncomment what you need; each is inert while unset. ──

@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker entry — the deployable backend + internal viewer. Two auth modes:
  *
- *   SERVICE mode (internal viewer, behind CF Access): a stored NS service token (`NS_API_TOKEN`
+ *   STANDALONE mode (internal viewer, behind CF Access): a stored NS service token (`NS_API_TOKEN`
  *     secret) reads ANY domain the token is scoped to. Enables the domain browser. CF Access
  *     authenticates the human at the edge; this Worker trusts requests that reach it. This is the
  *     "local fake-worker + internal viewer" path — start here.
@@ -11,7 +11,7 @@
  *     token's own domain. No service token involved.
  *
  * Endpoints:
- *   GET /                       → the viewer SPA (service mode)
+ *   GET /                       → the viewer SPA (standalone mode)
  *   GET /health                 → { ok }
  *   GET /domains                → [{ domain, description }]  (service: all scoped; delegated: just yours)
  *   GET /entities?domain=D      → { dids, users, queues, attendants }  (shallow read)
@@ -102,7 +102,7 @@ interface Env {
   /** Truthy enables desk-phone enrichment (model + 🟢/🔴 registration presence) on ###/#### device lines. */
   NS_DEVICE_DETAILS?: string;
 
-  // ── Optional: Cloudflare Access gate (service-mode deployments behind Zero Trust; see src/access.ts) ──
+  // ── Optional: Cloudflare Access gate (standalone-mode deployments behind Zero Trust; see src/access.ts) ──
   /** Access Application Audience (AUD) tag. Presence turns ON in-Worker Access-JWT verification. */
   ACCESS_AUD?: string;
   /** Access team domain, e.g. "yourteam.cloudflareaccess.com" (bare host or full URL). */
@@ -116,7 +116,7 @@ interface Env {
   BLOCKED_DOMAINS?: string;
 
   /**
-   * "1"/"true" ⇒ PORTAL MODE: delegated-only (no service-token fallback) + policy-gated
+   * "1"/"true" ⇒ PORTAL BACKEND MODE: delegated-only (no service-token fallback) + policy-gated
    * (verify → toPrincipal → can('portal.access')). Unset ⇒ the existing dual-mode Worker (dia/local),
    * byte-identical. See src/portal.selftest.ts.
    */
@@ -127,7 +127,7 @@ interface Env {
  *  variants (e.g. `?domain=0000.12345.Service.` slipping the blocklist). */
 const normDomain = (d: string): string => d.trim().toLowerCase().replace(/\.+$/, '');
 
-/** Portal mode: delegated-only + policy-gated. Off ⇒ existing dual-mode (dia/local) unchanged. */
+/** Portal backend mode: delegated-only + policy-gated. Off ⇒ existing dual-mode (dia/local) unchanged. */
 function portalMode(env: Env): boolean {
   const v = (env.PORTAL_MODE ?? '').trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
@@ -235,7 +235,7 @@ interface Auth {
   lockedDomain?: string;
   /** Portal reseller fallback: any domain allowed; this one when ?domain is absent. */
   defaultDomain?: string;
-  /** Portal-mode principal (set only in portal mode). */
+  /** Portal-backend-mode principal (set only in portal backend mode). */
   principal?: Principal;
 }
 
@@ -264,19 +264,19 @@ function portalIss(env: Env): string {
 }
 
 /**
- * Feature gate for the Ringotel routes. Portal mode MUST have a principal (verify -> toPrincipal ran),
- * so an absent one means something is wrong: fail closed rather than sail past the check. Service mode
+ * Feature gate for the Ringotel routes. Portal backend mode MUST have a principal (verify -> toPrincipal ran),
+ * so an absent one means something is wrong: fail closed rather than sail past the check. Standalone mode
  * has no principal BY DESIGN -- there is no delegated identity, only a stored token -- so policy is not
  * the control there. assertDomainReadable is: it bounds these routes to domains the caller's token can
  * actually read in NetSapiens, in BOTH modes.
  */
 function requireFeature(auth: Auth, feature: string, env: Env): void {
-  if (!portalMode(env)) return;                                    // service mode: no principal exists
-  if (!auth.principal) throw new HttpError(403, 'Not authorized'); // portal mode without one: fail closed
+  if (!portalMode(env)) return;                                    // standalone mode: no principal exists
+  if (!auth.principal) throw new HttpError(403, 'Not authorized'); // portal backend mode without one: fail closed
   if (!can(auth.principal, feature, POLICIES)) throw new HttpError(403, `Not authorized: ${feature}`);
 }
 
-/** Resolve auth. Portal mode: delegated-only + policy gate. Else: the existing dual-mode (Bearer wins, else service). */
+/** Resolve auth. Portal backend mode: delegated-only + policy gate. Else: the existing dual-mode (Bearer wins, else service). */
 async function resolveAuth(request: Request, env: Env): Promise<Auth> {
   const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
 
@@ -312,7 +312,7 @@ async function resolveAuth(request: Request, env: Env): Promise<Auth> {
     if (serviceTokenBlocked(env, new URL(request.url).hostname)) throw new HttpError(403, 'Service token is not protected', BLOCKED_REASON);
     return { token: env.NS_API_TOKEN };
   }
-  throw new HttpError(401, 'Unauthenticated: provide Authorization: Bearer <ns_t>, or configure NS_API_TOKEN (service mode)');
+  throw new HttpError(401, 'Unauthenticated: provide Authorization: Bearer <ns_t>, or configure NS_API_TOKEN (standalone mode)');
 }
 
 /** Which domain this request may read: delegated is locked to its own; service takes ?domain.
@@ -339,7 +339,7 @@ function requireDomain(auth: Auth, url: URL, env: Env): string {
 /**
  * Cross-domain reseller reads are SENSITIVE: re-validate the token live (force-fresh, bypassing the
  * verdict cache) so a server-side logout/revocation is caught immediately instead of after the TTL.
- * No-op outside portal mode, for non-reseller principals, or for own-domain reads (those stay
+ * No-op outside portal backend mode, for non-reseller principals, or for own-domain reads (those stay
  * cache-fronted). Throws (401/502) if the fresh check fails.
  */
 async function maybeElevate(auth: Auth, domain: string, env: Env): Promise<void> {
@@ -358,7 +358,7 @@ async function maybeElevate(auth: Auth, domain: string, env: Env): Promise<void>
  * and inherit the NS 401/403 scope boundary for free), they'd otherwise serve ANY domain to any
  * reseller. Before serving, confirm the caller's own ns_t can read `domain` via a cheap GET /domains/{d}:
  * an NS 401/403 means this token isn't scoped to that domain ⇒ 403. Only needed for reseller
- * cross-domain reads — own-domain reads are trivially in-scope, service mode is the internal tool, and
+ * cross-domain reads — own-domain reads are trivially in-scope, standalone mode is the internal tool, and
  * Office-Manager principals are domain-locked upstream (requireDomain). See SECURITY-REVIEW.md §1.
  */
 async function assertDomainReadable(client: NsClient, domain: string): Promise<void> {
@@ -380,7 +380,7 @@ export default {
     // Public, no-auth route (probes / uptime). Stays open even behind Access.
     if (url.pathname === '/health') return json({ ok: true, configured: !needsSetup(env) }, 200, cors);
 
-    // Cloudflare Access gate (defense in depth for service-mode deployments). Inert unless ACCESS_AUD
+    // Cloudflare Access gate (defense in depth for standalone-mode deployments). Inert unless ACCESS_AUD
     // is set, so local `pnpm dev` and the delegated/portal deployment are unaffected. When active,
     // EVERYTHING below (SPA + data) requires a valid Access token — a direct hit that bypassed Access
     // (e.g. *.workers.dev) is refused, so the service NS token never answers an unauthenticated caller.
@@ -394,7 +394,7 @@ export default {
       // The internal domain-browser SPA is a SERVICE-mode tool (dia). The delegated `portal` env is an
       // injection backend, not an SPA host — and the SPA there is non-functional anyway (its fetches carry
       // no ns_t) — so don't serve it: withhold the internal tooling surface. dia keeps serving it.
-      // Portal mode has no UI: it's the backend half of an injected add-on, and the internal SPA is
+      // Portal backend mode has no UI: it's the backend half of an injected add-on, and the internal SPA is
       // deliberately withheld here (it's a tooling surface, and its fetches carry no ns_t anyway).
       // Still 404 — but say why, because someone who just deployed this and opened the URL deserves
       // better than a bare error. Discloses nothing: no config, no names, no data.
