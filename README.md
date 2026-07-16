@@ -3,6 +3,16 @@
 A deployable toolkit of add-ons for the **NetSapiens Manager Portal**, running on Cloudflare Workers.
 Bring your own NetSapiens credentials and Cloudflare account.
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dszp/ns-portal-kit)
+
+That clones this repo into your own GitHub account and deploys it to your own Cloudflare — you pick the
+repo and Worker names on the way through. There are no bindings to provision (no KV, R2, D1, or Durable
+Objects), so it deploys clean.
+
+It **won't** be working yet: the button can't prompt for credentials, so the first deploy lands with
+placeholder settings. Open `/` and it hands you a checklist of exactly what to set. See
+[Quick start](#quick-start).
+
 - **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu →
   queue → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. A
   viewer SPA with a theme picker, pan/zoom, and PNG export comes with it.
