@@ -1,0 +1,77 @@
+{
+  // Cloudflare Worker config for ns-portal-kit.
+  //
+  // Fork this, set NS_SERVER to your NetSapiens API host, add your route, and deploy. Every
+  // integration is OFF until you configure it, so the baseline is a plain NetSapiens call-flow
+  // viewer with nothing else running.
+  //
+  // Secrets are NEVER in this file — set them per environment with `wrangler secret put <NAME>`:
+  //   NS_API_TOKEN     service-mode API token (service deployments only; omit for portal mode)
+  //   RINGOTEL_API_KEY enables the Ringotel integration (absent ⇒ it does not run at all)
+  //   RINGOTEL_LABEL / RINGOTEL_LABEL_SHORT   white-label display names (default "Ringotel")
+  //   BRAND_NAME       your company name (default: unbranded, "NS Portal Kit")
+  //
+  // Regenerate Env types after edits: `pnpm cf-typegen`.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ns-portal-kit",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-07-10",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // No route here on purpose: add your own custom domain or set workers_dev true for a quick trial.
+  // Deploying with a *.workers.dev URL and a service token would expose your whole NS scope to the
+  // internet — so it's off by default. Use Cloudflare Access (ACCESS_AUD below) or portal mode.
+  "workers_dev": false,
+
+  "vars": {
+    // REQUIRED: your NetSapiens API host (no scheme). Base URL becomes https://{NS_SERVER}/ns-api/v2.
+    "NS_SERVER": "api.example.com",
+
+    // REQUIRED for delegated/portal auth: the Manager Portal host that issues your ns_t.
+    // There is deliberately no default — a default issuer would mean accepting tokens minted by a
+    // portal you don't control. Comma-separate if one backend is fronted by several portal hostnames
+    // (exact match, no wildcards).
+    "NS_PORTAL_ISS": "manage.example.com"
+
+    // ── Optional. Uncomment what you need; each is inert while unset. ──
+    //
+    // Branding. The shared library ships vendor-neutral themes, so your brand lives here, not in code.
+    // "BRAND_ACCENT": "#1a6bb0",        // hex accent for the flow modal + a brand theme
+    //
+    // Access gating (service deployments behind Cloudflare Zero Trust). Presence of ACCESS_AUD turns
+    // the in-Worker check ON; it fails closed, so a direct-route or *.workers.dev hit is refused even
+    // though a service token is configured. Both values are public identifiers, safe to commit.
+    // "ACCESS_AUD": "<your Access application AUD tag>",
+    // "ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com",
+    //
+    // Portal mode: delegated-only (no service-token fallback) + policy-gated. For the injected
+    // Manager Portal backend.
+    // "PORTAL_MODE": "1",
+    // "ALLOWED_ORIGINS": "https://manage.example.com",   // the portal origin the injected fetch runs from
+    //
+    // Domain scoping. ALLOWED_DOMAINS is an app-layer allowlist on top of the token's own NS scope —
+    // set it in dev to keep the tool off the wider fleet. BLOCKED_DOMAINS hides domains with nothing
+    // to diagram.
+    // "ALLOWED_DOMAINS": "acme,demo.12345.service",
+    // "BLOCKED_DOMAINS": "0000.12345.service",
+    //
+    // Enrichment toggles.
+    // "RINGOTEL_PRESENCE": "1",     // 🟢/🔴 presence circles (point-in-time, cached ≤10m)
+    // "NS_DEVICE_DETAILS": "1"      // desk-phone model + registration presence
+  },
+
+  // NB: do NOT also declare ALLOWED_ORIGINS / ALLOWED_DOMAINS in a .dev.vars file. A key present in
+  // both is shadowed by the value here during `wrangler dev`, which silently disables the allowlist.
+
+  "observability": { "enabled": true, "logs": { "head_sampling_rate": 1 } }
+
+  // Multi-environment example — one codebase, isolated scripts, separate rollback:
+  //
+  // "env": {
+  //   "prod": {
+  //     "name": "ns-portal-kit-prod",
+  //     "routes": [{ "pattern": "portal.example.com", "custom_domain": true }],
+  //     "vars": { "NS_SERVER": "api.example.com", "NS_PORTAL_ISS": "manage.example.com", "PORTAL_MODE": "1" }
+  //   }
+  // }
+}

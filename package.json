@@ -1,0 +1,43 @@
+{
+  "name": "ns-portal-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.11.0",
+  "description": "A deployable toolkit of add-ons for the NetSapiens Manager Portal, running on Cloudflare Workers: call-flow diagrams, Ringotel app status, and device enrichment.",
+  "license": "MIT",
+  "author": {
+    "name": "David Szpunar",
+    "url": "https://david.szpunar.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dszp/ns-portal-kit.git"
+  },
+  "bugs": { "url": "https://github.com/dszp/ns-portal-kit/issues" },
+  "homepage": "https://github.com/dszp/ns-portal-kit#readme",
+  "//test": "test:worker is deliberately NOT in `test`: it needs a real domain snapshot, which is customer data and correctly absent from this repo. Run it by hand: pnpm test:worker <snapshot.json>",
+  "scripts": {
+    "flow": "tsx src/cli.ts",
+    "test": "pnpm run test:portal && pnpm run test:ringotel && pnpm run test:nsdevices && pnpm run test:access",
+    "test:worker": "tsx src/worker.selftest.ts",
+    "test:ringotel": "tsx src/ringotel.selftest.ts",
+    "test:nsdevices": "tsx src/nsDevices.selftest.ts",
+    "test:access": "tsx src/access.selftest.ts",
+    "test:portal": "tsx src/portal.selftest.ts",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@dszp/netsapiens-lib": "^0.1.1",
+    "@dszp/ringotel-lib": "^0.1.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5",
+    "tsx": "^4.22.4",
+    "typescript": "^7.0.2",
+    "wrangler": "^4"
+  }
+}

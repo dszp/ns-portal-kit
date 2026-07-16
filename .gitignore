@@ -1,0 +1,24 @@
+# Real customer domain snapshots — NEVER commit (PII: names, emails, DIDs, addresses)
+fixtures/
+# Generated diagrams
+out/
+# Node
+node_modules/
+npm-debug.log*
+# Cloudflare / wrangler
+.dev.vars*
+# ...but keep the committed templates (they hold only placeholders + fake config)
+!.dev.vars.example
+!.dev.vars.local.example
+# Local CLI env — pins CLOUDFLARE_ACCOUNT_ID for `wrangler deploy` (auto-loaded into process.env).
+# Never commit (account binding is deployment config, kept out of the repo). Template is committed.
+.env
+.env.*
+!.env.example
+.wrangler/
+# Generated wrangler types (regenerated on demand by `pnpm cf-typegen`)
+worker-configuration.d.ts
+# Editor / OS
+.DS_Store
+.remember/
+.vscode/

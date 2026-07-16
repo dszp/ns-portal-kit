@@ -1,0 +1,36 @@
+# Copy to `.dev.vars` (gitignored) for local `wrangler dev`. Literal values only — wrangler does not
+# resolve secret-manager references here. Never commit the filled-in copy.
+#
+# NS_SERVER lives in wrangler.jsonc, not here: a key present in BOTH is shadowed by the wrangler.jsonc
+# value during `wrangler dev`, which silently disables things like an allowlist. Keep each key in one
+# place.
+
+# ── Service mode: a stored token reads any domain it is scoped to. ──
+# Omit for portal mode (delegated ns_t only).
+NS_API_TOKEN=""
+
+# ── The Manager Portal host that issues your ns_t. REQUIRED for delegated auth. ──
+# No default by design: a default issuer would accept tokens minted by a portal you don't control.
+# Comma-separate if several portal hostnames front one backend (exact match, no wildcards).
+NS_PORTAL_ISS="manage.example.com"
+
+# ── Bound the blast radius in dev. ──
+# The token's NetSapiens scope is the real boundary; this is an app-layer allowlist on top. Setting it
+# locally keeps the tool off the wider fleet while you work.
+ALLOWED_DOMAINS=""
+BLOCKED_DOMAINS=""
+ALLOWED_ORIGINS=""
+
+# ── Optional: Ringotel. Presence of the key IS the gate. ──
+# Empty ⇒ no Ringotel calls, no enrichment, its routes 404 — the NetSapiens-only baseline.
+RINGOTEL_API_KEY=""
+RINGOTEL_LABEL=""
+RINGOTEL_LABEL_SHORT=""
+RINGOTEL_PRESENCE=""
+
+# ── Optional: branding (config, never source). ──
+BRAND_NAME=""
+BRAND_ACCENT=""
+
+# ── Optional: NetSapiens device details (model + registration presence). ──
+NS_DEVICE_DETAILS=""

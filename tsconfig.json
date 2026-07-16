@@ -1,0 +1,20 @@
+{
+  // Type-checks the DEPLOYABLE Worker surface only (`pnpm typecheck`). The Node-using files —
+  // cli.ts and *.selftest.ts — are excluded (they'd need @types/node); wrangler/esbuild bundles
+  // without type-checking, so this is the gate that catches type errors in shipped Worker code.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // brand.ts imports package.json for VERSION: one source of truth, no drift.
+    "resolveJsonModule": true,
+    "lib": ["ES2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": false,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/worker.ts", "src/access.ts", "src/viewerApp.ts", "src/ringotel.ts", "src/nsDevices.ts"]
+}

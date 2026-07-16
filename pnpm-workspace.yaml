@@ -1,0 +1,11 @@
+# pnpm settings (pnpm 11 reads build-script allowlists here, not package.json).
+# Only these dependencies may run install/postinstall scripts; everything else is blocked.
+# wrangler dev needs workerd (the Workers runtime) + esbuild (bundler); sharp is optional
+# (wrangler image transforms — not used by the viewer, but harmless to allow).
+allowBuilds:
+  esbuild: true
+  workerd: true
+  sharp: true
+minimumReleaseAgeExclude:
+  - '@dszp/netsapiens-lib@0.1.1'
+  - '@dszp/ringotel-lib@0.1.1'
