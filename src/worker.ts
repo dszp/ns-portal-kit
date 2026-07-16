@@ -43,6 +43,7 @@ import {
 import { viewerHtml } from './viewerApp.js';
 import { brandAccent, productName } from './brand.js';
 import { needsSetup, setupHtml } from './setup.js';
+import { serviceTokenBlocked, exposureHtml, BLOCKED_REASON } from './exposure.js';
 import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, orgsStatusForDomains } from './ringotel.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
 import { accessConfig, verifyAccessRequest } from './access.js';
@@ -64,6 +65,10 @@ interface Env {
   /** Manager Portal host that issues ns_t, e.g. "manage.example.com". REQUIRED for delegated auth:
    *  jwt.verify() has no issuer default, so an unset value fails closed (see portalIss()). */
   NS_PORTAL_ISS?: string;
+  /** Deliberate opt-out of the ungated-service-token gate (src/exposure.ts). Truthy ⇒ use NS_API_TOKEN
+   *  even with no Access gate in front. Only for deployments protected some other way (mTLS, a WAF, an
+   *  authenticating proxy). */
+  ALLOW_UNGATED_SERVICE_TOKEN?: string;
 
   // ── Optional: branding (see src/brand.ts) ──────────────────────────────────
   // The shared library ships vendor-neutral themes only, so branding is deploy config, not source.
@@ -286,7 +291,13 @@ async function resolveAuth(request: Request, env: Env): Promise<Auth> {
     if (!verdict.domain) throw new HttpError(403, 'Token has no domain claim; cannot scope reads');
     return { token: bearer, lockedDomain: verdict.domain };
   }
-  if (env.NS_API_TOKEN) return { token: env.NS_API_TOKEN };
+  if (env.NS_API_TOKEN) {
+    // The one place the Worker lends out a credential the caller never proved they should have. Refuse
+    // unless something verifiable is in front of it (Access), it isn't reachable (local dev), or the
+    // operator explicitly accepted the risk. See src/exposure.ts.
+    if (serviceTokenBlocked(env, new URL(request.url).hostname)) throw new HttpError(403, 'Service token is not protected', BLOCKED_REASON);
+    return { token: env.NS_API_TOKEN };
+  }
   throw new HttpError(401, 'Unauthenticated: provide Authorization: Bearer <ns_t>, or configure NS_API_TOKEN (service mode)');
 }
 
@@ -375,6 +386,11 @@ export default {
       // instead. Discloses nothing: presence-only, never values, and it vanishes once configured.
       if (needsSetup(env)) {
         return new Response(setupHtml(env, productName(env)), { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
+      }
+      // Configured, but the stored token has nothing verifiable in front of it. Don't serve the app —
+      // teach them how to put Access there. Replaced by the real app the moment ACCESS_AUD is set.
+      if (serviceTokenBlocked(env, url.hostname)) {
+        return new Response(exposureHtml(env, url.hostname, productName(env)), { status: 403, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
       }
       return new Response(viewerHtml(env), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
     }

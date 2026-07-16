@@ -1,3 +1,4 @@
+import { page } from './pageShell.js';
 /**
  * First-run setup check.
  *
@@ -21,6 +22,7 @@ const PLACEHOLDER_ISS = 'manage.example.com';
 
 export interface SetupEnv {
   NS_SERVER?: string;
+  ALLOW_UNGATED_SERVICE_TOKEN?: string;
   NS_API_TOKEN?: string;
   NS_PORTAL_ISS?: string;
   PORTAL_MODE?: string;
@@ -80,12 +82,12 @@ export function setupIssues(env: SetupEnv): SetupIssue[] {
 
   // A stored token is ambient authority: it answers ANY request that reaches the Worker, with the full
   // NetSapiens scope of that token. Worth saying out loud.
-  if (!portal && set(env.NS_API_TOKEN) && !set(env.ACCESS_AUD)) {
+  if (!portal && set(env.NS_API_TOKEN) && !set(env.ACCESS_AUD) && !truthy(env.ALLOW_UNGATED_SERVICE_TOKEN)) {
     issues.push({
       level: 'warning',
-      title: 'Service token is not behind an access gate',
-      detail: 'Anyone who reaches this Worker gets whatever the stored token can read — a reseller-scoped token means your whole fleet.',
-      fix: 'Set ACCESS_AUD + ACCESS_TEAM_DOMAIN to turn on the in-Worker Cloudflare Access check (it fails closed), and/or ALLOWED_DOMAINS to bound it at the app layer. Keep workers_dev false.',
+      title: 'Service token is not behind an access gate — reads are REFUSED',
+      detail: 'Anyone who reaches this Worker would get whatever the stored token can read, so the token is not used at all until something is in front of it. This is enforced, not advisory (src/exposure.ts).',
+      fix: 'Set ACCESS_AUD + ACCESS_TEAM_DOMAIN to turn on the in-Worker Cloudflare Access check (it fails closed). Or run PORTAL_MODE=1 so each caller brings their own ns_t. Or, if you have your own protection in front, set ALLOW_UNGATED_SERVICE_TOKEN=1 to accept the risk deliberately.',
     });
   }
 
@@ -97,53 +99,17 @@ export function needsSetup(env: SetupEnv): boolean {
   return setupIssues(env).some((i) => i.level === 'blocker');
 }
 
-const esc = (s: string): string =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
 /** A plain, self-contained checklist page. No CDN, no fonts — it must render on a broken deployment. */
 export function setupHtml(env: SetupEnv, productName = 'NS Portal Kit'): string {
-  const issues = setupIssues(env);
-  const rows = issues
-    .map(
-      (i) => `<li class="${i.level}">
-      <div class="t"><span class="tag">${i.level === 'blocker' ? 'must fix' : 'review'}</span>${esc(i.title)}</div>
-      <p>${esc(i.detail)}</p>
-      <p class="fix">${esc(i.fix)}</p>
-    </li>`,
-    )
-    .join('\n');
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Setup — ${esc(productName)}</title>
-<style>
-  :root { color-scheme: light dark; --fg:#1e293b; --dim:#64748b; --bg:#f8fafc; --card:#fff; --line:#e2e8f0; --red:#b91c1c; --amber:#b45309; }
-  @media (prefers-color-scheme: dark) { :root { --fg:#e2e8f0; --dim:#94a3b8; --bg:#0f172a; --card:#1e293b; --line:#334155; --red:#f87171; --amber:#fbbf24; } }
-  * { box-sizing: border-box; }
-  body { margin:0; padding:2.5rem 1.25rem; background:var(--bg); color:var(--fg);
-         font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
-  main { max-width: 46rem; margin: 0 auto; }
-  h1 { font-size:1.4rem; margin:0 0 .35rem; }
-  .sub { color:var(--dim); margin:0 0 1.75rem; }
-  ul { list-style:none; padding:0; margin:0 0 1.75rem; }
-  li { background:var(--card); border:1px solid var(--line); border-left-width:4px; border-radius:8px;
-       padding:1rem 1.1rem; margin-bottom:.75rem; }
-  li.blocker { border-left-color:var(--red); } li.warning { border-left-color:var(--amber); }
-  .t { font-weight:600; display:flex; gap:.6rem; align-items:baseline; }
-  .tag { font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; padding:.1rem .4rem;
-         border-radius:4px; border:1px solid var(--line); color:var(--dim); font-weight:600; }
-  p { margin:.45rem 0 0; color:var(--dim); }
-  .fix { color:var(--fg); }
-  code { background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:.05rem .3rem; font-size:.9em; }
-  footer { color:var(--dim); font-size:.85rem; border-top:1px solid var(--line); padding-top:1rem; }
-</style></head><body><main>
-<h1>${esc(productName)} — finish setup</h1>
-<p class="sub">This deployment is not configured yet, so it can't talk to NetSapiens. Nothing here is
-secret: it reports only which settings are missing, never their values, and this page disappears once
-they're set.</p>
-<ul>
-${rows}
-</ul>
-<footer>Configure <code>vars</code> in <code>wrangler.jsonc</code>, set secrets with
-<code>wrangler secret put &lt;NAME&gt;</code>, then redeploy. Full setup notes are in the README.</footer>
-</main></body></html>`;
+  return page({
+    title: `Setup — ${productName}`,
+    heading: `${productName} — finish setup`,
+    intro:
+      "This deployment is not configured yet, so it can't talk to NetSapiens. Nothing here is secret: it " +
+      'reports only which settings are missing, never their values, and it disappears once they are set.',
+    items: setupIssues(env).map((i) => ({ level: i.level, title: i.title, body: [i.detail, i.fix] })),
+    footer:
+      'Configure <code>vars</code> in <code>wrangler.jsonc</code>, set secrets with ' +
+      '<code>wrangler secret put &lt;NAME&gt;</code>, then redeploy. Every setting is defined in SETUP.md.',
+  });
 }

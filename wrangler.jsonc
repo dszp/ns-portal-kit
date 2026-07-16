@@ -18,10 +18,11 @@
   "compatibility_date": "2026-07-10",
   "compatibility_flags": ["nodejs_compat"],
 
-  // No route here on purpose: add your own custom domain or set workers_dev true for a quick trial.
-  // Deploying with a *.workers.dev URL and a service token would expose your whole NS scope to the
-  // internet — so it's off by default. Use Cloudflare Access (ACCESS_AUD below) or portal mode.
-  "workers_dev": false,
+  // A *.workers.dev URL, so a fresh deploy is reachable and can tell you what to do next. That is safe
+  // here because the Worker REFUSES to use a stored NS_API_TOKEN until something verifiable is in front
+  // of it (Cloudflare Access) — see src/exposure.ts. Until then it serves setup instructions, not data.
+  // Add a custom domain under `routes` when you have one; you can set this false once you do.
+  "workers_dev": true,
 
   "vars": {
     // REQUIRED: your NetSapiens API host (no scheme). Base URL becomes https://{NS_SERVER}/ns-api/v2.

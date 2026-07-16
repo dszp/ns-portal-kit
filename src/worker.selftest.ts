@@ -134,7 +134,12 @@ const ok = (c: boolean, m: string) => {
   ok((await dcall(`/flow?kind=bogus&ref=1`, { Authorization: `Bearer ${tok}` })).status === 400, '[delegated] bad entity → 400');
 
   // ================= SERVICE mode (internal viewer) =================
-  const sEnv = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '' };
+  // ALLOW_UNGATED_SERVICE_TOKEN: these cases test SERVICE-MODE BEHAVIOUR, not deployment posture. The
+  // Worker otherwise refuses to use a stored token on a non-local host with no Access in front (the
+  // gate in src/exposure.ts) -- correctly, and these requests come from https://w.dev. Opting out here
+  // keeps the gate's own coverage in one place (see the [gate] cases below) instead of smeared across
+  // every service-mode assertion.
+  const sEnv = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '', ALLOW_UNGATED_SERVICE_TOKEN: '1' };
   const scall = (path: string, method = 'GET') => worker.fetch(new Request(`https://w.dev${path}`, { method }), sEnv as any, ctx);
 
   const rd = await scall('/domains');
@@ -173,6 +178,25 @@ const ok = (c: boolean, m: string) => {
     rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
     rtUsers = rtExts.map((e) => ({ id: `u${e}`, extension: e, branchid: 'RTBR', name: `RT ${e}`, devs: [{ id: `d${e}`, st: 0 }] }));
+  // ── the ungated-service-token gate (src/exposure.ts) ──
+  // A stored token is ambient authority: it answers whatever reaches the Worker. Refuse to use it
+  // until something verifiable is in front, so a public URL can't borrow the token's NS scope.
+  {
+    const bare = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '' };
+    const call = (env: any, host = 'w.dev') => worker.fetch(new Request(`https://${host}/domains`), env as any, ctx);
+    ok((await call(bare)).status === 403, '[gate] stored token + no Access on a public host -> 403 (not used)');
+    // With ACCESS_AUD set this is STILL 403 -- but from the Access check (no Cf-Access-Jwt-Assertion on
+    // this request), not the exposure gate. Assert the REASON changed hands, not the status.
+    const gated = await call({ ...bare, ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' });
+    ok(!/not protected/i.test(await gated.text()), '[gate] ACCESS_AUD set -> exposure gate opens; Access check takes over');
+    ok((await call({ ...bare, ALLOW_UNGATED_SERVICE_TOKEN: '1' })).status === 200, '[gate] explicit opt-out -> allowed');
+    ok((await call(bare, 'localhost')).status === 200, '[gate] local wrangler dev -> allowed');
+    const root = await worker.fetch(new Request('https://w.dev/'), bare as any, ctx);
+    const body = await root.text();
+    ok(root.status === 403 && /Cloudflare Access/.test(body), '[gate] / teaches Access setup instead of serving the app');
+    ok(!body.includes('service-token'), '[gate] the instructions never echo the token');
+  }
+
     const rEnv = { ...sEnv, RINGOTEL_API_KEY: 'rt-key' };
     const rr = await worker.fetch(new Request(`https://w.dev/flow?domain=${domain}&kind=${kind}&ref=${ref}`), rEnv as any, ctx);
     const rg = await rr.json();

@@ -122,7 +122,52 @@ Truthy values anywhere above are `1`, `true`, `yes`, `on`.
 
 ---
 
-## 4. Where each value goes
+## 6. Switching to portal mode later
+
+A button deploy starts in service mode. Moving to portal mode is a config change, not a rebuild — and
+because the button connected your repo to Workers Builds, **a push deploys it**:
+
+1. In your repo, edit `wrangler.jsonc`:
+   ```jsonc
+   "vars": {
+     "NS_SERVER": "api.yourprovider.com",
+     "NS_PORTAL_ISS": "manage.yourcompany.com",
+     "PORTAL_MODE": "1",
+     "ALLOWED_ORIGINS": "https://manage.yourcompany.com"
+   }
+   ```
+2. Commit and push. Workers Builds redeploys.
+3. Delete the now-unused token: `wrangler secret delete NS_API_TOKEN`. Portal mode never reads it —
+   it returns before the service-token path is even considered — but a leftover credential is a
+   credential, and it would come back into play if `PORTAL_MODE` were ever removed.
+4. Add a custom domain under `routes` (portal-injected JS calling a `*.workers.dev` URL is workable but
+   not something to run in production).
+
+You'll also need JS injected into the Manager Portal to call it — portal mode is a backend, and it
+serves no UI of its own (`/` returns 404 there, deliberately: an internal tool surface shouldn't exist
+on a user-facing endpoint).
+
+Running **both** is the usual end state: an internal service-mode viewer for your team behind Access,
+and a portal-mode backend for your users. That's two wrangler environments, one codebase — see below.
+
+## 7. The service-token gate
+
+If `NS_API_TOKEN` is set and **nothing verifiable is in front of it**, the Worker refuses to use it and
+serves setup instructions instead. That's enforced, not advice.
+
+A stored token answers *any* request that reaches the Worker, with that token's full NetSapiens scope —
+a reseller-scoped token means every domain it covers. A public URL plus a stored token equals your fleet
+for anyone who finds it, so the token stays unused until one of these is true:
+
+| | How |
+|---|---|
+| **Cloudflare Access in front** (recommended) | set `ACCESS_AUD` + `ACCESS_TEAM_DOMAIN`. The Worker verifies the Access JWT itself, so a request that skipped Access is refused too. |
+| **No stored token at all** | `PORTAL_MODE=1` — each caller brings their own `ns_t`, so there's no ambient authority to protect. |
+| **You protect it yourself** | `ALLOW_UNGATED_SERVICE_TOKEN=1` — a deliberate opt-out for mTLS, a WAF, or an authenticating proxy. You own the consequences. |
+
+Local `wrangler dev` is exempt: it isn't internet-reachable.
+
+## 8. Where each value goes
 
 **`vars` in `wrangler.jsonc`** — non-secret, committed, visible in your repo:
 `NS_SERVER`, `NS_PORTAL_ISS`, `ALLOWED_DOMAINS`, `BLOCKED_DOMAINS`, `ALLOWED_ORIGINS`, `PORTAL_MODE`,
@@ -141,7 +186,7 @@ Truthy values anywhere above are `1`, `true`, `yes`, `on`.
 Cloudflare* button reads to build its prompt form, which is why it's kept short — everything else is
 here.
 
-## 5. Multiple deployments
+## 9. Multiple deployments
 
 Wrangler environments give you one codebase, isolated Workers, and separate rollback — an internal
 service-mode viewer and a portal-mode backend, or a sandbox pointing at a different `NS_SERVER`:
