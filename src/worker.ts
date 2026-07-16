@@ -41,7 +41,7 @@ import {
   type EntityRef,
 } from '@dszp/netsapiens-lib';
 import { viewerHtml } from './viewerApp.js';
-import { brandAccent, productName } from './brand.js';
+import { brandAccent, productName, VERSION } from './brand.js';
 import { needsSetup, setupHtml } from './setup.js';
 import { portalModeHtml } from './portalInfo.js';
 import { serviceTokenBlocked, exposureHtml, BLOCKED_REASON } from './exposure.js';
@@ -378,7 +378,11 @@ export default {
     const url = new URL(request.url);
 
     // Public, no-auth route (probes / uptime). Stays open even behind Access.
-    if (url.pathname === '/health') return json({ ok: true, configured: !needsSetup(env) }, 200, cors);
+    // Public, unauthenticated, and deliberately so: an operator (or an uptime probe) must be able to
+    // ask 'is this alive, is it set up, and what is it running?' without credentials. `version` is what
+    // lets a deployment be compared against the CHANGELOG to see if an upgrade is worth pulling. None
+    // of it is sensitive -- the code is public, and `configured` is a boolean, never a value.
+    if (url.pathname === '/health') return json({ ok: true, configured: !needsSetup(env), version: VERSION }, 200, cors);
 
     // Cloudflare Access gate (defense in depth for standalone-mode deployments). Inert unless ACCESS_AUD
     // is set, so local `pnpm dev` and the delegated/portal deployment are unaffected. When active,
