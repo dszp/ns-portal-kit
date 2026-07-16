@@ -263,6 +263,19 @@ function portalIss(env: Env): string {
   return iss;
 }
 
+/**
+ * Feature gate for the Ringotel routes. Portal mode MUST have a principal (verify -> toPrincipal ran),
+ * so an absent one means something is wrong: fail closed rather than sail past the check. Service mode
+ * has no principal BY DESIGN -- there is no delegated identity, only a stored token -- so policy is not
+ * the control there. assertDomainReadable is: it bounds these routes to domains the caller's token can
+ * actually read in NetSapiens, in BOTH modes.
+ */
+function requireFeature(auth: Auth, feature: string, env: Env): void {
+  if (!portalMode(env)) return;                                    // service mode: no principal exists
+  if (!auth.principal) throw new HttpError(403, 'Not authorized'); // portal mode without one: fail closed
+  if (!can(auth.principal, feature, POLICIES)) throw new HttpError(403, `Not authorized: ${feature}`);
+}
+
 /** Resolve auth. Portal mode: delegated-only + policy gate. Else: the existing dual-mode (Bearer wins, else service). */
 async function resolveAuth(request: Request, env: Env): Promise<Auth> {
   const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
@@ -454,8 +467,12 @@ export default {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
-        if (auth.principal && !can(auth.principal, 'ringotel.orgStatus', POLICIES)) throw new HttpError(403, 'Not authorized: ringotel.orgStatus');
-        if (auth.defaultDomain && auth.principal && domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
+        requireFeature(auth, 'ringotel.orgStatus', env);
+        // Bound Ringotel data by NetSapiens scope in EVERY mode. These routes resolve from the
+        // fleet-wide RINGOTEL_API_KEY keyed only by a domain string, so without this a caller could name
+        // any domain in the Ringotel fleet -- including one their NS token cannot read. Skipped only for
+        // a principal's own domain, which they can read by definition.
+        if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
         const refresh = url.searchParams.get('refresh') === 'ringotel';
         return json(await orgStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
@@ -464,15 +481,19 @@ export default {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
-        if (auth.principal && !can(auth.principal, 'ringotel.userStatus', POLICIES)) throw new HttpError(403, 'Not authorized: ringotel.userStatus');
-        if (auth.defaultDomain && auth.principal && domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
+        requireFeature(auth, 'ringotel.userStatus', env);
+        // Bound Ringotel data by NetSapiens scope in EVERY mode. These routes resolve from the
+        // fleet-wide RINGOTEL_API_KEY keyed only by a domain string, so without this a caller could name
+        // any domain in the Ringotel fleet -- including one their NS token cannot read. Skipped only for
+        // a principal's own domain, which they can read by definition.
+        if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
         const refresh = url.searchParams.get('refresh') === 'ringotel';
         return json(await usersStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
 
       if (url.pathname === '/ringotel/orgs') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
-        if (auth.principal && !can(auth.principal, 'ringotel.orgList', POLICIES)) throw new HttpError(403, 'Not authorized: ringotel.orgList');
+        requireFeature(auth, 'ringotel.orgList', env);
         // Scope = the caller's own NS-visible domains (never a client-supplied list). Same block/allow
         // filters as /domains, then resolve enablement in-memory against the cached fleet directory.
         const allow = domainAllowlist(env);

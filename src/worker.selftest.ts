@@ -70,6 +70,12 @@ const nf = () => new Response('[]', { status: 404 });
     if (nsFail500) return new Response('{"code":"internal","message":"secret upstream trace 0xDEADBEEF"}', { status: 500 });
     return j([{ domain, description: 'Test Domain' }]);
   }
+  // A second NS-readable domain with NO Ringotel branch: lets us test 'readable but no org' apart from
+  // 'not readable at all', which the NS-scope probe now rejects earlier and for a different reason.
+  if (path === '/domains/readable.example') return j({ domain: 'readable.example' });
+  // NS answers 401/403 for a domain outside the token's scope -- NOT 404. Model that, or the probe's
+  // real behaviour (401/403 -> 403; anything else rethrown as 502) never gets exercised.
+  if (path === '/domains/forbidden.example') return new Response(JSON.stringify({ error: 'out of scope' }), { status: 401 });
   const b = `/domains/${domain}`;
   if (path === b) return j(raw.domain ?? { domain });
   if (path === `${b}/timeframes`) return j(raw.timeframes ?? []);
@@ -224,17 +230,22 @@ const ok = (c: boolean, m: string) => {
   const ro = await roCall(`/ringotel/org?domain=${domain}&refresh=ringotel`);
   const rob = await ro.json();
   ok(ro.status === 200 && rob.active === true && rob.orgId === 'RTORG' && rob.appDomain === domain && rob.eligible === true, '[ringotel/org] active → {active,orgId,appDomain,eligible}');
-  const roNone = await roCall(`/ringotel/org?domain=no.match.example&refresh=ringotel`);
+  const roNone = await roCall(`/ringotel/org?domain=readable.example&refresh=ringotel`);
   const roNoneB = await roNone.json();
-  ok(roNone.status === 200 && roNoneB.active === false && roNoneB.eligible === true, '[ringotel/org] no org → {active:false,eligible:true}');
+  ok(roNone.status === 200 && roNoneB.active === false && roNoneB.eligible === true, '[ringotel/org] NS-readable but no Ringotel org → {active:false,eligible:true}');
+  // The fleet-wide Ringotel key must not answer for a domain this token cannot read in NS.
+  ok((await roCall(`/ringotel/org?domain=forbidden.example&refresh=ringotel`)).status === 403,
+    '[ringotel/org] domain NOT readable in NS → 403 (service mode is bounded by NS scope too)');
   ok((await roCall(`/ringotel/org?domain=${domain}`, sEnv)).status === 404, '[ringotel/org] no RINGOTEL_API_KEY → 404 (gate)');
 
   const ru = await roCall(`/ringotel/users?domain=${domain}&refresh=ringotel`);
   const rub = await ru.json();
   ok(ru.status === 200 && rub.active === true && rub.users['100'] && rub.users['100'].activated === true && rub.users['100'].presence === 'active' && rub.users['100'].label === 'Online', '[ringotel/users] active → per-ext status map (presence from state)');
-  const ruNone = await roCall(`/ringotel/users?domain=no.match.example&refresh=ringotel`);
+  const ruNone = await roCall(`/ringotel/users?domain=readable.example&refresh=ringotel`);
   const ruNoneB = await ruNone.json();
-  ok(ruNone.status === 200 && ruNoneB.active === false && !ruNoneB.users, '[ringotel/users] no org → {active:false}');
+  ok(ruNone.status === 200 && ruNoneB.active === false && !ruNoneB.users, '[ringotel/users] NS-readable but no Ringotel org → {active:false}');
+  ok((await roCall(`/ringotel/users?domain=forbidden.example&refresh=ringotel`)).status === 403,
+    '[ringotel/users] domain NOT readable in NS → 403');
   ok((await roCall(`/ringotel/users?domain=${domain}`, sEnv)).status === 404, '[ringotel/users] no RINGOTEL_API_KEY → 404 (gate)');
 
   // ================= domain allowlist =================
