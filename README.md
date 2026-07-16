@@ -159,6 +159,8 @@ like `fetch` called as `this.x(...)` throws "Illegal invocation" in workerd but 
   here if a field on the deploy form isn't obvious.
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — how it fits together, the `ns_t` design, the NetSapiens
   routing model, and the rendering traps.
+- **[CHANGELOG.md](./CHANGELOG.md)** — what changed, and how to tell which version you're running
+  (`GET /health` reports it) so you know whether there's anything worth pulling.
 
 ## License
 
