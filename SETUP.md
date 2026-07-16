@@ -31,7 +31,8 @@ separate features.)
 alongside the other add-ons, because injected JS can change any page it runs on.
 
 **Standalone mode is the default** and the simpler place to start. A stored token answers *any* request
-that reaches the Worker, so put it behind a gate — see `ACCESS_AUD`.
+that reaches the Worker, so put it behind a gate — see `ACCESS_AUD` + `ACCESS_TEAM_DOMAIN` (you need both).
+Until you do, the Worker refuses to use the token at all rather than answer an unauthenticated caller.
 
 **Portal backend mode is the advanced path today** — it needs an injection script that isn't published yet (see
 [section 4](#4-portal-backend-mode-what-it-actually-is)). **Portal backend mode holds no NetSapiens credential at all.** Each request carries the caller's `ns_t`, which
@@ -74,8 +75,8 @@ Everything below is off unless set. Blank/absent is always a safe answer.
 
 | Setting | Value | Meaning |
 |---|---|---|
-| `ACCESS_AUD` | Access application AUD tag | **Turns on** the in-Worker Cloudflare Access check. Fails closed. |
-| `ACCESS_TEAM_DOMAIN` | `yourteam.cloudflareaccess.com` | Your Zero Trust team domain. Required with `ACCESS_AUD`. |
+| `ACCESS_AUD` | Access application AUD tag | Half of the Access switch — **needs `ACCESS_TEAM_DOMAIN` too**. On its own it turns nothing on. |
+| `ACCESS_TEAM_DOMAIN` | `yourteam.cloudflareaccess.com` | Your Zero Trust team domain. **Both** vars together turn on the in-Worker Access check (it fails closed). Setting only one is refused, not served: with a stored `NS_API_TOKEN` and nothing verifiable in front of it, the Worker declines to use the token and tells you which var is missing. |
 
 Strongly recommended for standalone mode. Without it, anyone who reaches the Worker gets whatever the
 stored token can read. Both values are public identifiers — safe in `vars`.
@@ -106,7 +107,7 @@ Branding is configuration, never code, so a fork ships unbranded and yours never
 
 | Setting | Value | Meaning |
 |---|---|---|
-| `BRAND_NAME` | `Acme Voice` | Your company name. Produces `"Acme Voice Portal Kit v0.1.1"` and an `"Acme Voice portal"` theme. Unset ⇒ `"NS Portal Kit"` and the neutral theme. |
+| `BRAND_NAME` | `Acme Voice` | Your company name. Produces `"Acme Voice Portal Kit v<version>"` and an `"Acme Voice portal"` theme. Unset ⇒ `"NS Portal Kit"` and the neutral theme. |
 | `BRAND_ACCENT` | `#1a6bb0` | Accent colour. **Must be hex** (`#rgb`/`#rrggbb`); anything else is ignored. |
 | `BRAND_LABEL` | `Acme Portal` | Override the theme's picker label. Defaults to `"<BRAND_NAME> portal"`. |
 

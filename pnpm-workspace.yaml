@@ -6,6 +6,13 @@ allowBuilds:
   esbuild: true
   workerd: true
   sharp: true
+
+# Exclude OUR two libraries from pnpm 11's minimum-release-age cooldown — by BARE NAME (all versions),
+# not a pinned @x.y.z. They're published from sibling repos moments before the public mirror syncs, so
+# a fresh release (0.1.2, 0.1.3, …) is always "too new" exactly when the mirror's `pnpm install` needs
+# it — an exact-version exclude would silently stop covering the next bump and abort the sync. Bare
+# names cover every version; the cooldown still protects third-party deps. (Harmless in this private
+# repo, which uses link:../ deps; load-bearing in the generated mirror, which installs them from npm.)
 minimumReleaseAgeExclude:
-  - '@dszp/netsapiens-lib@0.1.1'
-  - '@dszp/ringotel-lib@0.1.1'
+  - '@dszp/netsapiens-lib'
+  - '@dszp/ringotel-lib'

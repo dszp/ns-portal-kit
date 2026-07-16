@@ -24,6 +24,12 @@
   // Add a custom domain under `routes` when you have one; you can set this false once you do.
   "workers_dev": true,
 
+  // Defense-in-depth rate limit on ns_t live-checks (bounds forged-token upstream amplification against
+  // your NetSapiens core). The Worker also runs an in-isolate per-IP limiter, so this binding is
+  // optional — but declared here so a deploy picks it up automatically. No dashboard step; namespace_id
+  // is any positive integer unique within your account. See src/worker.ts → liveCheckRateLimited.
+  "ratelimits": [{ "name": "JWT_RATE_LIMITER", "namespace_id": "1000", "simple": { "limit": 100, "period": 60 } }],
+
   "vars": {
     // REQUIRED: your NetSapiens API host (no scheme). Base URL becomes https://{NS_SERVER}/ns-api/v2.
     "NS_SERVER": "api.example.com",
@@ -54,9 +60,12 @@
     // Branding. The shared library ships vendor-neutral themes, so your brand lives here, not in code.
     // "BRAND_ACCENT": "#1a6bb0",        // hex accent for the flow modal + a brand theme
     //
-    // Access gating (service deployments behind Cloudflare Zero Trust). Presence of ACCESS_AUD turns
-    // the in-Worker check ON; it fails closed, so a direct-route or *.workers.dev hit is refused even
-    // though a service token is configured. Both values are public identifiers, safe to commit.
+    // Access gating (service deployments behind Cloudflare Zero Trust). Set BOTH values to turn the
+    // in-Worker check ON — ACCESS_AUD alone is NOT enough (the team domain builds the JWKS URL, so
+    // without it the check cannot run). A half-configured deployment is refused rather than served:
+    // the Worker will not use a stored token with nothing verifiable in front of it. Once on, it fails
+    // closed, so a direct-route or *.workers.dev hit is refused even though a service token is
+    // configured. Both values are public identifiers, safe to commit.
     // "ACCESS_AUD": "<your Access application AUD tag>",
     // "ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com",
     //

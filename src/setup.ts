@@ -1,4 +1,5 @@
 import { page } from './pageShell.js';
+import { accessConfig } from './access.js';
 /**
  * First-run setup check.
  *
@@ -83,7 +84,10 @@ export function setupIssues(env: SetupEnv): SetupIssue[] {
 
   // A stored token is ambient authority: it answers ANY request that reaches the Worker, with the full
   // NetSapiens scope of that token. Worth saying out loud.
-  if (!portal && set(env.NS_API_TOKEN) && !set(env.ACCESS_AUD) && !truthy(env.ALLOW_UNGATED_SERVICE_TOKEN)) {
+  // `accessConfig(env) === null`, NOT `!set(env.ACCESS_AUD)`: AUD alone leaves the check inert, so
+  // testing it here would hide this warning from exactly the half-configured deployment that needs it.
+  // The exposure gate keys off accessConfig too — these three must agree or they lie to each other.
+  if (!portal && set(env.NS_API_TOKEN) && accessConfig(env) === null && !truthy(env.ALLOW_UNGATED_SERVICE_TOKEN)) {
     issues.push({
       level: 'warning',
       title: 'Service token is not behind an access gate — reads are REFUSED',
@@ -96,14 +100,21 @@ export function setupIssues(env: SetupEnv): SetupIssue[] {
   // src/access.ts). With only one, the check can't run and is silently inert — and because the exposure
   // gate keys off the same accessConfig, a stored token is then REFUSED (fail-closed). So an operator who
   // set ACCESS_AUD expecting protection instead gets a dead deployment. Name the missing half out loud.
-  if (set(env.ACCESS_AUD) && !set(env.ACCESS_TEAM_DOMAIN)) {
+  // Symmetric on purpose: EITHER half alone is the same dead deployment, and an operator who set only
+  // the team domain is just as entitled to be told which var is missing as one who set only the AUD.
+  const missingHalf = set(env.ACCESS_AUD) && !set(env.ACCESS_TEAM_DOMAIN)
+    ? { absent: 'ACCESS_TEAM_DOMAIN', present: 'ACCESS_AUD', fix: 'Set vars.ACCESS_TEAM_DOMAIN to your yourteam.cloudflareaccess.com host, or remove ACCESS_AUD if you did not mean to enable Access. Then redeploy.' }
+    : set(env.ACCESS_TEAM_DOMAIN) && !set(env.ACCESS_AUD)
+      ? { absent: 'ACCESS_AUD', present: 'ACCESS_TEAM_DOMAIN', fix: 'Set vars.ACCESS_AUD to your Access application\'s AUD tag (Zero Trust → Access → your app → Overview), or remove ACCESS_TEAM_DOMAIN if you did not mean to enable Access. Then redeploy.' }
+      : null;
+  if (missingHalf) {
     issues.push({
       level: !portal && set(env.NS_API_TOKEN) ? 'blocker' : 'warning',
-      title: 'Cloudflare Access is half-configured (ACCESS_TEAM_DOMAIN missing)',
+      title: `Cloudflare Access is half-configured (${missingHalf.absent} missing)`,
       detail:
-        'ACCESS_AUD is set but ACCESS_TEAM_DOMAIN is not. The Access check needs both, so it cannot run — ' +
+        `${missingHalf.present} is set but ${missingHalf.absent} is not. The Access check needs both, so it cannot run — ` +
         'Access is NOT verifying anyone, and a stored service token is refused until this is fixed.',
-      fix: 'Set vars.ACCESS_TEAM_DOMAIN to your yourteam.cloudflareaccess.com host, or remove ACCESS_AUD if you did not mean to enable Access. Then redeploy.',
+      fix: missingHalf.fix,
     });
   }
 

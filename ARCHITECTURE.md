@@ -15,7 +15,11 @@ CLI, or in a browser. Ringotel talks through
 | `brand.ts` | deploy-time branding → a theme layered onto the neutral registry. |
 | `ringotel.ts` | the optional Ringotel integration, behind one gate. |
 | `nsDevices.ts` | optional desk-phone model + registration enrichment. |
-| `access.ts` | Cloudflare Access JWT verification (RS256/JWKS), env-gated. |
+| `access.ts` | Cloudflare Access JWT verification (RS256/JWKS). Active only when **both** `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` are set. |
+| `exposure.ts` | the service-token gate: refuses to use a stored `NS_API_TOKEN` when nothing verifiable is in front of it, and serves the teaching page instead. |
+| `setup.ts` | the unconfigured-deployment checklist: which settings are unset, and the fix for each. Presence only, never values. |
+| `pageShell.ts` | the shared HTML shell + `esc()` used by the setup / exposure / portal-info pages. |
+| `portalInfo.ts` | the terse 404 a portal-backend-mode deployment returns at `/`. Deliberately static — no config, no branding. |
 | `cli.ts` | dev CLI over snapshot files (Node-only). |
 | `*.selftest.ts` | offline suites; stub `caches` + `fetch`. |
 
@@ -23,8 +27,10 @@ CLI, or in a browser. Ringotel talks through
 
 **Standalone mode** — a stored token reads any domain it's scoped to. The token's NetSapiens scope is the
 real boundary; `ALLOWED_DOMAINS` is an app-layer gate on top. Pair it with Cloudflare Access
-(`ACCESS_AUD`): the in-Worker check fails closed, so the token only ever answers requests that already
-passed the Zero Trust policy — a `*.workers.dev` or direct-route bypass is refused.
+(`ACCESS_AUD` **+** `ACCESS_TEAM_DOMAIN` — both, or the check can't run): the in-Worker check fails
+closed, so the token only ever answers requests that already passed the Zero Trust policy — a
+`*.workers.dev` or direct-route bypass is refused. Until something verifiable is in front of the token,
+`exposure.ts` refuses to use it at all rather than answer an unauthenticated caller.
 
 **Portal backend mode** — delegated only, no service-token fallback. `verify → toPrincipal → can()` gates every
 request; resellers unlock cross-domain reads, everyone else is domain-locked.

@@ -8,16 +8,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 **Which version am I running?** `GET /health` on your deployment reports it:
 
 ```json
-{ "ok": true, "configured": true, "version": "0.1.2" }
+{ "ok": true, "configured": true, "version": "0.1.3" }
 ```
 
 Compare that against the latest entry below to see whether there's anything worth pulling. Updating is
 `git fetch upstream && git merge upstream/main` — see
 [SETUP.md → Getting updates later](./SETUP.md#7-getting-updates-later).
 
-## [Unreleased]
+## [0.1.3] — 2026-07-16
 
-_Nothing yet._
+### Security
+
+- **A forced Ringotel refresh (`?refresh=ringotel`) is now an operator capability, not a caller one.**
+  It bypasses the ~1h fleet-directory cache and re-digs the whole fleet against the shared Ringotel
+  key (~200 upstream calls). Because the per-user status route admits Office Managers, a low-privilege
+  tenant user could loop it and exhaust or get the shared key throttled — breaking Ringotel features
+  for **every** customer. Now: only reseller/super-user principals may force a refresh, AND the refresh
+  is coalesced fleet-wide (an actual re-dig happens at most once per minute regardless of how many
+  callers ask). Standalone mode (an operator's own Access-gated tool) is unaffected.
+- **Policy now applies to every delegated request, not only when `PORTAL_MODE` parses.** A blank or
+  mistyped `PORTAL_MODE` (e.g. `enabled`) used to read as "off" and serve delegated `ns_t` reads with
+  the policy gate bypassed. Two fixes: a valid Bearer `ns_t` **always** yields a policy-gated principal
+  regardless of the mode flag, and an unrecognized non-empty `PORTAL_MODE` is now a hard configuration
+  error (500) instead of silently disabling the gate. `/health` still answers so probes work.
+- **Rate limit on `ns_t` live-checks (defense-in-depth vs forged-token amplification).** A forged token
+  needs only `aud:"ns"`, the public portal host, and a future expiry — no signing key — so a flood of
+  distinct tokens could drive one upstream `GET /jwt` per token against your NetSapiens core. The
+  Worker now caps cache-*missing* live-checks per client IP (only the expensive path; cached traffic,
+  even a busy office behind one NAT, is never throttled). Two layers: an always-on in-isolate limiter,
+  plus the optional Cloudflare Rate Limiting binding (`JWT_RATE_LIMITER`, declared in `wrangler.jsonc`)
+  for a managed per-colo cap. Over-limit ⇒ 429.
+- **Security response headers on every response.** `Content-Security-Policy` (a non-breaking subset:
+  `frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`), `X-Frame-Options:
+  DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. The viewer is not meant to
+  be framed; this forbids it.
+- **The ELK diagram-layout plugin is now opt-in (`?engine=elk`), not on by default.** It loads from a
+  jsDelivr endpoint that can't carry Subresource Integrity and pulls floating transitive dependencies,
+  so a CDN/dependency compromise could run in the authenticated viewer. The default (dagre) is bundled
+  with the SRI-pinned Mermaid, so a default session loads no un-integrity-checked code; users who want
+  ELK's tidier layout opt in per session.
+- **The portal-mode root page no longer discloses `BRAND_NAME`.** 0.1.2 made that page terse and
+  neutral, but left the branded product name in its `<title>` — so a white-label deployment still
+  identified its operator to any unauthenticated visitor who found the URL (portal-mode deployments
+  have no Access gate in front, and the URL is referenced from client-visible portal JavaScript). The
+  value was escaped, so this was never an injection — only a disclosure. The page is now genuinely
+  static, as its own comment always claimed.
+- **The theme registry is escaped for its `<script>` context.** `BRAND_NAME`/`BRAND_LABEL` reach the
+  viewer inside a JSON literal in an inline `<script>`; a `</script>` in a brand label ended the
+  element early. Operator-controlled, so self-inflicted rather than an attack path — but the escape is
+  free. Values are unchanged (`<` parses back to `<`).
+
+### Fixed
+
+- **The super-user scope is matched by synonym.** A NetSapiens core that emits `superuser` or
+  `super-user` (rather than `Super User`) is no longer denied at the policy gate.
+- **The setup checklist now names either missing Access variable, not just one.** `ACCESS_TEAM_DOMAIN`
+  without `ACCESS_AUD` produced only a generic warning, while the reverse named the missing var. Both
+  halves are the same dead configuration and both now say which one is absent.
+
+### Documentation
+
+- **Corrected the Access rule everywhere it was stated wrong.** Several comments and docs said the
+  in-Worker Cloudflare Access check turns on with `ACCESS_AUD` alone. It does not — it needs
+  `ACCESS_AUD` **and** `ACCESS_TEAM_DOMAIN`, because the team domain builds the JWKS URL the check
+  verifies against. This was the exact misconception behind the 0.1.1 fail-open fix, still sitting in
+  the docs a reader would consult first. Behavior is unchanged; the docs now match it.
+- `ARCHITECTURE.md`'s file table was missing `exposure.ts`, `setup.ts`, `pageShell.ts` and
+  `portalInfo.ts` — including the service-token gate the README leads with.
+- `README.md` said `pnpm deploy`, which resolves to pnpm's builtin deploy command in a workspace repo
+  and errors instead of deploying. It's `pnpm run deploy`.
+- `SETUP.md`'s `BRAND_NAME` example no longer hard-codes a version number that drifts every release.
 
 ## [0.1.2] — 2026-07-16
 
@@ -92,5 +152,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.3
+[0.1.2]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.2
+[0.1.1]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.1
 [0.1.0]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.0

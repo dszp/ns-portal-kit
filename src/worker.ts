@@ -22,6 +22,8 @@
 
 import {
   verify,
+  tokenKey,
+  assertBareServer,
   NsClient,
   NsApiError,
   fetchDomainSnapshot,
@@ -121,6 +123,61 @@ interface Env {
    * byte-identical. See src/portal.selftest.ts.
    */
   PORTAL_MODE?: string;
+
+  /**
+   * OPTIONAL Cloudflare Rate Limiting binding for ns_t live-check throttling (defense-in-depth, see
+   * rateLimitLiveCheck). Declared in wrangler.jsonc as a `ratelimits` binding; absent ⇒ the in-isolate
+   * limiter still applies, so a fork with no binding is safe, just per-isolate. Structural type so the
+   * offline selftests satisfy Env without a real binding.
+   */
+  JWT_RATE_LIMITER?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+}
+
+// ── ns_t live-check rate limit (defense-in-depth vs forged-token upstream amplification) ─────────────
+// A forged ns_t needs only aud:"ns" + the PUBLIC portal host + a future exp — no signing key — so an
+// attacker can mint N distinct tokens, each a verdict-cache MISS → N live GET /jwt calls to the NS core.
+// The live check is still the real authority; this only bounds how fast ONE client can force those
+// upstream calls. The Worker is the only place a cap can live: NS sees Cloudflare egress IPs, not the
+// caller's, so an NS-side limit can't tell the attacker from the legitimate portal. TWO layers:
+//   1. an in-isolate per-IP token bucket — zero-config, portable, always on (survives a missing binding);
+//   2. the optional CF Rate Limiting binding (env.JWT_RATE_LIMITER) — per-colo, managed, cross-isolate.
+// Only CACHE-MISSING checks are counted (a cache hit does no upstream call), so legitimate cached
+// traffic — even a busy office behind one NAT IP — is never throttled.
+const LIVE_CHECK_LIMIT = 30; // cache-missing live checks per IP per window
+const LIVE_CHECK_WINDOW_MS = 60_000;
+const ipBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function clientIp(request: Request): string {
+  const xff = request.headers.get('X-Forwarded-For');
+  return request.headers.get('CF-Connecting-IP') || (xff ? xff.split(',')[0]!.trim() : '') || 'unknown';
+}
+
+function inIsolateOverLimit(ip: string, nowMs: number): boolean {
+  if (ipBuckets.size > 5000) for (const [k, v] of ipBuckets) if (v.resetAt <= nowMs) ipBuckets.delete(k); // bound the map
+  const b = ipBuckets.get(ip);
+  if (!b || b.resetAt <= nowMs) {
+    ipBuckets.set(ip, { count: 1, resetAt: nowMs + LIVE_CHECK_WINDOW_MS });
+    return false;
+  }
+  b.count++;
+  return b.count > LIVE_CHECK_LIMIT;
+}
+
+/** True ⇒ this IP has exceeded the cache-missing live-check budget; the caller should 429. Layer 1
+ *  (in-isolate) always runs; layer 2 (CF binding) runs when configured and never fails the request on
+ *  a binding hiccup (layer 1 still stands). */
+async function liveCheckRateLimited(request: Request, env: Env): Promise<boolean> {
+  const ip = clientIp(request);
+  if (inIsolateOverLimit(ip, Date.now())) return true;
+  if (env.JWT_RATE_LIMITER) {
+    try {
+      const { success } = await env.JWT_RATE_LIMITER.limit({ key: `jwt:${ip}` });
+      if (!success) return true;
+    } catch {
+      /* binding unavailable this request — layer 1 already applied */
+    }
+  }
+  return false;
 }
 
 /** Normalize a domain for comparison: NS domains are lowercase; guard against case / trailing-dot
@@ -131,6 +188,24 @@ const normDomain = (d: string): string => d.trim().toLowerCase().replace(/\.+$/,
 function portalMode(env: Env): boolean {
   const v = (env.PORTAL_MODE ?? '').trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+/**
+ * PORTAL_MODE must be unset (⇒ standalone) or a recognized boolean. A typo like `enabled` used to
+ * read as "off" via portalMode() — silently disabling the portal policy gate while the delegated
+ * reads still served. Return a message (⇒ 500, fail closed) for any unrecognized non-empty value so
+ * the misconfiguration is loud, not silent. Names no value (it's operator config, but this is served
+ * pre-auth). Pairs with the belt-and-braces fix: policy now applies to any delegated principal, mode
+ * flag or not (see resolveAuth / requireFeature).
+ */
+function portalModeConfigError(env: Env): string | null {
+  const raw = (env.PORTAL_MODE ?? '').trim();
+  if (raw === '') return null;
+  const v = raw.toLowerCase();
+  const known = ['1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'];
+  return known.includes(v)
+    ? null
+    : 'PORTAL_MODE is set to an unrecognized value. Use "1" to enable portal backend mode, or leave it unset for standalone. A typo must not silently disable the policy gate.';
 }
 
 /**
@@ -146,6 +221,12 @@ const POLICIES: FeaturePolicies = {
   'callflow.view': [{ scopes: ['Super User', 'Reseller'] }],
   // Ringotel "App Active/Not Active" banner (/ringotel/org): reseller-level only.
   'ringotel.orgStatus': [{ scopes: ['Super User', 'Reseller'] }],
+  // Force a fleet-directory cache refresh (?refresh=ringotel): reseller-level only. A refresh bypasses
+  // the ~1h directory cache and re-digs the WHOLE fleet against the shared RINGOTEL_API_KEY (~200
+  // upstream calls). ringotel.userStatus admits Office Managers, so without this an OM could loop
+  // ?refresh and exhaust/ban the fleet key for every customer. Reseller-only, and additionally
+  // coalesced fleet-wide in getDirectory so even a reseller can't loop it into an unbounded dig.
+  'ringotel.refresh': [{ scopes: ['Super User', 'Reseller'] }],
   // Per-user app-status column (/ringotel/users): resellers + office managers (real or masked).
   'ringotel.userStatus': [{ scopes: ['Super User', 'Reseller', 'Office Manager'] }],
   // App-status column on the reseller domain list (/ringotel/orgs): reseller-level only.
@@ -215,7 +296,19 @@ class CacheApiVerdictCache implements VerdictCache {
 function corsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get('Origin') ?? '';
   const allowed = (env.ALLOWED_ORIGINS ?? '').split(',').map((o) => o.trim().toLowerCase()).filter(Boolean);
-  const h: Record<string, string> = { Vary: 'Origin' };
+  // Baseline security headers on EVERY response (spread into all of them). The CSP is the deliberately
+  // NON-BREAKING subset: it does NOT restrict script-src (the viewer runs inline modules + a
+  // SRI-pinned Mermaid from jsDelivr, so a script-src policy would need 'unsafe-inline' or a nonce
+  // refactor for little gain) — it locks down the cheap, high-value directives instead. The viewer is
+  // never framed, so `frame-ancestors 'none'` (+ X-Frame-Options for old browsers) forbids embedding;
+  // object-src/base-uri/form-action 'none' kill plugin, <base>-hijack, and form-exfil vectors.
+  const h: Record<string, string> = {
+    Vary: 'Origin',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+    'Referrer-Policy': 'no-referrer',
+  };
   if (origin && allowed.includes(origin.toLowerCase())) {
     h['Access-Control-Allow-Origin'] = origin; // echo the exact allowed origin (never '*')
     h['Access-Control-Allow-Methods'] = 'GET, OPTIONS';
@@ -275,18 +368,40 @@ function portalIss(env: Env): string | string[] {
  * actually read in NetSapiens, in BOTH modes.
  */
 function requireFeature(auth: Auth, feature: string, env: Env): void {
-  if (!portalMode(env)) return;                                    // standalone mode: no principal exists
-  if (!auth.principal) throw new HttpError(403, 'Not authorized'); // portal backend mode without one: fail closed
+  // Policy applies whenever a delegated identity is present — NOT only when PORTAL_MODE parses. A
+  // principal is built for every valid Bearer ns_t now (resolveAuth), so a delegated caller can't
+  // dodge feature gating by the deployment forgetting/mistyping the mode flag. Standalone SERVICE mode
+  // has no principal by design (there is no delegated identity, only a stored token); there,
+  // assertDomainReadable is the control, not policy.
+  if (!auth.principal) return;
   if (!can(auth.principal, feature, POLICIES)) throw new HttpError(403, `Not authorized: ${feature}`);
 }
 
-/** Resolve auth. Portal backend mode: delegated-only + policy gate. Else: the existing dual-mode (Bearer wins, else service). */
+/**
+ * Resolve auth. A valid Bearer ns_t ALWAYS yields a policy-gated principal, regardless of PORTAL_MODE
+ * — so there is no "delegated but unpoliced" path (the W2 fix: a blank/typo'd PORTAL_MODE used to
+ * serve delegated reads with every gate bypassed). Portal mode's only remaining difference is that it
+ * has NO service-token fallback. Standalone service mode (a stored token, no bearer) is unchanged.
+ */
 async function resolveAuth(request: Request, env: Env): Promise<Auth> {
   const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
 
-  if (portalMode(env)) {
-    if (!bearer) throw new HttpError(401, 'The svc portal requires Authorization: Bearer <ns_t>');
-    const verdict = await verify(bearer, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), cache: new CacheApiVerdictCache(caches.default) });
+  if (bearer) {
+    const vcache = new CacheApiVerdictCache(caches.default);
+    // Rate-limit ONLY the expensive path. Peek the verdict cache with the SAME key verify() uses
+    // (tokenKey(token, assertBareServer(server)) — must mirror the lib); a hit is served without an
+    // upstream call, so it doesn't count. A miss would drive a live /jwt roundtrip → apply the per-IP
+    // budget and 429 over it, so a flood of distinct forged tokens can't amplify against the NS core.
+    let cachedHit = false;
+    try {
+      cachedHit = !!(await vcache.get(await tokenKey(bearer, assertBareServer(env.NS_SERVER))));
+    } catch {
+      /* bad server / cache miss: treat as a miss and let verify() produce the real verdict */
+    }
+    if (!cachedHit && (await liveCheckRateLimited(request, env))) {
+      throw new HttpError(429, 'Too many authentication attempts; please slow down');
+    }
+    const verdict = await verify(bearer, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), cache: vcache });
     if (!verdict.ok) {
       const status = verdict.live === 'invalid' ? (verdict.statusCode ?? 401) : verdict.live === 'error' ? 502 : 401;
       throw new HttpError(status, 'JWT validation failed', verdict.reason);
@@ -300,15 +415,9 @@ async function resolveAuth(request: Request, env: Env): Promise<Auth> {
       : { token: bearer, principal, lockedDomain: verdict.domain };   // as-user, domain-locked
   }
 
-  if (bearer) {
-    const verdict = await verify(bearer, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), cache: new CacheApiVerdictCache(caches.default) });
-    if (!verdict.ok) {
-      const status = verdict.live === 'invalid' ? (verdict.statusCode ?? 401) : verdict.live === 'error' ? 502 : 401;
-      throw new HttpError(status, 'JWT validation failed', verdict.reason);
-    }
-    if (!verdict.domain) throw new HttpError(403, 'Token has no domain claim; cannot scope reads');
-    return { token: bearer, lockedDomain: verdict.domain };
-  }
+  // No bearer. Portal backend mode is delegated-only: never fall back to the stored token.
+  if (portalMode(env)) throw new HttpError(401, 'The svc portal requires Authorization: Bearer <ns_t>');
+
   if (env.NS_API_TOKEN) {
     // The one place the Worker lends out a credential the caller never proved they should have. Refuse
     // unless something verifiable is in front of it (Access), it isn't reachable (local dev), or the
@@ -317,6 +426,19 @@ async function resolveAuth(request: Request, env: Env): Promise<Auth> {
     return { token: env.NS_API_TOKEN };
   }
   throw new HttpError(401, 'Unauthenticated: provide Authorization: Bearer <ns_t>, or configure NS_API_TOKEN (standalone mode)');
+}
+
+/**
+ * Is a forced Ringotel/device cache refresh permitted for THIS caller? `?refresh=ringotel` bypasses
+ * the ~1h fleet-directory cache and re-digs against the shared RINGOTEL_API_KEY, so it's an operator
+ * capability, not a caller one. Standalone mode (dia) is the operator's own Access-gated tool → allowed.
+ * With a delegated principal → reseller/super-user only (ringotel.refresh); a looping Office Manager is
+ * refused and simply reads the cache. getDirectory additionally coalesces refreshes fleet-wide.
+ */
+function refreshRequested(url: URL, auth: Auth, env: Env): boolean {
+  if (url.searchParams.get('refresh') !== 'ringotel') return false;
+  if (!auth.principal) return true;                 // standalone service tool (behind Access): operator-controlled
+  return can(auth.principal, 'ringotel.refresh', POLICIES);
 }
 
 /** Which domain this request may read: delegated is locked to its own; service takes ?domain.
@@ -347,8 +469,8 @@ function requireDomain(auth: Auth, url: URL, env: Env): string {
  * cache-fronted). Throws (401/502) if the fresh check fails.
  */
 async function maybeElevate(auth: Auth, domain: string, env: Env): Promise<void> {
-  if (!portalMode(env) || !auth.principal || !auth.defaultDomain) return; // only reseller portal principals
-  if (domain === normDomain(auth.principal.domain)) return;               // own-domain read: cache is fine
+  if (!auth.principal || !auth.defaultDomain) return;         // only reseller principals (any mode) read cross-domain
+  if (domain === normDomain(auth.principal.domain)) return;   // own-domain read: cache is fine
   const fresh = await verify(auth.token, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), forceFresh: true, cache: new CacheApiVerdictCache(caches.default) });
   if (!fresh.ok) {
     const status = fresh.live === 'invalid' ? (fresh.statusCode ?? 401) : 502;
@@ -388,8 +510,16 @@ export default {
     // of it is sensitive -- the code is public, and `configured` is a boolean, never a value.
     if (url.pathname === '/health') return json({ ok: true, configured: !needsSetup(env), version: VERSION }, 200, cors);
 
-    // Cloudflare Access gate (defense in depth for standalone-mode deployments). Inert unless ACCESS_AUD
-    // is set, so local `pnpm dev` and the delegated/portal deployment are unaffected. When active,
+    // Fail closed on a mistyped PORTAL_MODE (e.g. "enabled") — after /health so probes still work, and
+    // before every other route so a typo can't serve a single delegated read with the gate disabled.
+    const pmErr = portalModeConfigError(env);
+    if (pmErr) return json({ error: 'Server misconfigured', reason: pmErr }, 500, cors);
+
+    // Cloudflare Access gate (defense in depth for standalone-mode deployments). Inert unless BOTH
+    // ACCESS_AUD and ACCESS_TEAM_DOMAIN are set (accessConfig() !== null — AUD alone cannot build the
+    // JWKS URL, so the check can't run), so local `pnpm dev` and the portal deployment are unaffected.
+    // The exposure gate keys off the SAME predicate on purpose: believing AUD alone meant "protected"
+    // was the 356e6d8 fail-open. When active,
     // EVERYTHING below (SPA + data) requires a valid Access token — a direct hit that bypassed Access
     // (e.g. *.workers.dev) is refused, so the service NS token never answers an unauthenticated caller.
     const accessCfg = accessConfig(env);
@@ -406,8 +536,9 @@ export default {
       // deliberately withheld here (it's a tooling surface, and its fetches carry no ns_t anyway).
       // Still 404 — but say why, because someone who just deployed this and opened the URL deserves
       // better than a bare error. Discloses nothing: no config, no names, no data.
+      // Deliberately NOT productName(env): BRAND_NAME is a secret, and this page is unauthenticated.
       if (portalMode(env)) {
-        return new Response(portalModeHtml(productName(env)), { status: 404, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
+        return new Response(portalModeHtml(), { status: 404, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
       }
       // A fresh fork (C3 / the deploy button) cannot be prompted for config, so it arrives here with
       // placeholders and would otherwise serve an SPA that dies on its first fetch. Say what's missing
@@ -459,7 +590,7 @@ export default {
         // and the graph is byte-identical to the NS-only baseline. Best-effort & isolated: it never
         // changes this handler's status (enrichFlowGraph swallows its own errors).
         if (url.searchParams.get('enrich') !== '0') {
-          const refresh = url.searchParams.get('refresh') === 'ringotel';
+          const refresh = refreshRequested(url, auth, env);
           if (nsDeviceDetailsEnabled(env)) await enrichDeviceDetails(graph, client, caches.default, domain, { refresh });
           if (ringotelEnabled(env)) await enrichFlowGraph(graph, domain, env, caches.default, { refresh });
         }
@@ -481,7 +612,7 @@ export default {
         // any domain in the Ringotel fleet -- including one their NS token cannot read. Skipped only for
         // a principal's own domain, which they can read by definition.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
-        const refresh = url.searchParams.get('refresh') === 'ringotel';
+        const refresh = refreshRequested(url, auth, env);
         return json(await orgStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
 
@@ -495,7 +626,7 @@ export default {
         // any domain in the Ringotel fleet -- including one their NS token cannot read. Skipped only for
         // a principal's own domain, which they can read by definition.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
-        const refresh = url.searchParams.get('refresh') === 'ringotel';
+        const refresh = refreshRequested(url, auth, env);
         return json(await usersStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
 
@@ -509,7 +640,7 @@ export default {
         let doms = (auth.lockedDomain ? [{ domain: auth.lockedDomain }] : await listDomains(client)).map((d) => normDomain(d.domain));
         if (allow) doms = doms.filter((d) => allow.has(d));
         if (block.size) doms = doms.filter((d) => !block.has(d));
-        const refresh = url.searchParams.get('refresh') === 'ringotel';
+        const refresh = refreshRequested(url, auth, env);
         return json(await orgsStatusForDomains(doms, env, caches.default, { refresh }), 200, cors);
       }
 

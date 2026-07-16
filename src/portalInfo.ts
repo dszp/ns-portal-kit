@@ -9,10 +9,21 @@
  * the portal backend has no reason to explain itself in a browser.
  *
  * Discloses nothing — no config, no hostnames, no data, no mechanism. Same bytes for every deployment.
+ *
+ * That last sentence is load-bearing, so this function takes NO arguments. It used to accept
+ * productName(env), which put BRAND_NAME — a value brand.ts tells you to store as a SECRET — into
+ * the <title> of an unauthenticated page (portal-mode deployments have no Access gate in front).
+ * Escaped, so never an injection; but it fingerprinted the white-label operator to exactly the
+ * client this page exists to bore. Keep it static: no env, no config, no branding.
  */
+
 import { esc } from './pageShell.js';
 
-export function portalModeHtml(productName = 'NS Portal Kit'): string {
+/** The neutral product name. Deliberately NOT brand.ts's productName(env) — see above. */
+const NEUTRAL_NAME = 'NS Portal Kit';
+
+export function portalModeHtml(): string {
+  const productName = NEUTRAL_NAME;
   const msg =
     'This host serves application requests and has no public web content. ' +
     'Setup documentation contains admin configuration instructions.';

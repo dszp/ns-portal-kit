@@ -10,10 +10,10 @@ importers:
     dependencies:
       '@dszp/netsapiens-lib':
         specifier: ^0.1.1
-        version: 0.1.1
+        version: 0.1.2
       '@dszp/ringotel-lib':
         specifier: ^0.1.1
-        version: 0.1.1
+        version: 0.1.2
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^5
@@ -80,12 +80,12 @@ packages:
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
     engines: {node: '>=12'}
 
-  '@dszp/netsapiens-lib@0.1.1':
-    resolution: {integrity: sha512-ucqQarijUmH8lahuEqOHkuDbA+x6N9GgV2iqGZGmwTnGaVIl5VBuqdfDMAYvYGp0cC+ZV3LX0NkHnggHFiiofQ==}
+  '@dszp/netsapiens-lib@0.1.2':
+    resolution: {integrity: sha512-4AbclTZOqlUYyoik9H4DvjPwHKU9pXNX7fgb4wdkPCESXrAilDJprEqMsOZgx7BJObTcIc51ld24vAn2bP+s8w==}
     engines: {node: '>=20'}
 
-  '@dszp/ringotel-lib@0.1.1':
-    resolution: {integrity: sha512-MsHW1CMf2imqJFq0St8vz6wZDbRjijprl0CXPOWwfipmmhxHNpKy7/1Wp3tVe12wwhuSVhrQXSughdRn0YbWyQ==}
+  '@dszp/ringotel-lib@0.1.2':
+    resolution: {integrity: sha512-m9siOUHFsJDRi6O4NHg1pEqpgzi77LXuTV7327nV7QAuQWMP9Yb4HtoFGeqcICHivSUVEHZIJesdwetauYEmAA==}
     engines: {node: '>=20'}
 
   '@emnapi/runtime@1.11.2':
@@ -682,9 +682,9 @@ snapshots:
     dependencies:
       '@jridgewell/trace-mapping': 0.3.9
 
-  '@dszp/netsapiens-lib@0.1.1': {}
+  '@dszp/netsapiens-lib@0.1.2': {}
 
-  '@dszp/ringotel-lib@0.1.1': {}
+  '@dszp/ringotel-lib@0.1.2': {}
 
   '@emnapi/runtime@1.11.2':
     dependencies:

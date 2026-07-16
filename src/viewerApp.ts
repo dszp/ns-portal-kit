@@ -9,13 +9,30 @@
  * `look`/`theme`/`themeVariables` frontmatter — so switching themes is instant and needs no server
  * round-trip. The whole SPA chrome re-skins via CSS variables. Themes mirror the shared
  * netsapiens-lib theme registry (THEMES), injected into the page as data — one source of truth
- * shared with ns-onboard's gallery. Adding a theme in the lib makes it appear here automatically.
+ * shared with the host gallery. Adding a theme in the lib makes it appear here automatically.
  *
  * Self-contained HTML (inline CSS/JS, Mermaid from CDN). Not the client-visible portal injection —
  * that's a separate, neutral secondary script (Phase 4). This is the internal tool.
  */
 import { DEFAULT_LIGHT_THEME, DEFAULT_DARK_THEME, rasterizerScript } from '@dszp/netsapiens-lib';
 import { themesFor, type BrandEnv } from './brand.js';
+
+/**
+ * JSON for embedding inside a `<script>` element.
+ *
+ * Plain JSON.stringify is NOT safe here: the HTML parser finds `</script` before any JS parser
+ * runs, so a `</script>` inside a string ends the element early. THEMES carries BRAND_LABEL /
+ * BRAND_NAME (brand.ts), so the value is operator-controlled rather than attacker-controlled —
+ * self-XSS, hence low severity — but the escape is free and removes the class outright.
+ * `<` parses back to `<`, so the data the page sees is byte-identical.
+ * U+2028/U+2029 are legal in JSON but were line terminators in older JS parsers.
+ */
+function jsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
 
 /**
  * The viewer SPA. Takes the brand config so the injected theme registry can carry this deployment's
@@ -132,8 +149,8 @@ export function viewerHtml(env: BrandEnv = {}): string {
   ${rasterizerScript()}
 
   // ---- theme registry: injected from the shared @dszp/netsapiens-lib source of truth ----
-  const THEMES = ${JSON.stringify(THEMES)};
-  const DEFAULT_LIGHT = ${JSON.stringify(DEFAULT_LIGHT_THEME)}, DEFAULT_DARK = ${JSON.stringify(DEFAULT_DARK_THEME)};
+  const THEMES = ${jsonForScript(THEMES)};
+  const DEFAULT_LIGHT = ${jsonForScript(DEFAULT_LIGHT_THEME)}, DEFAULT_DARK = ${jsonForScript(DEFAULT_DARK_THEME)};
   const CHROME_VARS = { bg:'--bg', panel:'--panel', panel2:'--panel2', border:'--border', text:'--text', dim:'--dim', inputBg:'--input-bg', diagramBg:'--diagram-bg', itemHover:'--item-hover', itemActive:'--item-active', accent:'--accent', notes:'--notes', brand:'--brand' };
 
   const $ = (id) => document.getElementById(id);
@@ -142,7 +159,11 @@ export function viewerHtml(env: BrandEnv = {}): string {
   let current = { domain:'', mermaid:'', entity:null, graph:null };
   let dir = params.get('dir') === 'LR' ? 'LR' : 'TD';
   let navOn = params.get('nav') !== 'off';
-  let elkOn = params.get('engine') !== 'dagre'; // ELK on by default; ?engine=dagre opts out
+  // ELK is now OPT-IN (?engine=elk), not on by default. The plugin loads from jsDelivr's /+esm, which
+  // is a regenerated bundle that can't carry SRI and pulls floating d3/elkjs at jsDelivr build time —
+  // so a CDN/dep compromise would run in the authenticated viewer. dagre (bundled with Mermaid, which
+  // IS SRI-pinned) is the safe default; users who want ELK's tidier columns opt in per session.
+  let elkOn = params.get('engine') === 'elk';
   let elkLoaded = false;
   let curTheme;
   const view = { scale:1, tx:0, ty:0 };

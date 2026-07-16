@@ -54,6 +54,13 @@ const DEFAULT_LABEL = 'Ringotel';
 const INDEX_KEY = 'https://ringotel-cache.internal/index';
 const INDEX_TTL = 3600; // 1h
 const USERS_TTL = 600; //  10m
+// A forced directory refresh re-digs the WHOLE fleet (~1 getOrganizations + 1 getBranches/org) against
+// the shared key. This lock coalesces refreshes fleet-wide: once one runs, further ?refresh within the
+// window fall through to the cached directory instead of re-digging. So even a caller authorized to
+// refresh (reseller) can't loop it into unbounded amplification. Paired with the per-caller policy gate
+// in the Worker (refreshRequested → ringotel.refresh).
+const INDEX_REFRESH_LOCK_KEY = 'https://ringotel-cache.internal/index-refresh-lock';
+const INDEX_REFRESH_MIN_INTERVAL = 60; // s — an actual re-dig happens at most once per minute, fleet-wide
 const orgUsersKey = (orgid: string) => `https://ringotel-cache.internal/org/${orgid}/users`;
 
 /** THE GATE. Everything Ringotel is governed by this. */
@@ -105,8 +112,20 @@ async function cachePut(cache: Cache, key: string, value: unknown, ttl: number):
   await cache.put(new Request(key), new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${ttl}` } }));
 }
 
-/** Fleet org/branch directory, Cache-API-cached. Miss (or refresh) → the expensive gather. */
+/** Fleet org/branch directory, Cache-API-cached. Miss (or refresh) → the expensive gather. A forced
+ *  refresh is coalesced fleet-wide (INDEX_REFRESH_LOCK): if a re-dig already ran within the window,
+ *  the forced refresh is downgraded to a normal cached read, so looped refreshes can't amplify. */
 export async function getDirectory(client: RingotelReadClient, cache: Cache, refresh = false): Promise<OrgBranchEntry[]> {
+  if (refresh) {
+    // Coalesce: only the first forced refresh per window actually re-digs; the lock (short TTL) makes
+    // the rest fall through to the cached directory below.
+    const locked = await cacheGet<{ t: number }>(cache, INDEX_REFRESH_LOCK_KEY);
+    if (locked) {
+      refresh = false;
+    } else {
+      await cachePut(cache, INDEX_REFRESH_LOCK_KEY, { t: 1 }, INDEX_REFRESH_MIN_INTERVAL);
+    }
+  }
   if (!refresh) {
     const hit = await cacheGet<OrgBranchEntry[]>(cache, INDEX_KEY);
     if (hit) return hit;

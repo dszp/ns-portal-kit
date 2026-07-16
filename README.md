@@ -71,7 +71,7 @@ cp .dev.vars.example .dev.vars
 
 # 4. run it
 pnpm dev            # http://localhost:8787
-pnpm deploy
+pnpm run deploy     # `run` matters: bare `pnpm deploy` is a pnpm builtin, not this script
 ```
 
 **Not sure what's missing?** Open `/` on an unconfigured deployment and it tells you: a checklist of

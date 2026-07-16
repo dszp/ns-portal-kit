@@ -1,13 +1,21 @@
 /**
  * Cloudflare Access (Zero Trust) JWT verification — defense in depth for the Access-gated
- * deployment (`--env dia`). When ACCESS_AUD is set, every request except /health must carry a
+ * deployment (`--env dia`). When Access is CONFIGURED, every request except /health must carry a
  * valid `Cf-Access-Jwt-Assertion` (Cloudflare Access injects it at the edge AFTER the user
  * satisfies the app's policy). A request that bypasses Access — e.g. a direct hit on a
  * *.workers.dev URL — lacks a valid token and is refused (403). Combined with `workers_dev:false`
  * this means the service NS token can only ever answer requests that passed the Access policy.
  *
- * Fully env-gated: with no ACCESS_AUD this module is inert — local dev, the offline selftests, and
- * the future delegated/portal deployment (which authenticates via `ns_t` instead) are unaffected.
+ * "CONFIGURED" MEANS **BOTH** `ACCESS_AUD` AND `ACCESS_TEAM_DOMAIN` — i.e. `accessConfig() !== null`.
+ * Not ACCESS_AUD alone. This distinction is load-bearing and this comment used to get it wrong: the
+ * team domain is what builds the JWKS URL, so with AUD alone there is nothing to verify against and
+ * this module CANNOT run. Something keyed off `ACCESS_AUD` on its own therefore believed a
+ * half-configured deployment was protected when the check was inert — that was a real fail-open
+ * (fixed in 356e6d8; see exposure.ts). If you are adding a new "is Access on?" test anywhere, call
+ * `accessConfig(env) !== null` and nothing else. setup.ts raises a blocker for the half-config state.
+ *
+ * Fully env-gated: with Access unconfigured this module is inert — local dev, the offline selftests,
+ * and the delegated/portal deployment (which authenticates via `ns_t` instead) are unaffected.
  *
  * Worker-only (uses `crypto.subtle`, `fetch`, Cache API). NOT part of the portable library surface.
  * Fails CLOSED: any decode/fetch/verify problem returns a non-ok result, never a pass.
