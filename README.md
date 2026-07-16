@@ -14,12 +14,25 @@ Read-only. It never writes to NetSapiens.
 
 ## Quick start
 
+Scaffold it with Cloudflare's own CLI:
+
+```bash
+npm create cloudflare@latest my-portal -- --template=dszp/ns-portal-kit
+```
+
+Or clone it directly:
+
 ```bash
 git clone https://github.com/dszp/ns-portal-kit && cd ns-portal-kit
 pnpm install
+```
 
+Then configure — this part can't be automated, because neither C3 nor the deploy button can prompt for
+values:
+
+```bash
 # 1. point it at your NetSapiens server
-#    edit wrangler.jsonc -> vars.NS_SERVER (and NS_PORTAL_ISS for delegated auth)
+#    edit wrangler.jsonc -> vars.NS_SERVER   (and NS_PORTAL_ISS for delegated auth)
 
 # 2. give it a token (service mode — reads any domain the token is scoped to)
 wrangler secret put NS_API_TOKEN
@@ -28,6 +41,11 @@ wrangler secret put NS_API_TOKEN
 pnpm dev            # http://localhost:8787
 pnpm deploy
 ```
+
+**Not sure what's missing?** Open `/` on an unconfigured deployment and it tells you: a checklist of
+exactly which settings are unset, with the fix for each. `GET /health` reports the same as
+`{"ok":true,"configured":false}`. Both report only *whether* a setting is present — never its value —
+and the checklist disappears once setup is complete.
 
 Everything else is off until you turn it on.
 

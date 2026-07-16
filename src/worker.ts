@@ -41,7 +41,8 @@ import {
   type EntityRef,
 } from '@dszp/netsapiens-lib';
 import { viewerHtml } from './viewerApp.js';
-import { brandAccent } from './brand.js';
+import { brandAccent, productName } from './brand.js';
+import { needsSetup, setupHtml } from './setup.js';
 import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, orgsStatusForDomains } from './ringotel.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
 import { accessConfig, verifyAccessRequest } from './access.js';
@@ -352,7 +353,7 @@ export default {
     const url = new URL(request.url);
 
     // Public, no-auth route (probes / uptime). Stays open even behind Access.
-    if (url.pathname === '/health') return json({ ok: true }, 200, cors);
+    if (url.pathname === '/health') return json({ ok: true, configured: !needsSetup(env) }, 200, cors);
 
     // Cloudflare Access gate (defense in depth for service-mode deployments). Inert unless ACCESS_AUD
     // is set, so local `pnpm dev` and the delegated/portal deployment are unaffected. When active,
@@ -369,6 +370,12 @@ export default {
       // injection backend, not an SPA host — and the SPA there is non-functional anyway (its fetches carry
       // no ns_t) — so don't serve it: withhold the internal tooling surface. dia keeps serving it.
       if (portalMode(env)) return json({ error: 'Not found' }, 404, cors);
+      // A fresh fork (C3 / the deploy button) cannot be prompted for config, so it arrives here with
+      // placeholders and would otherwise serve an SPA that dies on its first fetch. Say what's missing
+      // instead. Discloses nothing: presence-only, never values, and it vanishes once configured.
+      if (needsSetup(env)) {
+        return new Response(setupHtml(env, productName(env)), { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
+      }
       return new Response(viewerHtml(env), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
     }
     if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, cors);
