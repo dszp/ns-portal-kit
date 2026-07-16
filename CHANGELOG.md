@@ -8,12 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 **Which version am I running?** `GET /health` on your deployment reports it:
 
 ```json
-{ "ok": true, "configured": true, "version": "0.1.3" }
+{ "ok": true, "configured": true, "version": "0.1.4" }
 ```
 
 Compare that against the latest entry below to see whether there's anything worth pulling. Updating is
 `git fetch upstream && git merge upstream/main` — see
 [SETUP.md → Getting updates later](./SETUP.md#7-getting-updates-later).
+
+## [0.1.4] — 2026-07-16
+
+### Security
+
+- **The portal-mode root page's `<title>` is now a generic "No Content", not a product name.** 0.1.3
+  made the page static but kept "NS Portal Kit" in the tab title — which tells a probing client almost
+  as much about what the host is as a real brand name would. The tab now reveals nothing.
 
 ## [0.1.3] — 2026-07-16
 
@@ -152,7 +160,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.4
 [0.1.3]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.3
 [0.1.2]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.2
 [0.1.1]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.1

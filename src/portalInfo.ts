@@ -15,21 +15,21 @@
  * the <title> of an unauthenticated page (portal-mode deployments have no Access gate in front).
  * Escaped, so never an injection; but it fingerprinted the white-label operator to exactly the
  * client this page exists to bore. Keep it static: no env, no config, no branding.
+ *
+ * The <title> is a generic "No Content", NOT even the neutral product name — a product name
+ * ("NS Portal Kit") tells a probing client almost as much about what this host is as the real brand
+ * would. A tab that just says "No Content" reveals nothing.
  */
 
 import { esc } from './pageShell.js';
 
-/** The neutral product name. Deliberately NOT brand.ts's productName(env) — see above. */
-const NEUTRAL_NAME = 'NS Portal Kit';
-
 export function portalModeHtml(): string {
-  const productName = NEUTRAL_NAME;
   const msg =
     'This host serves application requests and has no public web content. ' +
     'Setup documentation contains admin configuration instructions.';
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(productName)}</title>
+<title>No Content</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
