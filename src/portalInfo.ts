@@ -1,50 +1,30 @@
 /**
- * What a portal-backend-mode Worker says at `/`.
+ * What a portal-backend-mode Worker returns at `/` (status 404).
  *
- * Portal backend mode is the backend half of an injected add-on, so it has no UI and the internal SPA is
- * deliberately withheld (a tooling surface shouldn't exist on a user-facing endpoint, and its fetches
- * carry no ns_t anyway). It still answers 404 — but a bare 404 is a dead end for whoever just deployed
- * this and opened the URL to see if it worked. So: 404 with an explanation.
+ * This URL is DISCOVERABLE — it's referenced from the injected portal JavaScript, which is
+ * client-visible — so this page is deliberately terse and neutral. It must NOT narrate the auth
+ * mechanism, the ns_t / injection architecture, or anything deployment-specific: a client who finds
+ * the URL should see a boring "no content here" backend, with nothing to probe. Whoever deploys this
+ * gets their onboarding from SETUP.md (and standalone mode has its own guided setup/exposure pages);
+ * the portal backend has no reason to explain itself in a browser.
  *
- * Discloses nothing — no config, no hostnames, no data. It's the same page for every deployment.
+ * Discloses nothing — no config, no hostnames, no data, no mechanism. Same bytes for every deployment.
  */
-import { page } from './pageShell.js';
+import { esc } from './pageShell.js';
 
 export function portalModeHtml(productName = 'NS Portal Kit'): string {
-  return page({
-    title: `${productName} — portal backend mode`,
-    heading: 'This is working. It just has no page.',
-    intro:
-      'This Worker is running in portal backend mode, which is the BACKEND half of a Manager Portal add-on. It ' +
-      'has no interface of its own by design — it answers API calls from JavaScript running inside your ' +
-      'Manager Portal, and serves nothing to a browser that visits it directly.',
-    items: [
-      {
-        level: 'step',
-        title: 'It only answers calls that carry a user\'s login token',
-        body: [
-          'Every request must send Authorization: Bearer <ns_t> — the token your Manager Portal already ' +
-            'issued to the logged-in user. No token, no answer: there is no stored credential here to fall back on.',
-          'Reads run as that user, and NetSapiens enforces what they may see.',
-        ],
-      },
-      {
-        level: 'step',
-        title: 'You need injected JavaScript to call it',
-        body: [
-          'Something inside your Manager Portal has to read the ns_t, call this Worker, and put the result ' +
-            'on the page. A reference script is planned but not published yet, so today that part is yours to write.',
-        ],
-      },
-      {
-        level: 'step',
-        title: 'Wanted the viewer instead?',
-        body: [
-          'The domain-browser UI is standalone mode: clear PORTAL_MODE, set an NS_API_TOKEN, and put Cloudflare ' +
-            'Access in front of it. That is the one to start with.',
-        ],
-      },
-    ],
-    footer: 'Health check: <code>/health</code>. Setup and the full request flow are in SETUP.md.',
-  });
+  const msg =
+    'This host serves application requests and has no public web content. ' +
+    'Setup documentation contains admin configuration instructions.';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(productName)}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         padding:2rem; background:#f8fafc; color:#334155;
+         font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  @media (prefers-color-scheme: dark) { body { background:#0f172a; color:#94a3b8; } }
+  p { max-width:34rem; margin:0; text-align:center; }
+</style></head><body><p>${esc(msg)}</p></body></html>`;
 }

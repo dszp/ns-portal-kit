@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 **Which version am I running?** `GET /health` on your deployment reports it:
 
 ```json
-{ "ok": true, "configured": true, "version": "0.1.1" }
+{ "ok": true, "configured": true, "version": "0.1.2" }
 ```
 
 Compare that against the latest entry below to see whether there's anything worth pulling. Updating is
@@ -18,6 +18,15 @@ Compare that against the latest entry below to see whether there's anything wort
 ## [Unreleased]
 
 _Nothing yet._
+
+## [0.1.2] — 2026-07-16
+
+### Changed
+
+- Portal backend mode's root page (`/`) is now a terse, neutral 404 that no longer describes the
+  authentication or injection mechanism. This endpoint is referenced from client-visible portal
+  JavaScript, so its landing response now says only that the host serves application requests and has
+  no public web content; configuration guidance lives in SETUP.md.
 
 ## [0.1.1] — 2026-07-16
 
