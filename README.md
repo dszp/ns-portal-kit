@@ -3,6 +3,11 @@
 A deployable toolkit of add-ons for the **NetSapiens Manager Portal**, running on Cloudflare Workers.
 Bring your own NetSapiens credentials and Cloudflare account.
 
+> ### 📖 Read **[SETUP.md](./SETUP.md)** first — before you deploy.
+> It's short, and it covers the two things the deploy form can't tell you: **which of the two modes you
+> want** (they're different products, and one needs JavaScript that isn't published yet), and **what
+> each field means**. Ten minutes there saves an afternoon.
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dszp/ns-portal-kit)
 
 That clones this repo into **your own** GitHub account and deploys to **your own** Cloudflare. The form
@@ -19,12 +24,13 @@ button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
 > calls it until JS running inside your Manager Portal does. A reference script is planned; until then
 > portal mode means writing that yourself. Service mode is complete and works today.
 
-- **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu →
-  queue → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. A
-  viewer SPA with a theme picker, pan/zoom, and PNG export comes with it.
-- **Ringotel app status** — optional enrichment: per-user app presence and device counts, joined to
-  the NetSapiens extension.
-- **Device details** — optional: desk-phone model and SIP registration state.
+- **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu → queue
+  → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. Comes with a
+  viewer: theme picker, pan/zoom, PNG export. *Both modes.*
+- **Ringotel app status** — a reseller banner, a per-user app column, and an app column on the domain
+  list. *Portal mode only* — these live inside the Manager Portal.
+- **Enrichment on the diagrams** — app presence and desk-phone model/registration shown inline on agent
+  lines. *Both modes, optional.*
 
 ## Quick start
 
@@ -41,7 +47,17 @@ git clone https://github.com/dszp/ns-portal-kit && cd ns-portal-kit
 pnpm install
 ```
 
-Then configure (the deploy button asks for all of this on its setup form instead):
+**Try it locally first** — no Cloudflare Access, no deploy, nothing to provision:
+
+```bash
+cp .dev.vars.example .dev.vars     # add your NS_API_TOKEN
+npx wrangler dev                   # -> http://localhost:8787
+```
+
+The viewer runs against your live NetSapiens data. (The service-token gate exempts localhost — it isn't
+internet-reachable, so there's nothing to expose.) Fastest way to see if this is useful to you.
+
+Then configure for a real deploy (the button asks for all of this on its form instead):
 
 ```bash
 # 1. point it at your NetSapiens server

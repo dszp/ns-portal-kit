@@ -13,12 +13,22 @@ This decides which settings you need. Everything else follows from it.
 
 | | **Service mode** | **Portal mode** |
 |---|---|---|
+| What you get | **call-flow diagrams, and only those** — a standalone viewer you open | the diagrams **embedded in your Manager Portal**, plus the other add-on features |
 | Who authenticates | a token you store | the calling user's own `ns_t` |
 | Set | `NS_API_TOKEN` | `PORTAL_MODE=1` |
 | Reads run as | that token — its NetSapiens scope is the boundary | that user — NetSapiens enforces their scope |
 | Stored NetSapiens credential | **yes** | **none** |
-| Gives you | the domain-browser SPA at `/` | an API backend for portal-injected JS |
-| Use it for | an internal tool for your team | a Manager Portal add-on for your users |
+| Needs injected JavaScript | no | **yes — and it isn't published yet** |
+| Ready to use today | **yes** | only if you write that JS yourself |
+
+**Service mode gives you the diagram viewer and nothing else.** No Ringotel banner, no per-user app
+column, no domain-list column — those live *inside* the Manager Portal, so they only exist in portal
+mode. (The diagrams themselves can still be *enriched*: set `RINGOTEL_API_KEY` and app presence appears
+inline on agent lines, `NS_DEVICE_DETAILS=1` adds phone models. That's decoration on a diagram, not the
+separate features.)
+
+**Portal mode is where the rest lives** — the diagrams show up in the portal your users already use,
+alongside the other add-ons, because injected JS can change any page it runs on.
 
 **Service mode is the default** and the simpler place to start. A stored token answers *any* request
 that reaches the Worker, so put it behind a gate — see `ACCESS_AUD`.
@@ -244,6 +254,18 @@ Worker script with its own name, URL, secrets and rollback:
   }
 }
 ```
+
+**See it locally first.** Before deploying anything, you can run the real thing on your own machine —
+no Cloudflare Access, no Zero Trust setup, nothing to provision:
+
+```bash
+cp .dev.vars.example .dev.vars     # put your NS_API_TOKEN in it
+npx wrangler dev                   # -> http://localhost:8787
+```
+
+Open that URL and you get the viewer, against your live NetSapiens data. The service-token gate exempts
+localhost (it isn't internet-reachable, so there's nothing to expose) — which makes this the fastest way
+to see whether this project is useful to you before committing to any of it.
 
 ```bash
 # 3. Give the internal one a token (secrets are PER ENVIRONMENT — this is the usual trip-up)
