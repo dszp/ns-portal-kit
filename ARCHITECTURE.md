@@ -3,7 +3,7 @@
 How `ns-portal-kit` fits together, and the non-obvious things that will bite you.
 
 This repo is the **host layer**. The portable core — the flow model, resolver, Mermaid/HTML renderers,
-themes, `ns_t` validation, and the read-only NetSapiens client — lives in
+themes, `ns_t` validation, and the NetSapiens API client — lives in
 [`@dszp/netsapiens-lib`](https://github.com/dszp/netsapiens-lib), so the same code runs here, in a
 CLI, or in a browser. Ringotel talks through
 [`@dszp/ringotel-lib`](https://github.com/dszp/ringotel-lib).

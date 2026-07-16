@@ -5,13 +5,13 @@ Bring your own NetSapiens credentials and Cloudflare account.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dszp/ns-portal-kit)
 
-That clones this repo into your own GitHub account and deploys it to your own Cloudflare — you pick the
-repo and Worker names on the way through. There are no bindings to provision (no KV, R2, D1, or Durable
-Objects), so it deploys clean.
+That clones this repo into your own GitHub account and deploys it to your own Cloudflare. The setup form
+asks for everything up front — project/Worker name, `NS_SERVER`, your API token, and each optional
+integration — so a click-through gives you a **working** deployment. There are no bindings to provision
+(no KV, R2, D1, or Durable Objects), so it deploys clean.
 
-It **won't** be working yet: the button can't prompt for credentials, so the first deploy lands with
-placeholder settings. Open `/` and it hands you a checklist of exactly what to set. See
-[Quick start](#quick-start).
+Fill in at minimum **`NS_SERVER`** and **`NS_API_TOKEN`**; leave the rest blank to keep those features
+off. If you skip something required, open `/` afterwards and it tells you exactly what's missing.
 
 - **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu →
   queue → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. A
@@ -19,8 +19,6 @@ placeholder settings. Open `/` and it hands you a checklist of exactly what to s
 - **Ringotel app status** — optional enrichment: per-user app presence and device counts, joined to
   the NetSapiens extension.
 - **Device details** — optional: desk-phone model and SIP registration state.
-
-Read-only. It never writes to NetSapiens.
 
 ## Quick start
 
@@ -37,8 +35,7 @@ git clone https://github.com/dszp/ns-portal-kit && cd ns-portal-kit
 pnpm install
 ```
 
-Then configure — this part can't be automated, because neither C3 nor the deploy button can prompt for
-values:
+Then configure (the deploy button asks for all of this on its setup form instead):
 
 ```bash
 # 1. point it at your NetSapiens server
@@ -47,7 +44,10 @@ values:
 # 2. give it a token (service mode — reads any domain the token is scoped to)
 wrangler secret put NS_API_TOKEN
 
-# 3. run it
+# 3. copy the local-dev template and fill in what you need
+cp .dev.vars.example .dev.vars
+
+# 4. run it
 pnpm dev            # http://localhost:8787
 pnpm deploy
 ```
@@ -56,6 +56,10 @@ pnpm deploy
 exactly which settings are unset, with the fix for each. `GET /health` reports the same as
 `{"ok":true,"configured":false}`. Both report only *whether* a setting is present — never its value —
 and the checklist disappears once setup is complete.
+
+> `.dev.vars.example` doubles as the deploy button's prompt list — Cloudflare reads it and asks for each
+> key. `NS_SERVER`/`NS_PORTAL_ISS` are deliberately absent from it and live in `wrangler.jsonc` `vars`:
+> a key in both is prompted twice and then shadowed by the config value, silently ignoring the answer.
 
 Everything else is off until you turn it on.
 
@@ -77,24 +81,19 @@ Manager Portal injection backend.
 
 ## Configuration
 
-Required:
+A working deployment needs **three** settings:
 
-| Var | What |
-|---|---|
-| `NS_SERVER` | your NetSapiens API host, e.g. `api.example.com` |
-| `NS_PORTAL_ISS` | the Manager Portal host issuing your `ns_t`. **No default** — a default issuer would mean accepting tokens minted by a portal you don't control. Comma-separate for several portal hostnames fronting one backend (exact match, no wildcards). |
+| Setting | Where | What |
+|---|---|---|
+| `NS_SERVER` | `vars` in `wrangler.jsonc` | your NetSapiens API host, e.g. `api.example.com` |
+| `NS_PORTAL_ISS` | `vars` in `wrangler.jsonc` | the Manager Portal host that issues your `ns_t` |
+| `NS_API_TOKEN` | secret | a NetSapiens API token (service mode; blank for portal mode) |
 
-Secrets (`wrangler secret put <NAME>`), all optional:
+Everything else is **optional and off unless set** — access gating, domain scoping, branding, Ringotel
+app status, device details.
 
-| Secret | Effect |
-|---|---|
-| `NS_API_TOKEN` | enables service mode |
-| `RINGOTEL_API_KEY` | **the Ringotel gate.** Absent ⇒ no Ringotel calls, no enrichment, its routes 404. The Worker is then exactly the NetSapiens-only baseline — a tested invariant. |
-| `RINGOTEL_LABEL` / `RINGOTEL_LABEL_SHORT` | white-label display names (default `Ringotel`) |
-| `BRAND_NAME` | your company name → `"<name> Portal Kit v<ver>"` and a `"<name> portal"` theme |
-
-Optional vars: `BRAND_ACCENT` (hex), `ACCESS_AUD` + `ACCESS_TEAM_DOMAIN`, `PORTAL_MODE`,
-`ALLOWED_ORIGINS`, `ALLOWED_DOMAINS`, `BLOCKED_DOMAINS`, `RINGOTEL_PRESENCE`, `NS_DEVICE_DETAILS`.
+**→ [SETUP.md](./SETUP.md) defines every setting**: what it means, what a valid value looks like, and
+whether it belongs in `vars` or a secret. Start there if a field on the deploy form isn't obvious.
 
 **Branding is config, never source.** Unset, you get the neutral `ns-portal` theme (the stock
 NetSapiens scheme) and "NS Portal Kit".
@@ -107,7 +106,7 @@ fork deploys with nothing to set up first.
 ## Built on
 
 - [`@dszp/netsapiens-lib`](https://github.com/dszp/netsapiens-lib) — the portable NetSapiens toolkit
-  (read-only client, `ns_t` validation, resolver, renderers)
+  (API client, `ns_t` validation, resolver, renderers)
 - [`@dszp/ringotel-lib`](https://github.com/dszp/ringotel-lib) — the portable Ringotel AdminAPI toolkit
 
 Both are Node-free and run unchanged in a Worker, in Node, or the browser.
@@ -129,6 +128,8 @@ like `fetch` called as `this.x(...)` throws "Illegal invocation" in workerd but 
 
 ## Docs
 
+- **[SETUP.md](./SETUP.md)** — every setting, what it means, and what a valid value looks like. Start
+  here if a field on the deploy form isn't obvious.
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — how it fits together, the `ns_t` design, the NetSapiens
   routing model, and the rendering traps.
 
