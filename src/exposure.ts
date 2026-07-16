@@ -11,8 +11,10 @@
  * a warning is a thing you scroll past, and the failure is silent and total.
  *
  * The gate opens when ANY of these is true:
- *   1. `ACCESS_AUD` is set — the in-Worker Cloudflare Access check is live and fails closed, so a
- *      request that skipped Access never reaches the token.
+ *   1. Cloudflare Access is FULLY configured (`ACCESS_AUD` *and* `ACCESS_TEAM_DOMAIN`, i.e.
+ *      `accessConfig()` is non-null) — the in-Worker check is live and fails closed, so a request that
+ *      skipped Access never reaches the token. `ACCESS_AUD` alone is NOT enough: the check can't run
+ *      without the team domain, so opening on it would leave a half-configured deployment exposed.
  *   2. The request is local (`wrangler dev`) — not internet-reachable, so there is nothing to expose.
  *   3. `ALLOW_UNGATED_SERVICE_TOKEN` is truthy — a deliberate opt-out, for someone who has put their
  *      own protection in front (mTLS, a WAF, an authenticating proxy) and doesn't need ours.
@@ -23,10 +25,12 @@
  */
 
 import { page } from './pageShell.js';
+import { accessConfig } from './access.js';
 
 export interface ExposureEnv {
   NS_API_TOKEN?: string;
   ACCESS_AUD?: string;
+  ACCESS_TEAM_DOMAIN?: string;
   ALLOW_UNGATED_SERVICE_TOKEN?: string;
 }
 
@@ -49,7 +53,11 @@ export function isLocalRequest(hostname: string): boolean {
  */
 export function serviceTokenBlocked(env: ExposureEnv, hostname: string): boolean {
   if (!set(env.NS_API_TOKEN)) return false;              // no ambient authority to protect
-  if (set(env.ACCESS_AUD)) return false;                 // Access check is live, and fails closed
+  // Gate on the SAME predicate the Access check itself uses. accessConfig() requires BOTH ACCESS_AUD
+  // and ACCESS_TEAM_DOMAIN; keying this off ACCESS_AUD alone was a fail-open — a half-configured
+  // deployment (AUD set, team domain forgotten) opened the gate while the Access check stayed inert,
+  // serving the stored token's full NetSapiens scope to any unauthenticated caller.
+  if (accessConfig(env) !== null) return false;          // Access is fully configured, live, fails closed
   if (truthy(env.ALLOW_UNGATED_SERVICE_TOKEN)) return false; // deliberate opt-out
   if (isLocalRequest(hostname)) return false;            // wrangler dev; not reachable
   return true;

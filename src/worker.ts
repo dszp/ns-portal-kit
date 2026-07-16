@@ -257,10 +257,14 @@ class HttpError extends Error {
  * would silently accept tokens minted by it for every other deployment. Unset ⇒ fail closed with an
  * actionable message rather than a bare 401, because "every login broke" should say why.
  */
-function portalIss(env: Env): string {
-  const iss = (env.NS_PORTAL_ISS ?? '').trim();
-  if (!iss) throw new HttpError(500, 'Server misconfigured', 'NS_PORTAL_ISS is required: set it to your Manager Portal host (e.g. manage.example.com)');
-  return iss;
+function portalIss(env: Env): string | string[] {
+  const raw = (env.NS_PORTAL_ISS ?? '').trim();
+  // Comma-separate several portal hostnames when one backend fronts more than one — SETUP.md and
+  // wrangler.jsonc both document this, and verify()'s expectedIss already accepts a list (exact match,
+  // no wildcards). Return a bare string for the common single-host case so nothing downstream shifts.
+  const list = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!list.length) throw new HttpError(500, 'Server misconfigured', 'NS_PORTAL_ISS is required: set it to your Manager Portal host (e.g. manage.example.com), or a comma-separated list of them');
+  return list.length === 1 ? list[0] : list;
 }
 
 /**

@@ -5,6 +5,9 @@
  */
 import { verifyAccessToken, type AccessJwk } from './access.js';
 
+// A deliberately-fake 64-hex placeholder. The self-test only needs the AUD to be self-consistent
+// (mint with it, verify against it) — never a real one. Do NOT paste a deployment's real Access AUD
+// here: this file ships to the public mirror, and a real AUD fingerprints the Access app.
 const AUD = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const ISS = 'https://yourteam.cloudflareaccess.com';
 const KID = 'test-kid-1';

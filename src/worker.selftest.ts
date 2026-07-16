@@ -184,24 +184,6 @@ const ok = (c: boolean, m: string) => {
     rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
     rtUsers = rtExts.map((e) => ({ id: `u${e}`, extension: e, branchid: 'RTBR', name: `RT ${e}`, devs: [{ id: `d${e}`, st: 0 }] }));
-  // ── the ungated-service-token gate (src/exposure.ts) ──
-  // A stored token is ambient authority: it answers whatever reaches the Worker. Refuse to use it
-  // until something verifiable is in front, so a public URL can't borrow the token's NS scope.
-  {
-    const bare = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '' };
-    const call = (env: any, host = 'w.dev') => worker.fetch(new Request(`https://${host}/domains`), env as any, ctx);
-    ok((await call(bare)).status === 403, '[gate] stored token + no Access on a public host -> 403 (not used)');
-    // With ACCESS_AUD set this is STILL 403 -- but from the Access check (no Cf-Access-Jwt-Assertion on
-    // this request), not the exposure gate. Assert the REASON changed hands, not the status.
-    const gated = await call({ ...bare, ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' });
-    ok(!/not protected/i.test(await gated.text()), '[gate] ACCESS_AUD set -> exposure gate opens; Access check takes over');
-    ok((await call({ ...bare, ALLOW_UNGATED_SERVICE_TOKEN: '1' })).status === 200, '[gate] explicit opt-out -> allowed');
-    ok((await call(bare, 'localhost')).status === 200, '[gate] local wrangler dev -> allowed');
-    const root = await worker.fetch(new Request('https://w.dev/'), bare as any, ctx);
-    const body = await root.text();
-    ok(root.status === 403 && /Cloudflare Access/.test(body), '[gate] / teaches Access setup instead of serving the app');
-    ok(!body.includes('service-token'), '[gate] the instructions never echo the token');
-  }
 
     const rEnv = { ...sEnv, RINGOTEL_API_KEY: 'rt-key' };
     const rr = await worker.fetch(new Request(`https://w.dev/flow?domain=${domain}&kind=${kind}&ref=${ref}`), rEnv as any, ctx);
@@ -218,6 +200,37 @@ const ok = (c: boolean, m: string) => {
     ok(ringotelCalls === before, '[ringotel] ?enrich=0 → no Ringotel calls even when configured');
   } else {
     ok(true, '[ringotel] enabled enrichment skipped — no ###r devices in this fixture');
+  }
+
+  // ── the ungated-service-token gate (src/exposure.ts) — INDEPENDENT of Ringotel, so it runs always ──
+  // A stored token is ambient authority: it answers whatever reaches the Worker. Refuse to use it until
+  // something verifiable is in front, so a public URL can't borrow the token's NS scope. (Previously this
+  // block was nested inside `if (rtExts.length)` and silently skipped on fixtures with no ###r devices.)
+  {
+    const bare = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '' };
+    const call = (env: any, host = 'w.dev') => worker.fetch(new Request(`https://${host}/domains`), env as any, ctx);
+    ok((await call(bare)).status === 403, '[gate] stored token + no Access on a public host -> 403 (not used)');
+    // ACCESS_AUD *and* ACCESS_TEAM_DOMAIN both set: the exposure gate opens and the Access check takes
+    // over — still 403 (no Cf-Access-Jwt-Assertion here), but for a different reason. Assert the reason changed.
+    const gated = await call({ ...bare, ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' });
+    ok(!/not protected/i.test(await gated.text()), '[gate] ACCESS_AUD + team domain -> exposure gate opens; Access check takes over');
+    // REGRESSION (fail-open, now fixed): ACCESS_AUD set but ACCESS_TEAM_DOMAIN missing => accessConfig() is
+    // null, so the Access check can't run. The gate MUST stay closed and refuse the token — opening on
+    // ACCESS_AUD alone served a half-configured deployment's whole fleet unauthenticated.
+    const half = await call({ ...bare, ACCESS_AUD: 'aud' });
+    ok(half.status === 403 && /not protected/i.test(await half.text()),
+      '[gate] ACCESS_AUD WITHOUT team domain -> gate stays closed (no fail-open)');
+    ok((await call({ ...bare, ALLOW_UNGATED_SERVICE_TOKEN: '1' })).status === 200, '[gate] explicit opt-out -> allowed');
+    ok((await call(bare, 'localhost')).status === 200, '[gate] local wrangler dev -> allowed');
+    const root = await worker.fetch(new Request('https://w.dev/'), bare as any, ctx);
+    const body = await root.text();
+    ok(root.status === 403 && /Cloudflare Access/.test(body), '[gate] / teaches Access setup instead of serving the app');
+    ok(!body.includes('service-token'), '[gate] the instructions never echo the token');
+    // The half-config is ALSO surfaced on the SPA route as a setup blocker (setup.ts) that names the
+    // missing var — so the operator learns *why*, not just that reads are refused.
+    const halfRoot = await worker.fetch(new Request('https://w.dev/'), { ...bare, ACCESS_AUD: 'aud' } as any, ctx);
+    const halfRootBody = await halfRoot.text();
+    ok(halfRoot.status === 503 && /ACCESS_TEAM_DOMAIN/.test(halfRootBody), '[gate] ACCESS_AUD without team domain -> setup checklist names the missing var');
   }
 
   // ================= /ringotel/org route (standalone mode; ?refresh bypasses cross-test cache) =================

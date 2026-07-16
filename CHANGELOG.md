@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 **Which version am I running?** `GET /health` on your deployment reports it:
 
 ```json
-{ "ok": true, "configured": true, "version": "0.1.0" }
+{ "ok": true, "configured": true, "version": "0.1.1" }
 ```
 
 Compare that against the latest entry below to see whether there's anything worth pulling. Updating is
@@ -18,6 +18,24 @@ Compare that against the latest entry below to see whether there's anything wort
 ## [Unreleased]
 
 _Nothing yet._
+
+## [0.1.1] — 2026-07-16
+
+Security fix.
+
+### Fixed
+
+- **Access gate fail-open.** A deployment that set `ACCESS_AUD` but not `ACCESS_TEAM_DOMAIN` — both are
+  required for the Cloudflare Access check to run — would still serve a stored `NS_API_TOKEN`'s full
+  NetSapiens scope to unauthenticated callers. The exposure gate now stays closed unless Access is
+  *fully* configured, and the setup checklist names the missing half. **If you run standalone mode
+  behind Access, confirm BOTH vars are set.**
+
+### Changed
+
+- Pin the ELK diagram-layout plugin to an exact version (it was a floating range loaded from a CDN, so
+  a compromised future release could have loaded into the viewer).
+- `NS_PORTAL_ISS` now accepts a comma-separated list of portal hostnames, as the docs already described.
 
 ## [0.1.0] — 2026-07-16
 

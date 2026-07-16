@@ -177,10 +177,12 @@ export function viewerHtml(env: BrandEnv = {}): string {
   }
   // ELK is an alternate Mermaid layout engine (tidier hierarchical columns than the default dagre).
   // It ships as a separate plugin loaded lazily the first time ELK is turned on; register its loaders
-  // onto the (UMD global) mermaid so mermaid.render can use \`layout: elk\`.
+  // onto the (UMD global) mermaid so mermaid.render can use \`layout: elk\`. Pin an EXACT version (not
+  // @0): a dynamic import can carry no SRI, so a floating range would auto-pull a hijacked future
+  // release straight into this authenticated viewer. 0.2.2 pairs with mermaid 11.16.0 (peer ^11.0.2).
   async function ensureElk(){
     if(elkLoaded) return;
-    const m = await import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0/+esm');
+    const m = await import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.2/+esm');
     mermaid.registerLayoutLoaders(m.default ?? m);
     elkLoaded = true;
   }

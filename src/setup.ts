@@ -27,6 +27,7 @@ export interface SetupEnv {
   NS_PORTAL_ISS?: string;
   PORTAL_MODE?: string;
   ACCESS_AUD?: string;
+  ACCESS_TEAM_DOMAIN?: string;
 }
 
 export interface SetupIssue {
@@ -88,6 +89,21 @@ export function setupIssues(env: SetupEnv): SetupIssue[] {
       title: 'Service token is not behind an access gate — reads are REFUSED',
       detail: 'Anyone who reaches this Worker would get whatever the stored token can read, so the token is not used at all until something is in front of it. This is enforced, not advisory (src/exposure.ts).',
       fix: 'Set ACCESS_AUD + ACCESS_TEAM_DOMAIN to turn on the in-Worker Cloudflare Access check (it fails closed). Or run PORTAL_MODE=1 so each caller brings their own ns_t. Or, if you have your own protection in front, set ALLOW_UNGATED_SERVICE_TOKEN=1 to accept the risk deliberately.',
+    });
+  }
+
+  // Cloudflare Access needs BOTH ACCESS_AUD and ACCESS_TEAM_DOMAIN to build a config (accessConfig,
+  // src/access.ts). With only one, the check can't run and is silently inert — and because the exposure
+  // gate keys off the same accessConfig, a stored token is then REFUSED (fail-closed). So an operator who
+  // set ACCESS_AUD expecting protection instead gets a dead deployment. Name the missing half out loud.
+  if (set(env.ACCESS_AUD) && !set(env.ACCESS_TEAM_DOMAIN)) {
+    issues.push({
+      level: !portal && set(env.NS_API_TOKEN) ? 'blocker' : 'warning',
+      title: 'Cloudflare Access is half-configured (ACCESS_TEAM_DOMAIN missing)',
+      detail:
+        'ACCESS_AUD is set but ACCESS_TEAM_DOMAIN is not. The Access check needs both, so it cannot run — ' +
+        'Access is NOT verifying anyone, and a stored service token is refused until this is fixed.',
+      fix: 'Set vars.ACCESS_TEAM_DOMAIN to your yourteam.cloudflareaccess.com host, or remove ACCESS_AUD if you did not mean to enable Access. Then redeploy.',
     });
   }
 
