@@ -43,6 +43,7 @@ import {
 import { viewerHtml } from './viewerApp.js';
 import { brandAccent, productName } from './brand.js';
 import { needsSetup, setupHtml } from './setup.js';
+import { portalModeHtml } from './portalInfo.js';
 import { serviceTokenBlocked, exposureHtml, BLOCKED_REASON } from './exposure.js';
 import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, orgsStatusForDomains } from './ringotel.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
@@ -380,7 +381,13 @@ export default {
       // The internal domain-browser SPA is a SERVICE-mode tool (dia). The delegated `portal` env is an
       // injection backend, not an SPA host — and the SPA there is non-functional anyway (its fetches carry
       // no ns_t) — so don't serve it: withhold the internal tooling surface. dia keeps serving it.
-      if (portalMode(env)) return json({ error: 'Not found' }, 404, cors);
+      // Portal mode has no UI: it's the backend half of an injected add-on, and the internal SPA is
+      // deliberately withheld here (it's a tooling surface, and its fetches carry no ns_t anyway).
+      // Still 404 — but say why, because someone who just deployed this and opened the URL deserves
+      // better than a bare error. Discloses nothing: no config, no names, no data.
+      if (portalMode(env)) {
+        return new Response(portalModeHtml(productName(env)), { status: 404, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
+      }
       // A fresh fork (C3 / the deploy button) cannot be prompted for config, so it arrives here with
       // placeholders and would otherwise serve an SPA that dies on its first fetch. Say what's missing
       // instead. Discloses nothing: presence-only, never values, and it vanishes once configured.

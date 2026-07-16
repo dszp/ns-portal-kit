@@ -32,7 +32,22 @@
     // There is deliberately no default — a default issuer would mean accepting tokens minted by a
     // portal you don't control. Comma-separate if one backend is fronted by several portal hostnames
     // (exact match, no wildcards).
-    "NS_PORTAL_ISS": "manage.example.com"
+    "NS_PORTAL_ISS": "manage.example.com",
+
+    // ── Which mode? Leave BOTH blank for service mode (an internal tool for your own team). ──
+    // These are here, rather than commented out, so the "Deploy to Cloudflare" form asks for them —
+    // which is what lets you stand up a portal-mode deployment without ever touching a terminal.
+    //
+    // PORTAL_MODE "1" = delegated only: no stored token, every request carries the calling user's own
+    // ns_t.
+    //
+    // NOT A STARTING POINT YET. Portal mode is only half of a feature: it does nothing until JS you
+    // inject into your Manager Portal calls it. A reference injection script is planned but NOT
+    // published, so today this means writing that yourself. Leave blank unless that's what you're
+    // doing. See SETUP.md.
+    "PORTAL_MODE": "",
+    // Portal mode only: the browser origin your injected JS runs on — normally your Manager Portal.
+    "ALLOWED_ORIGINS": ""
 
     // ── Optional. Uncomment what you need; each is inert while unset. ──
     //
@@ -44,11 +59,6 @@
     // though a service token is configured. Both values are public identifiers, safe to commit.
     // "ACCESS_AUD": "<your Access application AUD tag>",
     // "ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com",
-    //
-    // Portal mode: delegated-only (no service-token fallback) + policy-gated. For the injected
-    // Manager Portal backend.
-    // "PORTAL_MODE": "1",
-    // "ALLOWED_ORIGINS": "https://manage.example.com",   // the portal origin the injected fetch runs from
     //
     // Domain scoping. ALLOWED_DOMAINS is an app-layer allowlist on top of the token's own NS scope —
     // set it in dev to keep the tool off the wider fleet. BLOCKED_DOMAINS hides domains with nothing

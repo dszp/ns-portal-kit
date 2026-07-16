@@ -5,13 +5,19 @@ Bring your own NetSapiens credentials and Cloudflare account.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dszp/ns-portal-kit)
 
-That clones this repo into your own GitHub account and deploys it to your own Cloudflare. The setup form
-asks for everything up front — project/Worker name, `NS_SERVER`, your API token, and each optional
-integration — so a click-through gives you a **working** deployment. There are no bindings to provision
-(no KV, R2, D1, or Durable Objects), so it deploys clean.
+That clones this repo into **your own** GitHub account and deploys to **your own** Cloudflare. The form
+asks for everything up front — Worker name, `NS_SERVER`, your API token, and which mode to run — so a
+click-through gives you a working deployment. No bindings to provision (no KV, R2, D1, or Durable
+Objects), so it deploys clean.
 
-Fill in at minimum **`NS_SERVER`** and **`NS_API_TOKEN`**; leave the rest blank to keep those features
-off. If you skip something required, open `/` afterwards and it tells you exactly what's missing.
+**Two modes, one form.** Leave `PORTAL_MODE` blank for an internal tool for your team (needs
+`NS_API_TOKEN`) — **start here**. Set it to `1` for a Manager Portal add-on backend, where every request
+carries the calling user's own login token and no credential is stored at all. Want both? Click the
+button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
+
+> **Portal mode needs an injection script that isn't published yet.** It's the backend half: nothing
+> calls it until JS running inside your Manager Portal does. A reference script is planned; until then
+> portal mode means writing that yourself. Service mode is complete and works today.
 
 - **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu →
   queue → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. A
@@ -74,10 +80,15 @@ domain browser and the viewer SPA. The token's NetSapiens scope is the real boun
 > Cloudflare Access check (it fails closed, so a direct-route or `*.workers.dev` hit is refused even
 > with a valid token configured), and/or `ALLOWED_DOMAINS` to bound it at the app layer.
 
-**Portal mode** (`PORTAL_MODE=1`) — no service token at all. The portal user's `ns_t` arrives as
-`Authorization: Bearer …`, is validated (cached, fail-closed), and reads are scoped to that user:
-resellers may read across domains, everyone else is locked to their own. This is the mode for a
-Manager Portal injection backend.
+**Portal mode** (`PORTAL_MODE=1`) — no stored credential at all. It has no UI: it's the **backend half
+of a Manager Portal add-on**. You inject JavaScript into your portal; that JS reads the logged-in
+user's `ns_t` (which the portal already issued), sends it here, and this Worker forwards it to
+NetSapiens verbatim — so every read runs **as that user**, with their scope enforced by the platform
+rather than by us. Your JS then updates the live page with what comes back.
+
+**You supply that JavaScript today** — a reference implementation is planned but not published yet, so
+portal mode is currently the advanced path. Service mode needs nothing extra.
+[The full flow, with a diagram →](./SETUP.md#4-portal-mode-what-it-actually-is)
 
 ## Configuration
 

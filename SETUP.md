@@ -23,9 +23,14 @@ This decides which settings you need. Everything else follows from it.
 **Service mode is the default** and the simpler place to start. A stored token answers *any* request
 that reaches the Worker, so put it behind a gate — see `ACCESS_AUD`.
 
-**Portal mode holds no NetSapiens credential at all.** Each request carries the caller's `ns_t`, which
+**Portal mode is the advanced path today** — it needs an injection script that isn't published yet (see
+[section 4](#4-portal-mode-what-it-actually-is)). **Portal mode holds no NetSapiens credential at all.** Each request carries the caller's `ns_t`, which
 is passed through to NetSapiens as-is; the platform validates it and enforces that user's own scope.
-There's no SPA — it's a backend for JS injected into the Manager Portal.
+There's no SPA — it's a backend for JS **you** inject into the Manager Portal. **[How that actually
+works, with a diagram →](#4-portal-mode-what-it-actually-is)**
+
+**You can run both**, and that's the usual end state — they're two Workers, not two phases. See
+[Running both](#5-running-both-the-usual-end-state).
 
 ## 2. The three you actually need
 
@@ -122,35 +127,145 @@ Truthy values anywhere above are `1`, `true`, `yes`, `on`.
 
 ---
 
-## 6. Switching to portal mode later
+## 4. Portal mode: what it actually is
 
-A button deploy starts in service mode. Moving to portal mode is a config change, not a rebuild — and
-because the button connected your repo to Workers Builds, **a push deploys it**:
+Service mode is a tool **you** open. Portal mode has no UI of its own — it's a **backend for JavaScript
+injected into your Manager Portal**, so your users get extra features inside the portal they already
+use, without logging in anywhere else.
 
-1. In your repo, edit `wrangler.jsonc`:
-   ```jsonc
-   "vars": {
-     "NS_SERVER": "api.yourprovider.com",
-     "NS_PORTAL_ISS": "manage.yourcompany.com",
-     "PORTAL_MODE": "1",
-     "ALLOWED_ORIGINS": "https://manage.yourcompany.com"
-   }
-   ```
-2. Commit and push. Workers Builds redeploys.
-3. Delete the now-unused token: `wrangler secret delete NS_API_TOKEN`. Portal mode never reads it —
-   it returns before the service-token path is even considered — but a leftover credential is a
-   credential, and it would come back into play if `PORTAL_MODE` were ever removed.
-4. Add a custom domain under `routes` (portal-injected JS calling a `*.workers.dev` URL is workable but
-   not something to run in production).
+The flow, per call:
 
-You'll also need JS injected into the Manager Portal to call it — portal mode is a backend, and it
-serves no UI of its own (`/` returns 404 there, deliberately: an internal tool surface shouldn't exist
-on a user-facing endpoint).
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User's browser<br/>(your Manager Portal)
+    participant JS as Your injected JS
+    participant W as ns-portal-kit Worker<br/>(PORTAL_MODE=1)
+    participant NS as NetSapiens API
 
-Running **both** is the usual end state: an internal service-mode viewer for your team behind Access,
-and a portal-mode backend for your users. That's two wrangler environments, one codebase — see below.
+    U->>JS: user opens a portal page
+    JS->>JS: read the logged-in user's ns_t<br/>(the portal already stored it)
+    JS->>W: GET /flow?... + Authorization: Bearer <ns_t>
+    W->>NS: GET /jwt (is this token real? not logged out?)
+    NS-->>W: 200 = valid
+    W->>NS: read domain data, as that user<br/>(the same ns_t, forwarded verbatim)
+    NS-->>W: only what THAT user may see
+    W-->>JS: JSON / a rendered diagram
+    JS->>U: inject it into the live page
+```
 
-## 7. The service-token gate
+The parts worth understanding:
+
+- **You must supply the JavaScript, and that's real work today.** This repo is the backend half. Portal
+  mode does nothing on its own — nothing calls it until JS you inject into your portal does. **A
+  reference injection script is planned but is not published yet**, so right now this means writing it
+  yourself: reading the `ns_t` the portal stored, calling the Worker, and updating the page. How you
+  inject it depends on your NetSapiens portal. If that's more than you want to take on, use service
+  mode — it's complete and needs nothing extra.
+- **The `ns_t` is the logged-in user's own session token**, which the portal has already issued and
+  stored in the browser. Your JS reads it and forwards it; it doesn't create or manage logins.
+- **The Worker stores no NetSapiens credential.** It forwards that same `ns_t` to NetSapiens verbatim,
+  so every read runs *as that user* and NetSapiens enforces their scope. Two users hitting the same
+  Worker see different data because the platform says so — not because we filtered it.
+- **A token is checked before it's trusted.** Structure, expiry, audience and issuer are checked locally
+  (free), then a cached `GET /jwt` confirms it's real and not logged out. Only a literal 200 counts.
+- **It's per-call.** Nothing is stored between requests except a short-lived cache of "was this token
+  valid".
+
+## 5. Running both (the usual end state)
+
+**One Worker is one mode.** `PORTAL_MODE=1` turns the service path *off* on that Worker: no stored-token
+fallback, and `/` returns 404 rather than serving an internal tool surface on a user-facing endpoint.
+
+So the normal setup is **two deployments** — an internal viewer for your team, and a portal backend for
+your users. Pick whichever path suits you; none of them requires you to have both from day one.
+
+### A. Click the deploy button twice (no terminal)
+
+The simplest way, and entirely in the browser.
+
+| | First deploy | Second deploy |
+|---|---|---|
+| Project name | `portal-kit-internal` | `portal-kit-svc` |
+| `NS_API_TOKEN` | your token | *(blank)* |
+| `PORTAL_MODE` | *(blank)* | `1` |
+| `ALLOWED_ORIGINS` | *(blank)* | `https://manage.yourcompany.com` |
+| `NS_SERVER` / `NS_PORTAL_ISS` | yours | the same |
+
+You get two Workers. The button clones the repo into **your** account each time, so you end up with two
+copies there — the project itself stays one repo. The cost is keeping both copies current; if that
+bothers you, use B or C below, which run both Workers from a single repo.
+
+### B. One repo, two Workers, from the dashboard (no terminal)
+
+Deploy once with the button, then in the dashboard: **Workers & Pages → Create → connect the same
+repository**, and set that Worker's **deploy command** to `npx wrangler deploy --env portal`. Add an
+`env.portal` block to `wrangler.jsonc` (below) by editing the file **on github.com** — no local tooling
+needed; committing triggers a build.
+
+### C. One repo, two environments, using wrangler
+
+More setup, but one codebase and one place to update. You'll need [Node.js](https://nodejs.org) and a
+terminal. Nothing here is Worker-specific knowledge — it's clone, edit a file, run two commands.
+
+```bash
+# 1. Get the code. If you used the deploy button, clone the repo IT made in your account
+#    (that's the one already wired to auto-deploy); otherwise clone this one.
+git clone https://github.com/<your-account>/ns-portal-kit
+cd ns-portal-kit
+pnpm install                 # or: npm install
+
+# 2. Log in to Cloudflare. Opens a browser; no API token to create.
+npx wrangler login
+```
+
+Then add an `env` block to `wrangler.jsonc` — one entry per Worker you want. Each becomes its **own**
+Worker script with its own name, URL, secrets and rollback:
+
+```jsonc
+"env": {
+  "internal": {
+    "name": "portal-kit-internal",
+    "vars": {
+      "NS_SERVER": "api.yourprovider.com",
+      "NS_PORTAL_ISS": "manage.yourcompany.com",
+      "ACCESS_AUD": "<your Access AUD tag>",
+      "ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com"
+    }
+  },
+  "portal": {
+    "name": "portal-kit-svc",
+    "vars": {
+      "NS_SERVER": "api.yourprovider.com",
+      "NS_PORTAL_ISS": "manage.yourcompany.com",
+      "PORTAL_MODE": "1",
+      "ALLOWED_ORIGINS": "https://manage.yourcompany.com"
+    }
+  }
+}
+```
+
+```bash
+# 3. Give the internal one a token (secrets are PER ENVIRONMENT — this is the usual trip-up)
+npx wrangler secret put NS_API_TOKEN --env internal
+
+# 4. Deploy each. Two Workers, two URLs, from one repo.
+npx wrangler deploy --env internal
+npx wrangler deploy --env portal
+```
+
+The portal Worker gets no token at all — that's the point of portal mode.
+
+**Two gotchas that bite everyone:**
+
+- **Environments do NOT inherit top-level `vars`.** Every env needs its own full `vars` block — repeat
+  `NS_SERVER` in each. A missing one doesn't warn; it's just absent at runtime.
+- **Secrets are per-environment**: `wrangler secret put NS_API_TOKEN --env internal`.
+- **If your repo is connected to Workers Builds, editing variables in the dashboard won't stick** —
+  the next build overwrites `vars` from `wrangler.jsonc`. Edit the file, not the dashboard. (Secrets are
+  not overwritten.)
+
+## 6. The service-token gate
 
 If `NS_API_TOKEN` is set and **nothing verifiable is in front of it**, the Worker refuses to use it and
 serves setup instructions instead. That's enforced, not advice.
@@ -166,6 +281,28 @@ for anyone who finds it, so the token stays unused until one of these is true:
 | **You protect it yourself** | `ALLOW_UNGATED_SERVICE_TOKEN=1` — a deliberate opt-out for mTLS, a WAF, or an authenticating proxy. You own the consequences. |
 
 Local `wrangler dev` is exempt: it isn't internet-reachable.
+
+## 7. Getting updates later
+
+The deploy button **clones** this repo into your account rather than forking it, so your copy has no
+link back here — there's no "Sync fork" button, and that's true whether you ticked *Create private Git
+repository* or not. (A private copy couldn't sync from a public upstream through the fork UI anyway.)
+
+Point your copy at this one once, and pulling updates is two commands forever after:
+
+```bash
+git remote add upstream https://github.com/dszp/ns-portal-kit   # once
+git fetch upstream
+git merge upstream/main
+git push        # if the repo is wired to Workers Builds, this deploys
+```
+
+Conflicts should be rare and boring: `wrangler.jsonc` is the file you edited, and it's the file most
+likely to move here. Your `vars` are yours — keep them.
+
+If you'd rather not track this repo at all, that's fine too; nothing here phones home, and a deployment
+that works will keep working.
+
 
 ## 8. Where each value goes
 
@@ -185,28 +322,3 @@ Local `wrangler dev` is exempt: it isn't internet-reachable.
 **Locally:** `cp .dev.vars.example .dev.vars` and fill it in. That file is also what the *Deploy to
 Cloudflare* button reads to build its prompt form, which is why it's kept short — everything else is
 here.
-
-## 9. Multiple deployments
-
-Wrangler environments give you one codebase, isolated Workers, and separate rollback — an internal
-service-mode viewer and a portal-mode backend, or a sandbox pointing at a different `NS_SERVER`:
-
-```jsonc
-"env": {
-  "internal": {
-    "name": "portal-kit-internal",
-    "routes": [{ "pattern": "tools.example.com", "custom_domain": true }],
-    "vars": { "NS_SERVER": "api.example.com", "NS_PORTAL_ISS": "manage.example.com",
-              "ACCESS_AUD": "…", "ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com" }
-  },
-  "portal": {
-    "name": "portal-kit-svc",
-    "routes": [{ "pattern": "svc.example.com", "custom_domain": true }],
-    "vars": { "NS_SERVER": "api.example.com", "NS_PORTAL_ISS": "manage.example.com",
-              "PORTAL_MODE": "1", "ALLOWED_ORIGINS": "https://manage.example.com" }
-  }
-}
-```
-
-Deploy one with `wrangler deploy --env internal`; secrets are per-environment
-(`wrangler secret put NS_API_TOKEN --env internal`).
