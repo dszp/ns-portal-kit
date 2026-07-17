@@ -6,13 +6,14 @@
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { resolveFlow, type Snapshot } from '@dszp/netsapiens-lib';
 
-const snapPath = process.argv[2];
-if (!snapPath) {
-  console.error('usage: tsx src/worker.selftest.ts <snapshot.json> [attendantsDir]');
-  process.exit(2);
-}
+// With no argument, run against the committed, fully-genericized fixture so `pnpm test:worker` just
+// works (and can sit in the CI `test` aggregate). Pass a path to point it at any other snapshot's JSON
+// (e.g. a live domain backup). Resolved from this file's own location so the cwd doesn't matter.
+const DEFAULT_SNAP = resolve(fileURLToPath(import.meta.url), '../../test/snapshots/demo.12345.service-snapshot.json');
+const snapPath = process.argv[2] ?? DEFAULT_SNAP;
 const raw = JSON.parse(readFileSync(snapPath, 'utf8')) as Snapshot;
 const domain = String(raw.meta?.domain ?? raw.domain?.domain ?? '');
 
@@ -89,16 +90,28 @@ const nf = () => new Response('[]', { status: 404 });
   if (m) return j(raw.agentsByQueue?.[decodeURIComponent(m[1]!)] ?? []);
   m = path.match(new RegExp(`^${b}/users/([^/]+)/autoattendants/([^/]+)$`));
   if (m) {
-    const d = aaByExt[decodeURIComponent(m[1]!)];
+    const ext = decodeURIComponent(m[1]!);
+    // AA keypress detail. Newer backups embed it as attendantDetailsByUser[ext] (an array, as the API
+    // returns and fetchDomainSnapshot expects); older fixtures supply a single object via a sibling
+    // attendants/ dir (aaByExt). Serve either, always as an array.
+    const d = raw.attendantDetailsByUser?.[ext] ?? (aaByExt[ext] ? [aaByExt[ext]] : undefined);
     return d ? j(d) : nf();
   }
-  if (path === `${b}/dialplans/${domain}/dialrules`) return j(raw.dialrulesByPlan?.[domain] ?? []);
+  // Any dialplan's dialrules — the bare {domain} plan AND each AA's own {domain}_{ext} plan (the
+  // authoritative menu / no-key / star routing). fetchDomainSnapshot fetches both; serve whatever the
+  // snapshot captured, keyed by the plan name in the path.
+  m = path.match(new RegExp(`^${b}/dialplans/([^/]+)/dialrules$`));
+  if (m) return j(raw.dialrulesByPlan?.[decodeURIComponent(m[1]!)] ?? []);
   return nf();
 };
 
 const b64url = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const ISS = 'manage.example.com';
-const tok = `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url({ domain, sub: `9000@${domain}`, aud: 'ns', iss: ISS, exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
+// Craft a delegated ns_t for the fixture domain. `user_scope` is what the portal authz policy keys on
+// (see POLICIES in worker.ts + the full scope matrix in portal.selftest.ts) — a token with no scope is
+// a Basic User and is refused at the portal.access gate, so every delegated call must set one.
+const mkTok = (claims: Record<string, unknown> = {}) =>
+  `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url({ domain, sub: `9000@${domain}`, aud: 'ns', iss: ISS, exp: Math.floor(Date.now() / 1000) + 3600, ...claims })}.sig`;
 
 let pass = 0;
 let fail = 0;
@@ -112,32 +125,44 @@ const ok = (c: boolean, m: string) => {
   const ctx = { waitUntil() {}, passThroughOnException() {} } as any;
   const kind = raw.callqueues?.length ? 'queue' : 'user';
   const ref = raw.callqueues?.length ? String(raw.callqueues[0]!.callqueue) : String(raw.users?.[0]?.user ?? '');
-  const expected = JSON.parse(JSON.stringify(resolveFlow({ ...raw, attendantDetails: aaByExt as any }, { kind, ref } as any)));
+  // Expected graph = resolve the snapshot as-is (embedded attendantDetailsByUser + per-AA dialplans are
+  // what the Worker's fetchDomainSnapshot reconstructs). Only inject the sidecar attendants/ dir when a
+  // fixture actually ships one (legacy shape); modern backups embed it.
+  const expected = JSON.parse(
+    JSON.stringify(resolveFlow(Object.keys(aaByExt).length ? ({ ...raw, attendantDetails: aaByExt } as any) : (raw as any), { kind, ref } as any)),
+  );
   const stripMmd = (g: any) => {
     const { __mermaid, ...rest } = g;
     return rest;
   };
 
   // ================= DELEGATED mode (portal ns_t) =================
+  // A valid ns_t always resolves to a policy-gated principal (there is no delegated-but-unpoliced path).
+  // This block proves the delegated path runs END-TO-END against the REAL snapshot — a reseller reaches
+  // /flow and the graph is byte-identical to a direct resolveFlow — and that the portal.access gate is
+  // wired here (a Basic User is refused). The full scope/domain matrix (reseller cross-domain unlock, OM
+  // domain-lock, NS-scope boundary) lives in portal.selftest.ts, which has a proper multi-domain stub.
   const dEnv = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: 'https://portal.example.com' };
   const dcall = (path: string, headers: Record<string, string> = {}, method = 'GET') =>
     worker.fetch(new Request(`https://w.dev${path}`, { method, headers }), dEnv as any, ctx);
+  const resellerTok = mkTok({ user_scope: 'Reseller' }); // callflow.view is reseller-level
+  const basicTok = mkTok({ user_scope: 'Basic User' }); // below portal.access
 
-  const r1 = await dcall(`/flow?kind=${kind}&ref=${ref}`, { Authorization: `Bearer ${tok}`, Origin: 'https://portal.example.com' });
-  ok(r1.status === 200, `[delegated] GET /flow → 200 (${kind} ${ref})`);
+  const r1 = await dcall(`/flow?kind=${kind}&ref=${ref}`, { Authorization: `Bearer ${resellerTok}`, Origin: 'https://portal.example.com' });
+  ok(r1.status === 200, `[delegated] reseller GET /flow → 200 (${kind} ${ref})`);
   ok(r1.headers.get('Access-Control-Allow-Origin') === 'https://portal.example.com', '[delegated] CORS origin echoed');
   const g1 = await r1.json();
   ok(JSON.stringify(stripMmd(g1)) === JSON.stringify(expected), '[delegated] graph matches direct resolveFlow');
   ok(typeof g1.__mermaid === 'string' && g1.__mermaid.includes('flowchart'), '[delegated] JSON carries __mermaid for the SPA');
 
   const before = jwtCalls;
-  await dcall(`/flow?kind=${kind}&ref=${ref}`, { Authorization: `Bearer ${tok}` });
+  await dcall(`/flow?kind=${kind}&ref=${ref}`, { Authorization: `Bearer ${resellerTok}` });
   ok(jwtCalls === before, `[delegated] JWT verdict cached (jwtCalls stayed ${before})`);
 
-  ok((await dcall(`/domains`, { Authorization: `Bearer ${tok}` })).status === 200, '[delegated] /domains → just the token domain');
-  ok((await dcall(`/flow?domain=other.com&kind=${kind}&ref=${ref}`, { Authorization: `Bearer ${tok}` })).status === 403, '[delegated] cross-domain read → 403');
+  ok((await dcall(`/domains`, { Authorization: `Bearer ${resellerTok}` })).status === 200, '[delegated] reseller /domains → 200');
   ok((await dcall(`/flow?kind=${kind}&ref=${ref}`)).status === 401, '[delegated] missing token → 401');
-  ok((await dcall(`/flow?kind=bogus&ref=1`, { Authorization: `Bearer ${tok}` })).status === 400, '[delegated] bad entity → 400');
+  ok((await dcall(`/flow?kind=bogus&ref=1`, { Authorization: `Bearer ${resellerTok}` })).status === 400, '[delegated] bad entity → 400');
+  ok((await dcall(`/flow?kind=${kind}&ref=${ref}`, { Authorization: `Bearer ${basicTok}` })).status === 403, '[delegated] Basic User → 403 (portal.access gate)');
 
   // ================= STANDALONE mode (internal viewer) =================
   // ALLOW_UNGATED_SERVICE_TOKEN: these cases test STANDALONE-MODE BEHAVIOUR, not deployment posture. The

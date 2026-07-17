@@ -19,7 +19,7 @@
   "//test": "test:worker is deliberately NOT in `test`: it needs a real domain snapshot, which is customer data and correctly absent from this repo. Run it by hand: pnpm test:worker <snapshot.json>",
   "scripts": {
     "flow": "tsx src/cli.ts",
-    "test": "pnpm run test:portal && pnpm run test:ringotel && pnpm run test:nsdevices && pnpm run test:access",
+    "test": "pnpm run test:portal && pnpm run test:ringotel && pnpm run test:nsdevices && pnpm run test:access && pnpm run test:worker",
     "test:worker": "tsx src/worker.selftest.ts",
     "test:ringotel": "tsx src/ringotel.selftest.ts",
     "test:nsdevices": "tsx src/nsDevices.selftest.ts",
