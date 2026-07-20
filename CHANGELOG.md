@@ -17,6 +17,29 @@ Compare that against the latest entry below to see whether there's anything wort
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-07-20
+
+### Changed
+
+- Narrowed the seeded `GENERAL` name matcher to `GENERAL VOICEMAIL` and `GENERAL MAILBOX`. The matcher
+  is a substring test, so bare `GENERAL` also caught a staffed extension displayed as "General Manager".
+  Since a soft name exclusion prevents activation, that cost a real person their app rather than merely
+  skipping a non-human extension. Same reasoning that keeps `CONFERENCE` spelled out instead of `CONF`,
+  which would match surnames. Override the whole list with `RINGOTEL_EXCLUDE_NAMES`.
+
+## [0.2.4] — 2026-07-20
+
+### Changed
+
+- Widened the seeded soft-exclusion name list used when `RINGOTEL_EXCLUDE_NAMES` is not set, to cover
+  the usual shapes of non-human extensions: `SHARED`, `SHARED VOICEMAIL`, `VOICEMAIL`, `FAX`, `GENERAL`,
+  `CONFERENCE`, `CONF RM`, `CONF ROOM`, `ROUTING`. The matcher is substring and case-insensitive, so
+  `VOICEMAIL` catches any department mailbox.
+  `CONFERENCE` is spelled out rather than `CONF`, which would also match surnames, with the abbreviated
+  room forms listed explicitly. These are **soft** exclusions: creation-only and reseller-overridable —
+  an existing user is never blocked. Set `RINGOTEL_EXCLUDE_NAMES` to override the list entirely, or to
+  empty to disable name exclusions.
+
 ## [0.2.3] — 2026-07-20
 
 ### Added

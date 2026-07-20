@@ -149,7 +149,15 @@ export function resolveRingotelConfig(env: RingotelEnv): RingotelConfig {
   }
 
   // Name matchers — seeded (lowercased) unless explicitly set.
-  const rawNames = env.RINGOTEL_EXCLUDE_NAMES !== undefined ? csv(env.RINGOTEL_EXCLUDE_NAMES) : ['SHARED', 'SHARED VOICEMAIL', 'FAX'];
+  // Seeded soft-exclusion name matchers. SUBSTRING, case-insensitive — so 'GENERAL' already covers
+  // bare 'VOICEMAIL' subsumes both 'SHARED VOICEMAIL' and 'GENERAL VOICEMAIL' — the longer forms are
+  // kept to show that more specific matchers can be listed. Bare 'GENERAL' and bare 'CONF' are
+  // deliberately NOT used: they would also match real staffed extensions ('General Manager') and
+  // surnames. 'CONFERENCE' is spelled out deliberately — bare 'CONF' would also match
+  // surnames — with 'CONF RM'/'CONF ROOM' added for the abbreviated forms it therefore misses.
+  // Soft means
+  // reseller-overridable and creation-only: an existing user is never blocked from signing in.
+  const rawNames = env.RINGOTEL_EXCLUDE_NAMES !== undefined ? csv(env.RINGOTEL_EXCLUDE_NAMES) : ['SHARED', 'SHARED VOICEMAIL', 'VOICEMAIL', 'FAX', 'GENERAL VOICEMAIL', 'GENERAL MAILBOX', 'CONFERENCE', 'CONF RM', 'CONF ROOM', 'ROUTING'];
   const excludeNames = rawNames.map((n) => n.toLowerCase());
 
   const excludeExts = csv(env.RINGOTEL_EXCLUDE_EXTS);

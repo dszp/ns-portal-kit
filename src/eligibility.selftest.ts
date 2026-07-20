@@ -55,6 +55,20 @@ ok(good.activatable === true && good.tier === 'ok', 'a normal 3-digit user with 
 
 // --- SOFT: name matchers (default-excluded, reseller-overridable), case-insensitive contains ---
 const shared = user({ names: ['Shared', 'Voicemail Box'] });
+// The SEEDED default (no RINGOTEL_EXCLUDE_NAMES set). Pinned because the same seed is duplicated in the
+// SSO worker's config parser — if the two drift, one system auto-provisions a user the other refuses.
+// The matcher is substring + case-insensitive, so the short forms cover the long ones.
+{
+  const seeded = resolveRingotelConfig({}).excludeNames;
+  ok(JSON.stringify(seeded) === JSON.stringify(['shared', 'shared voicemail', 'voicemail', 'fax', 'general voicemail', 'general mailbox', 'conference', 'conf rm', 'conf room', 'routing']),
+     'seeded excludeNames match the documented default');
+  const hits = (n: string) => seeded.some((m) => n.toLowerCase().includes(m));
+  ok(hits('General Voicemail') && hits('General Mailbox') && hits('Conference Room') && hits('Conf Rm 2') && hits('CONF ROOM B') && hits('Routing') && hits('Fax Line'),
+     'seeded list catches the long forms via their short prefixes');
+  ok(hits('Sales Voicemail'), 'bare VOICEMAIL catches department mailboxes');
+  ok(!hits('Dana Reed') && !hits('Front Office') && !hits('General Manager') && !hits('Confalone'),
+     'seeded list leaves ordinary names alone (incl. General Manager — why bare GENERAL was narrowed)');
+}
 ok(evaluateEligibility(shared, admin, cfg({ excludeNames: ['shared'] })).activatable === false, 'name contains SHARED ⇒ soft-excluded');
 ok(evaluateEligibility(shared, admin, cfg({ excludeNames: ['shared'] })).tier === 'soft', 'name match blocked at SOFT tier');
 ok(evaluateEligibility(user({ names: ['Front Desk', 'FAX'] }), admin, cfg({ excludeNames: ['fax'] })).activatable === false, 'name contains FAX ⇒ soft-excluded');
