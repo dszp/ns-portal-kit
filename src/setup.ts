@@ -27,6 +27,7 @@ export interface SetupEnv {
   NS_API_TOKEN?: string;
   NS_PORTAL_ISS?: string;
   PORTAL_MODE?: string;
+  PORTAL_HANDOFF_URL?: string;
   ACCESS_AUD?: string;
   ACCESS_TEAM_DOMAIN?: string;
 }
@@ -79,6 +80,21 @@ export function setupIssues(env: SetupEnv): SetupIssue[] {
         ? 'Portal backend mode validates every ns_t against this, so all requests will be refused (fail-closed).'
         : 'Standalone mode works without it, but any caller sending a Bearer ns_t will be refused.',
       fix: 'Set vars.NS_PORTAL_ISS to the Manager Portal host that issues your ns_t. Comma-separate several hosts if one backend has more than one portal hostname.',
+    });
+  }
+
+  // Portal backend mode chain-loads the vendor bundle-router from PORTAL_HANDOFF_URL. ABSENT (undefined)
+  // is a misconfiguration — loud but non-fatal: the primary still serves, but Portal Pro would break, so
+  // reflect it in /health `configured`. Present-empty ("") is an INTENTIONAL "no handoff" (correct when
+  // not replacing a vendor) and is NOT flagged. Scoped under portal mode so dia/local are never touched.
+  if (portal && env.PORTAL_HANDOFF_URL === undefined) {
+    issues.push({
+      level: 'blocker',
+      title: 'PORTAL_HANDOFF_URL is not configured',
+      detail:
+        'Portal backend mode serves a primary that chain-loads the vendor bundle-router from this URL. ' +
+        'Unset, the vendor product it replaces would break. Set it to "" only if you are deliberately not replacing a vendor.',
+      fix: 'Set vars.PORTAL_HANDOFF_URL to your vendor bundle-router URL (https), or "" for an intentional no-handoff.',
     });
   }
 

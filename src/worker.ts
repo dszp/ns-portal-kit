@@ -25,6 +25,7 @@ import {
   tokenKey,
   assertBareServer,
   NsClient,
+  NsWriteClient,
   NsApiError,
   fetchDomainSnapshot,
   listDomains,
@@ -35,6 +36,7 @@ import {
   toPrincipal,
   isResellerScope,
   can,
+  needsFreshAuth,
   type Principal,
   type FeaturePolicies,
   type CallSensitivity,
@@ -42,14 +44,33 @@ import {
   type VerdictCache,
   type EntityRef,
 } from '@dszp/netsapiens-lib';
+import { worstSeverity, type HealthFlag } from '@dszp/ringotel-lib';
 import { viewerHtml } from './viewerApp.js';
 import { brandAccent, productName, VERSION } from './brand.js';
 import { needsSetup, setupHtml } from './setup.js';
 import { portalModeHtml } from './portalInfo.js';
 import { serviceTokenBlocked, exposureHtml, BLOCKED_REASON } from './exposure.js';
-import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, orgsStatusForDomains } from './ringotel.js';
+import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeWriteClient, invalidateOrgUsers, resolveForWrite, buildExtIndex } from './ringotel.js';
+import { resolveRingotelConfig, ringotelConfigError, evaluateEligibility, type EligUser } from './eligibility.js';
+import { activate, deactivate, resetPassword, isDomainWritable, RingotelWriteError } from './ringotelActivation.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
 import { accessConfig, verifyAccessRequest } from './access.js';
+import { resolveFeaturePolicies, featuresConfigError, parseSuperadmins } from './features.js';
+import {
+  primaryBasename,
+  primaryJs,
+  parseManifest,
+  buildKitBundle,
+  buildSelfBundle,
+  featurePolicyKeys,
+  selfFeaturePolicyKeys,
+  tierHash,
+  kitGateAllows,
+  secondaryNeedsAuth,
+  isR2Entry,
+  r2Key,
+  KitConfigError,
+} from './kit.js';
 
 interface Env {
   /** NS API host, e.g. "api.example.com" (var). */
@@ -100,6 +121,23 @@ interface Env {
   /** Optional JSON `{ "<nsDomain>": "<branchAddressToMatch>" }` for rare address mismatches. */
   RINGOTEL_OVERRIDES?: string;
 
+  // ── Ringotel activation (writes) — eligibility + the write safety rail (see src/eligibility.ts) ──
+  /** NS device-name suffix for the softphone, e.g. "r" → device "100r". Default "r". */
+  RINGOTEL_ACTIVATION_SUFFIX?: string;
+  /** CSV of name-contains matchers to soft-exclude (default `SHARED,SHARED VOICEMAIL,FAX`). */
+  RINGOTEL_EXCLUDE_NAMES?: string;
+  /** CSV of extension patterns to soft-exclude (default empty; trailing `*` = prefix wildcard). */
+  RINGOTEL_EXCLUDE_EXTS?: string;
+  /** JSON `{ "<domain>": { add?: [...], remove?: [...] } }` per-domain override of the exclude-exts. */
+  RINGOTEL_EXCLUDE_EXTS_BY_DOMAIN?: string;
+  /** Truthy ⇒ the no-device heuristic tightens the name matcher (default off). */
+  RINGOTEL_EXCLUDE_NO_DEVICES?: string;
+  /** CSV of soft categories a reseller may override: `names|exts|no_devices|all`. */
+  RINGOTEL_RESELLER_OVERRIDE?: string;
+  /** WRITE SAFETY RAIL — allowlist of domains where writes may mutate. Empty ⇒ all writes refused
+   *  (fail-closed); `*` ⇒ all scope-permitted; a CSV list ⇒ only those. NS + Ringotel are LIVE. */
+  RINGOTEL_WRITE_DOMAINS?: string;
+
   // ── Optional integration: NetSapiens device details (basic; see src/nsDevices.ts) ──
   /** Truthy enables desk-phone enrichment (model + 🟢/🔴 registration presence) on ###/#### device lines. */
   NS_DEVICE_DETAILS?: string;
@@ -123,6 +161,24 @@ interface Env {
    * byte-identical. See src/portal.selftest.ts.
    */
   PORTAL_MODE?: string;
+
+  // ── Worker-served Manager-Portal injection (portal-mode-only; see src/kit.ts) ──────────────────────
+  /** Public primary basename, served at `/<basename>.js` (default `p`). Validated `^[a-z0-9_-]+$`. */
+  PRIMARY_BASENAME?: string;
+  /** Vendor bundle-router URL the primary chain-loads first (async). No default; present-empty ⇒ none;
+   *  absent ⇒ loud-but-non-fatal (a `/health` `configured:false` signal, see setup.ts). Must be https. */
+  PORTAL_HANDOFF_URL?: string;
+  /** JSON array of secondary-injection manifest entries (`{name,from:'r2:<key>'|'url:<https>',auth}`). */
+  PORTAL_SECONDARIES?: string;
+  /** JSON `{ "<feature.key>": <gate> }` overriding the built-in gating defaults (see src/features.ts). */
+  PORTAL_FEATURES?: string;
+  /** Comma-separated `user@domain` accounts that see everything (except CC-only) + gate `superadmin`. */
+  PORTAL_SUPERADMINS?: string;
+  /** Optional app-dashboard link base for gated features (empty ⇒ plain label). Gated bundle only. */
+  RINGOTEL_APP_BASE_URL?: string;
+  /** OPTIONAL private R2 binding serving `r2:` manifest secondaries. Structural so selftests can mock it;
+   *  absent ⇒ any `r2:` entry is a loud config error (never served). */
+  ASSETS?: { get(key: string): Promise<{ text(): Promise<string> } | null> };
 
   /**
    * OPTIONAL Cloudflare Rate Limiting binding for ns_t live-check throttling (defense-in-depth, see
@@ -209,31 +265,11 @@ function portalModeConfigError(env: Env): string | null {
 }
 
 /**
- * Host-owned feature policies for the svc portal (fail-closed; empty/unknown ⇒ deny). First pass:
- * David only — as himself (reseller/super-user) or masked into any domain (masking is a reseller
- * capability). Expanding later = add rules / feature keys, not code.
+ * Feature policies are no longer hardcoded here — they're assembled per-request by
+ * `resolveFeaturePolicies(env)` (src/features.ts) from the FEATURE_REGISTRY defaults ⊕ any
+ * PORTAL_FEATURES / PORTAL_SUPERADMINS overrides. The registry defaults reproduce the prior per-scope
+ * matrix exactly, so behavior is unchanged until an operator sets those vars.
  */
-const POLICIES: FeaturePolicies = {
-  // Reach the svc portal at all: reseller/super-user (cross-domain) + office managers (own domain,
-  // real or masked-as). Matching is by EFFECTIVE scope, so "masking as OM" surfaces as scope OM here.
-  'portal.access': [{ scopes: ['Super User', 'Reseller', 'Office Manager'] }],
-  // Call Flow Diagram (/flow): reseller-level — ALL resellers, not office managers.
-  'callflow.view': [{ scopes: ['Super User', 'Reseller'] }],
-  // Ringotel "App Active/Not Active" banner (/ringotel/org): reseller-level only.
-  'ringotel.orgStatus': [{ scopes: ['Super User', 'Reseller'] }],
-  // Force a fleet-directory cache refresh (?refresh=ringotel): reseller-level only. A refresh bypasses
-  // the ~1h directory cache and re-digs the WHOLE fleet against the shared RINGOTEL_API_KEY (~200
-  // upstream calls). ringotel.userStatus admits Office Managers, so without this an OM could loop
-  // ?refresh and exhaust/ban the fleet key for every customer. Reseller-only, and additionally
-  // coalesced fleet-wide in getDirectory so even a reseller can't loop it into an unbounded dig.
-  'ringotel.refresh': [{ scopes: ['Super User', 'Reseller'] }],
-  // Per-user app-status column (/ringotel/users): resellers + office managers (real or masked).
-  'ringotel.userStatus': [{ scopes: ['Super User', 'Reseller', 'Office Manager'] }],
-  // App-status column on the reseller domain list (/ringotel/orgs): reseller-level only.
-  'ringotel.orgList': [{ scopes: ['Super User', 'Reseller'] }],
-  // NOTE: shipped features are ungated to all resellers (by scope). A NEW feature that should start
-  // David-only adds its own key with a `users: ['admin@0000.12345.service']` restriction on the rule.
-};
 
 /**
  * Route sensitivity — `sensitivity` is compile-required (the `satisfies` forces classification, so a
@@ -247,7 +283,50 @@ const ROUTES = {
   '/ringotel/org': { sensitivity: 'read' },
   '/ringotel/users': { sensitivity: 'read' },
   '/ringotel/orgs': { sensitivity: 'read' },
+  '/ringotel/user': { sensitivity: 'read' },
+  '/ringotel/activate': { sensitivity: 'write' },
+  '/ringotel/resetPassword': { sensitivity: 'write' },
+  '/kit/portal.js': { sensitivity: 'read' },
+  '/kit/self.js': { sensitivity: 'read' },
+  '/me/status': { sensitivity: 'read' },
+  '/me/devices': { sensitivity: 'read' },
+  '/me/resetPassword': { sensitivity: 'write' },
 } satisfies Record<string, { sensitivity: CallSensitivity }>;
+
+/** POST paths — the write routes. Everything else is GET-only (405 otherwise). */
+const WRITE_PATHS = new Set(['/ringotel/activate', '/ringotel/resetPassword', '/me/resetPassword']);
+
+/**
+ * Loud, fail-closed validation of the static injection config (portal-mode-only). A malformed
+ * PRIMARY_BASENAME / PORTAL_SECONDARIES / PORTAL_HANDOFF_URL is a deploy-time mistake: surface it as a
+ * 500 with an actionable reason on every request (after /health), rather than throwing deep in a route.
+ * Returns null when off (non-portal) or valid.
+ */
+function kitConfigError(env: Env): string | null {
+  if (!portalMode(env)) return null;
+  try {
+    primaryBasename(env);
+    parseManifest(env);
+  } catch (e) {
+    if (e instanceof KitConfigError) return e.message;
+    throw e;
+  }
+  const h = env.PORTAL_HANDOFF_URL;
+  if (h !== undefined && h.trim() !== '' && !/^https:\/\/\S+$/i.test(h.trim()))
+    return 'PORTAL_HANDOFF_URL must be an https URL (or unset for a loud no-handoff signal, or "" for an intentional none)';
+  // RINGOTEL_APP_BASE_URL becomes an <a href> in the gated bundle — require https (buildKitBundle also
+  // drops a non-https value defensively, but fail loud so the operator fixes it rather than silently
+  // losing the app-dashboard links).
+  const ab = env.RINGOTEL_APP_BASE_URL;
+  if (ab !== undefined && ab.trim() !== '' && !/^https:\/\/\S+$/i.test(ab.trim()))
+    return 'RINGOTEL_APP_BASE_URL must be an https URL (it becomes an app-dashboard link href), or unset';
+  // An r2: secondary with no ASSETS binding is a broken deploy — surface it uniformly here (loud, every
+  // route) rather than as a per-name 500 on the asset route (which would disclose config to an
+  // unauthenticated caller before the gate). parseManifest already validated above, so it won't throw.
+  if (!env.ASSETS && parseManifest(env).some(isR2Entry))
+    return 'A PORTAL_SECONDARIES entry uses r2: but no ASSETS R2 binding is bound';
+  return null;
+}
 
 /** Parse the domain allowlist (normalized); null ⇒ unrestricted. */
 function domainAllowlist(env: Env): Set<string> | null {
@@ -311,7 +390,7 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   };
   if (origin && allowed.includes(origin.toLowerCase())) {
     h['Access-Control-Allow-Origin'] = origin; // echo the exact allowed origin (never '*')
-    h['Access-Control-Allow-Methods'] = 'GET, OPTIONS';
+    h['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'; // POST for the write routes (activate/reset)
     h['Access-Control-Allow-Headers'] = 'Authorization, Content-Type, Accept';
     h['Access-Control-Max-Age'] = '86400';
   }
@@ -330,6 +409,8 @@ interface Auth {
   defaultDomain?: string;
   /** Portal-backend-mode principal (set only in portal backend mode). */
   principal?: Principal;
+  /** True when this caller passed portal.self but NOT portal.access — fenced to the self surface. */
+  self?: boolean;
 }
 
 /** HttpError carries a status so the handler can map it to a response. */
@@ -367,14 +448,46 @@ function portalIss(env: Env): string | string[] {
  * the control there. assertDomainReadable is: it bounds these routes to domains the caller's token can
  * actually read in NetSapiens, in BOTH modes.
  */
-function requireFeature(auth: Auth, feature: string, env: Env): void {
+function requireFeature(auth: Auth, feature: string, env: Env, policies: FeaturePolicies): void {
   // Policy applies whenever a delegated identity is present — NOT only when PORTAL_MODE parses. A
   // principal is built for every valid Bearer ns_t now (resolveAuth), so a delegated caller can't
   // dodge feature gating by the deployment forgetting/mistyping the mode flag. Standalone SERVICE mode
   // has no principal by design (there is no delegated identity, only a stored token); there,
   // assertDomainReadable is the control, not policy.
   if (!auth.principal) return;
-  if (!can(auth.principal, feature, POLICIES)) throw new HttpError(403, `Not authorized: ${feature}`);
+  if (!can(auth.principal, feature, policies)) throw new HttpError(403, `Not authorized: ${feature}`);
+}
+
+/**
+ * Verify a Bearer ns_t → Principal, WITHOUT the portal.access gate or domain scoping. The shared auth
+ * core for resolveAuth (data routes) AND the per-entry gated /kit routes (a manifest secondary at level
+ * `auth` admits ANY valid ns_t, so portal.access can't be baked in here). Applies the same live-check
+ * rate-limit + verdict cache. Returns null when there is NO Bearer token; throws (401/429/502) on a bad
+ * token or a flood. The CALLER decides authorization (portal.access, a manifest level, a feature key).
+ */
+async function resolvePrincipal(request: Request, env: Env): Promise<{ token: string; principal: Principal; verdict: JwtVerdict } | null> {
+  const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
+  if (!bearer) return null;
+  const vcache = new CacheApiVerdictCache(caches.default);
+  // Rate-limit ONLY the expensive path. Peek the verdict cache with the SAME key verify() uses
+  // (tokenKey(token, assertBareServer(server)) — must mirror the lib); a hit is served without an
+  // upstream call, so it doesn't count. A miss would drive a live /jwt roundtrip → apply the per-IP
+  // budget and 429 over it, so a flood of distinct forged tokens can't amplify against the NS core.
+  let cachedHit = false;
+  try {
+    cachedHit = !!(await vcache.get(await tokenKey(bearer, assertBareServer(env.NS_SERVER))));
+  } catch {
+    /* bad server / cache miss: treat as a miss and let verify() produce the real verdict */
+  }
+  if (!cachedHit && (await liveCheckRateLimited(request, env))) {
+    throw new HttpError(429, 'Too many authentication attempts; please slow down');
+  }
+  const verdict = await verify(bearer, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), cache: vcache });
+  if (!verdict.ok) {
+    const status = verdict.live === 'invalid' ? (verdict.statusCode ?? 401) : verdict.live === 'error' ? 502 : 401;
+    throw new HttpError(status, 'JWT validation failed', verdict.reason);
+  }
+  return { token: bearer, principal: toPrincipal(verdict), verdict };
 }
 
 /**
@@ -383,36 +496,22 @@ function requireFeature(auth: Auth, feature: string, env: Env): void {
  * serve delegated reads with every gate bypassed). Portal mode's only remaining difference is that it
  * has NO service-token fallback. Standalone service mode (a stored token, no bearer) is unchanged.
  */
-async function resolveAuth(request: Request, env: Env): Promise<Auth> {
-  const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
-
-  if (bearer) {
-    const vcache = new CacheApiVerdictCache(caches.default);
-    // Rate-limit ONLY the expensive path. Peek the verdict cache with the SAME key verify() uses
-    // (tokenKey(token, assertBareServer(server)) — must mirror the lib); a hit is served without an
-    // upstream call, so it doesn't count. A miss would drive a live /jwt roundtrip → apply the per-IP
-    // budget and 429 over it, so a flood of distinct forged tokens can't amplify against the NS core.
-    let cachedHit = false;
-    try {
-      cachedHit = !!(await vcache.get(await tokenKey(bearer, assertBareServer(env.NS_SERVER))));
-    } catch {
-      /* bad server / cache miss: treat as a miss and let verify() produce the real verdict */
-    }
-    if (!cachedHit && (await liveCheckRateLimited(request, env))) {
-      throw new HttpError(429, 'Too many authentication attempts; please slow down');
-    }
-    const verdict = await verify(bearer, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), cache: vcache });
-    if (!verdict.ok) {
-      const status = verdict.live === 'invalid' ? (verdict.statusCode ?? 401) : verdict.live === 'error' ? 502 : 401;
-      throw new HttpError(status, 'JWT validation failed', verdict.reason);
-    }
+async function resolveAuth(request: Request, env: Env, policies: FeaturePolicies): Promise<Auth> {
+  const authed = await resolvePrincipal(request, env);
+  if (authed) {
+    const { token, principal, verdict } = authed;
     if (!verdict.domain) throw new HttpError(403, 'Token has no domain claim; cannot scope reads');
-    const principal = toPrincipal(verdict);
-    if (!can(principal, 'portal.access', POLICIES)) throw new HttpError(403, 'Not authorized for the svc portal');
-    const reseller = isResellerScope(principal.scope);
-    return reseller
-      ? { token: bearer, principal, defaultDomain: verdict.domain }   // any domain; own by default
-      : { token: bearer, principal, lockedDomain: verdict.domain };   // as-user, domain-locked
+    if (can(principal, 'portal.access', policies)) {
+      const reseller = isResellerScope(principal.scope);
+      return reseller
+        ? { token, principal, defaultDomain: verdict.domain }   // any domain; own by default
+        : { token, principal, lockedDomain: verdict.domain };   // as-user, domain-locked
+    }
+    // Not an admin: admit as a SELF principal iff portal.self allows — fenced (below) to /me/* + /kit/self.js.
+    if (can(principal, 'portal.self', policies)) {
+      return { token, principal, lockedDomain: verdict.domain, self: true };
+    }
+    throw new HttpError(403, 'Not authorized for the svc portal');
   }
 
   // No bearer. Portal backend mode is delegated-only: never fall back to the stored token.
@@ -435,16 +534,17 @@ async function resolveAuth(request: Request, env: Env): Promise<Auth> {
  * With a delegated principal → reseller/super-user only (ringotel.refresh); a looping Office Manager is
  * refused and simply reads the cache. getDirectory additionally coalesces refreshes fleet-wide.
  */
-function refreshRequested(url: URL, auth: Auth, env: Env): boolean {
+function refreshRequested(url: URL, auth: Auth, env: Env, policies: FeaturePolicies): boolean {
   if (url.searchParams.get('refresh') !== 'ringotel') return false;
   if (!auth.principal) return true;                 // standalone service tool (behind Access): operator-controlled
-  return can(auth.principal, 'ringotel.refresh', POLICIES);
+  return can(auth.principal, 'ringotel.refresh', policies);
 }
 
-/** Which domain this request may read: delegated is locked to its own; service takes ?domain.
- *  The ALLOWED_DOMAINS gate applies to BOTH modes — a domain outside it is refused (403). */
-function requireDomain(auth: Auth, url: URL, env: Env): string {
-  const param = normDomain(url.searchParams.get('domain') ?? '');
+/** Which domain this request may act on, from a raw domain value (query for reads, JSON body for writes):
+ *  delegated is locked to its own; service/reseller takes the supplied domain. The ALLOWED_DOMAINS gate
+ *  applies to BOTH modes — a domain outside it is refused (403). */
+function requireDomainValue(auth: Auth, raw: string, env: Env): string {
+  const param = normDomain(raw ?? '');
   let domain: string;
   if (auth.lockedDomain) {
     const locked = normDomain(auth.lockedDomain);
@@ -460,6 +560,85 @@ function requireDomain(auth: Auth, url: URL, env: Env): string {
   const allow = domainAllowlist(env);
   if (allow && !allow.has(domain)) throw new HttpError(403, `Domain "${domain}" is not in ALLOWED_DOMAINS`);
   return domain;
+}
+
+/** Read-route convenience: the domain comes from `?domain=`. */
+function requireDomain(auth: Auth, url: URL, env: Env): string {
+  return requireDomainValue(auth, url.searchParams.get('domain') ?? '', env);
+}
+
+/**
+ * Feature gate for WRITE routes. Unlike the read `requireFeature`, a missing principal fails CLOSED: a
+ * write must never proceed without a delegated identity (there is no "service-token write" path). Then
+ * the usual policy check.
+ */
+function requireWriteFeature(auth: Auth, feature: string, policies: FeaturePolicies): void {
+  if (!auth.principal) throw new HttpError(403, `Not authorized: ${feature} (writes require a delegated ns_t)`);
+  if (!can(auth.principal, feature, policies)) throw new HttpError(403, `Not authorized: ${feature}`);
+}
+
+/**
+ * The write safety rail (deploy-level; NS + Ringotel are LIVE). A write may only mutate a domain on the
+ * RINGOTEL_WRITE_DOMAINS allowlist — empty ⇒ ALL writes refused (fail-closed), '*' ⇒ all scope-permitted.
+ * Orthogonal to the feature gate (WHO) — this bounds WHERE.
+ */
+function assertDomainWritable(domain: string, writeDomains: string[] | '*'): void {
+  if (!isDomainWritable(domain, writeDomains))
+    throw new HttpError(403, `Writes are not enabled for domain "${domain}"`, 'RINGOTEL_WRITE_DOMAINS does not permit this domain (empty ⇒ all writes refused)');
+}
+
+/**
+ * Force a fresh live ns_t re-validation before a write (closes the revocation gap — a server-side logout
+ * must not leave a cached "valid" verdict good enough to mutate). Driven by needsFreshAuth('write').
+ */
+async function requireFreshAuth(auth: Auth, env: Env): Promise<void> {
+  if (!auth.principal) return; // writes already required a principal (requireWriteFeature)
+  const fresh = await verify(auth.token, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), forceFresh: true, cache: new CacheApiVerdictCache(caches.default) });
+  if (!fresh.ok) {
+    const status = fresh.live === 'invalid' ? (fresh.statusCode ?? 401) : 502;
+    throw new HttpError(status, 'Write requires a fresh token; re-validation failed', fresh.reason);
+  }
+}
+
+const encPath = (s: string): string => encodeURIComponent(s);
+const str = (v: unknown): string => (v == null ? '' : String(v)).trim();
+
+/**
+ * Adapt a raw NS user record into the eligibility engine's normalized shape. Field names are read
+ * defensively across v1/v2 spellings — the exact set is confirmed against the live API in the deploy
+ * verify step. `srv_code` non-blank marks a system/service user (HARD-excluded).
+ */
+/** First non-blank email across the likely v2 field spellings (a user may carry several). */
+function firstEmail(u: Record<string, unknown>): string {
+  for (const k of ['email', 'email-address', 'email_address', 'emailaddress']) {
+    const v = u[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (Array.isArray(v)) for (const e of v) if (typeof e === 'string' && e.trim()) return e.trim();
+  }
+  return '';
+}
+
+function nsUserToElig(u: Record<string, unknown>, ext: string, deviceCount: number): EligUser {
+  const first = str(u['first-name'] ?? u['first_name'] ?? u['name-first-name']);
+  const last = str(u['last-name'] ?? u['last_name'] ?? u['name-last-name']);
+  const display = str(u['display-name'] ?? u['name'] ?? u['subscriber_name']);
+  const srvCode = str(u['srv_code'] ?? u['srv-code'] ?? u['service-code']);
+  return { ext, srvCode, email: firstEmail(u), names: [first, last, display].filter(Boolean), deviceCount };
+}
+
+/**
+ * The single display name to push into Ringotel for an NS user: `First Last` when either part exists,
+ * else an explicit display-name field. Deliberately does NOT fall back to `subscriber_name`/`name` — in
+ * NS those carry the extension number (n8n uses `subscriber_name` as the `<ext>r` device base), which
+ * would poison the Ringotel name. Distinct from `nsUserToElig().names`, which unions all parts for the
+ * eligibility contains-matchers; here we want ONE clean name, not a concatenation. Caller falls back to
+ * the extension when this is blank.
+ */
+function nsDisplayName(u: Record<string, unknown>): string {
+  const first = str(u['first-name'] ?? u['first_name'] ?? u['name-first-name']);
+  const last = str(u['last-name'] ?? u['last_name'] ?? u['name-last-name']);
+  const full = [first, last].filter(Boolean).join(' ').trim();
+  return full || str(u['display-name'] ?? u['name-full-name']);
 }
 
 /**
@@ -497,6 +676,28 @@ async function assertDomainReadable(client: NsClient, domain: string): Promise<v
   }
 }
 
+/** Shared status projection: does `domain` have a bound Ringotel org (`present`), and is `ext` activated
+ * within it (`active`)? Reads the cached org-users blob (~10-min TTL) — the SAME source the admin
+ * `/ringotel/user` route uses, so self + admin reads share one Ringotel AdminAPI call. */
+async function computeUserStatus(domain: string, ext: string, env: Env, cache: Cache): Promise<{ present: boolean; active: boolean; status: unknown }> {
+  const all = await usersStatusForDomain(domain, env, cache, { refresh: false });
+  const present = !!all.active;
+  const status = present && ext && all.users ? (all.users[ext] ?? null) : null;
+  const active = present && !!(status && (status as { activated?: boolean }).activated);
+  return { present, active, status };
+}
+
+/** Resolve the CALLER's own NS user via the `~` self-wildcard — NS resolves it from the bearer token, so
+ * it is authoritative and cannot be aimed at another user. Returns the base extension + domain (+ the raw
+ * record for email). Falls back to the signed principal if the read fails. `~` is a literal wildcard —
+ * never encPath it. */
+async function resolveSelfNsUser(client: NsClient, principal: Principal): Promise<{ ext: string; domain: string; record: Record<string, unknown> | null }> {
+  const rec = (await client.get('/domains/~/users/~').catch(() => null)) as Record<string, unknown> | null;
+  const ext = rec && typeof rec.user === 'string' && rec.user.trim() ? rec.user.trim() : principal.user;
+  const domain = normDomain(rec && typeof rec.domain === 'string' && rec.domain.trim() ? rec.domain.trim() : principal.domain);
+  return { ext, domain, record: rec };
+}
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const cors = corsHeaders(request, env);
@@ -514,6 +715,26 @@ export default {
     // before every other route so a typo can't serve a single delegated read with the gate disabled.
     const pmErr = portalModeConfigError(env);
     if (pmErr) return json({ error: 'Server misconfigured', reason: pmErr }, 500, cors);
+
+    // Fail closed + loud on a malformed injection config (portal-mode-only) — after /health so probes
+    // still work. A bad basename/manifest/handoff is a deploy mistake; 500 with a reason beats a deep throw.
+    const kitErr = kitConfigError(env);
+    if (kitErr) return json({ error: 'Server misconfigured', reason: kitErr }, 500, cors);
+
+    // Fail closed + loud on a malformed PORTAL_FEATURES / PORTAL_SUPERADMINS — after /health, and in
+    // EVERY mode (the resolved policies below are used for delegated auth regardless of PORTAL_MODE).
+    const featErr = featuresConfigError(env);
+    if (featErr) return json({ error: 'Server misconfigured', reason: featErr }, 500, cors);
+
+    // Fail closed + loud on bad RINGOTEL_* activation config (exclusion matchers, the write-domain rail).
+    const rtErr = ringotelConfigError(env);
+    if (rtErr) return json({ error: 'Server misconfigured', reason: rtErr }, 500, cors);
+
+    // The effective feature policies for THIS request: registry defaults ⊕ PORTAL_FEATURES overrides,
+    // each gate resolved through the level vocabulary + the superadmin union. Computed once per fetch
+    // (cheap, pure) and threaded to every gate below — never memoized in module scope (avoids stale
+    // config across deploys). Safe here: featuresConfigError above already proved it won't throw.
+    const policies = resolveFeaturePolicies(env);
 
     // Cloudflare Access gate (defense in depth for standalone-mode deployments). Inert unless BOTH
     // ACCESS_AUD and ACCESS_TEAM_DOMAIN are set (accessConfig() !== null — AUD alone cannot build the
@@ -553,11 +774,94 @@ export default {
       }
       return new Response(viewerHtml(env), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
     }
-    if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, cors);
+    if (request.method !== 'GET' && !(request.method === 'POST' && WRITE_PATHS.has(url.pathname)))
+      return json({ error: 'Method not allowed' }, 405, cors);
 
     try {
-      const auth = await resolveAuth(request, env);
+      // ── Worker-served injection (portal-mode-only; dia/local never expose these) ──────────────────
+      // Public neutral PRIMARY at /<basename>.js — no auth, cache-in-front OK. Carries nothing sensitive.
+      if (portalMode(env) && url.pathname === `/${primaryBasename(env)}.js`) {
+        return new Response(primaryJs(env), { headers: { 'content-type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=300', ...cors } });
+      }
+
+      // Manifest SECONDARY at /kit/asset/<name>.js — served from the private ASSETS binding, gated
+      // per-entry (public / auth / admin / superadmin / any key). Pre-resolveAuth: `public` needs no token,
+      // and `auth` admits any valid ns_t (not just portal.access), so it can't use resolveAuth.
+      if (portalMode(env) && url.pathname.startsWith('/kit/asset/')) {
+        const name = url.pathname.slice('/kit/asset/'.length).replace(/\.js$/i, '');
+        const entry = parseManifest(env).find((e) => e.name === name && isR2Entry(e));
+        if (!entry) return json({ error: 'Not found' }, 404, cors); // unknown, or a url: entry (loaded direct)
+        // Gate BEFORE touching the binding, so an unauthenticated caller learns nothing about config.
+        if (secondaryNeedsAuth(entry.auth)) {
+          const authed = await resolvePrincipal(request, env);
+          if (!authed) throw new HttpError(401, 'This asset requires Authorization: Bearer <ns_t>');
+          if (!kitGateAllows(entry.auth, authed.principal, parseSuperadmins(env))) throw new HttpError(403, `Not authorized: ${entry.name}`);
+        }
+        // kitConfigError already 500s (uniformly, pre-auth) if an r2: entry exists with no ASSETS binding,
+        // so reaching here guarantees it's bound.
+        const obj = await env.ASSETS!.get(r2Key(entry));
+        if (!obj) return json({ error: 'Not found' }, 404, cors);
+        // Spread cache AFTER cors: corsHeaders always sets `Vary: Origin`, so a gated entry must win with
+        // `Vary: Origin, Authorization` (drop Origin and a shared cache could serve one origin's bytes to
+        // another). The public case keeps cors's `Vary: Origin`.
+        const cache: Record<string, string> = secondaryNeedsAuth(entry.auth)
+          ? { 'Cache-Control': 'private, max-age=120', Vary: 'Origin, Authorization' }
+          : { 'Cache-Control': 'public, max-age=300' };
+        return new Response(await obj.text(), { headers: { 'content-type': 'text/javascript; charset=utf-8', ...cors, ...cache } });
+      }
+
+      const auth = await resolveAuth(request, env, policies);
       const client = new NsClient({ server: env.NS_SERVER, token: auth.token });
+
+      // A self principal (portal.self but not portal.access) may reach ONLY the self surface, and ONLY in
+      // portal-backend mode — so dia/standalone gains no delegated self surface. Every admin route keeps
+      // its own gate, but /domains and /entities lean on resolveAuth's admin gate, so fence here.
+      if (auth.self) {
+        const sp = url.pathname;
+        const selfOk = portalMode(env) && (sp === '/me/status' || sp === '/me/devices' || sp === '/me/resetPassword' || sp === '/kit/self.js');
+        if (!selfOk) throw new HttpError(403, 'Not authorized for the svc portal');
+      }
+
+      // Gated per-tier BUNDLE. Portal-mode-only (like the primary/asset routes) so dia/local stay
+      // byte-identical — otherwise an Access-gated dia caller with a reseller ns_t would get the bundle
+      // (incl. the label) instead of a 404. resolveAuth already gated portal.access; also require a
+      // delegated principal (service mode has none ⇒ 403, fail closed). Per-tier bytes only.
+      if (portalMode(env) && url.pathname === '/kit/portal.js') {
+        if (!auth.principal) throw new HttpError(403, 'The gated bundle requires a delegated ns_t');
+        const allowedKeys = featurePolicyKeys().filter((k) => can(auth.principal!, k, policies));
+        // Server tier-cache: key includes a host discriminator (caches.default is zone-shared across
+        // dia/portal/dev on acmevoice.cloud) + VERSION, so tiers never collide and a deploy busts it.
+        const tierKey = new Request(`https://inject.internal/${url.hostname}/portal/${tierHash(allowedKeys)}/${VERSION}`);
+        const hit = await caches.default.match(tierKey);
+        let bundle: string;
+        if (hit) {
+          bundle = await hit.text();
+        } else {
+          bundle = buildKitBundle(allowedKeys, env);
+          await caches.default.put(tierKey, new Response(bundle, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'max-age=60' } }));
+        }
+        // cors last would clobber Vary with `Origin`; set our headers AFTER cors so `Vary: Origin,
+        // Authorization` wins (per-token bytes must not be shared across origins by a cache).
+        return new Response(bundle, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...cors, 'Cache-Control': 'private, max-age=120', Vary: 'Origin, Authorization' } });
+      }
+
+      // The minimal SELF bundle: own-account features. Portal-mode-only (like the admin bundle). Any
+      // principal that passes portal.self gets it (admins too, for their own home widget); per-tier bytes.
+      if (portalMode(env) && url.pathname === '/kit/self.js') {
+        if (!auth.principal) throw new HttpError(403, 'The self bundle requires a delegated ns_t');
+        if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
+        const selfKeys = selfFeaturePolicyKeys().filter((k) => can(auth.principal!, k, policies));
+        const tierKey = new Request(`https://inject.internal/${url.hostname}/self/${tierHash(selfKeys)}/${VERSION}`);
+        const hit = await caches.default.match(tierKey);
+        let bundle: string;
+        if (hit) {
+          bundle = await hit.text();
+        } else {
+          bundle = buildSelfBundle(selfKeys, env);
+          await caches.default.put(tierKey, new Response(bundle, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'max-age=60' } }));
+        }
+        return new Response(bundle, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...cors, 'Cache-Control': 'private, max-age=120', Vary: 'Origin, Authorization' } });
+      }
 
       if (url.pathname === '/domains') {
         const allow = domainAllowlist(env);
@@ -578,7 +882,7 @@ export default {
       if (url.pathname === '/flow') {
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
-        if (auth.principal && !can(auth.principal, 'callflow.view', POLICIES)) throw new HttpError(403, 'Not authorized: callflow.view');
+        if (auth.principal && !can(auth.principal, 'callflow.view', policies)) throw new HttpError(403, 'Not authorized: callflow.view');
         const kind = (url.searchParams.get('kind') ?? '').toLowerCase();
         const ref = url.searchParams.get('ref') ?? '';
         if (!ENTITY_KINDS.has(kind) || !ref) return json({ error: 'Provide ?kind=did|user|queue|attendant&ref=<id>' }, 400, cors);
@@ -590,7 +894,7 @@ export default {
         // and the graph is byte-identical to the NS-only baseline. Best-effort & isolated: it never
         // changes this handler's status (enrichFlowGraph swallows its own errors).
         if (url.searchParams.get('enrich') !== '0') {
-          const refresh = refreshRequested(url, auth, env);
+          const refresh = refreshRequested(url, auth, env, policies);
           if (nsDeviceDetailsEnabled(env)) await enrichDeviceDetails(graph, client, caches.default, domain, { refresh });
           if (ringotelEnabled(env)) await enrichFlowGraph(graph, domain, env, caches.default, { refresh });
         }
@@ -606,13 +910,13 @@ export default {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
-        requireFeature(auth, 'ringotel.orgStatus', env);
+        requireFeature(auth, 'ringotel.orgStatus', env, policies);
         // Bound Ringotel data by NetSapiens scope in EVERY mode. These routes resolve from the
         // fleet-wide RINGOTEL_API_KEY keyed only by a domain string, so without this a caller could name
         // any domain in the Ringotel fleet -- including one their NS token cannot read. Skipped only for
         // a principal's own domain, which they can read by definition.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
-        const refresh = refreshRequested(url, auth, env);
+        const refresh = refreshRequested(url, auth, env, policies);
         return json(await orgStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
 
@@ -620,19 +924,19 @@ export default {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
-        requireFeature(auth, 'ringotel.userStatus', env);
+        requireFeature(auth, 'ringotel.userStatus', env, policies);
         // Bound Ringotel data by NetSapiens scope in EVERY mode. These routes resolve from the
         // fleet-wide RINGOTEL_API_KEY keyed only by a domain string, so without this a caller could name
         // any domain in the Ringotel fleet -- including one their NS token cannot read. Skipped only for
         // a principal's own domain, which they can read by definition.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
-        const refresh = refreshRequested(url, auth, env);
+        const refresh = refreshRequested(url, auth, env, policies);
         return json(await usersStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
 
       if (url.pathname === '/ringotel/orgs') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
-        requireFeature(auth, 'ringotel.orgList', env);
+        requireFeature(auth, 'ringotel.orgList', env, policies);
         // Scope = the caller's own NS-visible domains (never a client-supplied list). Same block/allow
         // filters as /domains, then resolve enablement in-memory against the cached fleet directory.
         const allow = domainAllowlist(env);
@@ -640,13 +944,188 @@ export default {
         let doms = (auth.lockedDomain ? [{ domain: auth.lockedDomain }] : await listDomains(client)).map((d) => normDomain(d.domain));
         if (allow) doms = doms.filter((d) => allow.has(d));
         if (block.size) doms = doms.filter((d) => !block.has(d));
-        const refresh = refreshRequested(url, auth, env);
+        const refresh = refreshRequested(url, auth, env, policies);
         return json(await orgsStatusForDomains(doms, env, caches.default, { refresh }), 200, cors);
+      }
+
+      // ── Ringotel activation (the profile-page feature) ────────────────────────────────
+      // Single-user status indicator (read). Gated by ringotel.profileStatus; NS-scope-bound like the
+      // other Ringotel reads.
+      if (url.pathname === '/ringotel/user') {
+        if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
+        const domain = requireDomain(auth, url, env);
+        await maybeElevate(auth, domain, env);
+        requireFeature(auth, 'ringotel.profileStatus', env, policies);
+        if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
+        const ext = str(url.searchParams.get('ext'));
+        // Phase 1 (default): CACHED status for an instant display. Phase 2 (?fresh=1): LIVE status to catch
+        // a just-completed change. Eligibility (NS reads) is computed only on the cached phase and reused
+        // client-side, so the follow-up live poll stays cheap.
+        const wantFresh = str(url.searchParams.get('fresh')) === '1';
+        let active: boolean, status: unknown;
+        if (wantFresh) {
+          const all = await usersStatusForDomainFresh(domain, env, caches.default);
+          active = !!all.active;
+          status = all.active && ext && all.users ? (all.users[ext] ?? null) : null;
+        } else {
+          const s = await computeUserStatus(domain, ext, env, caches.default);
+          active = s.present; // preserve `/ringotel/user` semantics: `active` means "org present"
+          status = s.status;
+        }
+        // Eligibility (so the client shows a plain checkbox for a normal user, and a Force button ONLY for
+        // a soft-excluded one). Best-effort: a read failure ⇒ null, and the client falls back gracefully.
+        let eligibility: { activatable: boolean; tier: string; reasons: string[] } | null = null;
+        if (ext && !wantFresh) {
+          const rtConfig = resolveRingotelConfig(env);
+          const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
+          if (nsUser) {
+            // `null` marks a FAILED read, which must stay distinguishable from a genuinely empty device
+            // list — otherwise a transient NS error would be reported as missing hardware below.
+            const devs = await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}/devices`).catch(() => null);
+            const devList = Array.isArray(devs) ? devs : [];
+            const devCount = devList.length;
+            const e = evaluateEligibility(nsUserToElig(nsUser, ext, devCount), { domain, isReseller: auth.principal ? isResellerScope(auth.principal.scope) : false }, rtConfig);
+            eligibility = { activatable: e.activatable, tier: e.tier, reasons: e.reasons };
+
+            // The one health flag that needs an upstream read. Free here: the device list was fetched
+            // for the eligibility count above. Only meaningful for an ACTIVATED app user — a user with
+            // no app is supposed to have no `<ext><suffix>` device.
+            const st = status as { activated?: boolean; health?: { flags: HealthFlag[]; severity: string } } | null;
+            if (devs !== null && st?.activated && st.health) {
+              const want = ext + rtConfig.suffix;
+              if (!devList.some((d) => String((d as Record<string, unknown>)?.device ?? '') === want)) {
+                st.health.flags = [...st.health.flags, 'no-ns-device'];
+                st.health.severity = worstSeverity(st.health.flags);
+              }
+            }
+          }
+        }
+        return json({ active: !!active, ext, status, eligibility }, 200, cors);
+      }
+
+      // ── Self-service (own-account) routes ────────────────────────────────────────────
+      // Own app status for the home widget. Identity comes from the NS `~` self-wildcard (authoritative,
+      // token-scoped) — never client input. Shares the Ringotel org-users cache with /ringotel/user.
+      if (portalMode(env) && url.pathname === '/me/status') {
+        if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
+        if (!auth.principal) throw new HttpError(403, 'The self status route requires a delegated ns_t');
+        if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
+        requireFeature(auth, 'me.appStatus', env, policies);
+        const { ext, domain } = await resolveSelfNsUser(client, auth.principal);
+        const s = await computeUserStatus(domain, ext, env, caches.default);
+        return json({ active: s.active, present: s.present }, 200, cors);
+      }
+
+      // Own devices (read). Built but default off (me.devices). NS `~` self-wildcard — no ext derivation,
+      // no ringotelEnabled gate (a pure NS device read).
+      if (portalMode(env) && url.pathname === '/me/devices') {
+        if (!auth.principal) throw new HttpError(403, 'The self devices route requires a delegated ns_t');
+        if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
+        requireFeature(auth, 'me.devices', env, policies);
+        const devs = await client.get('/domains/~/users/~/devices').catch(() => []);
+        return json({ devices: Array.isArray(devs) ? devs : [] }, 200, cors);
+      }
+
+      // Reset OWN app password (write). Built but default off (me.resetPassword). Identity from the `~`
+      // wildcard; write-rail fenced (RINGOTEL_WRITE_DOMAINS). No assertDomainReadable — own domain by
+      // construction, and a low-priv token may be refused NS GET /domains/{d}.
+      if (portalMode(env) && url.pathname === '/me/resetPassword' && request.method === 'POST') {
+        if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
+        if (!auth.principal) throw new HttpError(403, 'The self reset route requires a delegated ns_t');
+        if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
+        requireWriteFeature(auth, 'me.resetPassword', policies);
+        const { ext, domain, record } = await resolveSelfNsUser(client, auth.principal);
+        const rtConfig = resolveRingotelConfig(env);
+        assertDomainWritable(domain, rtConfig.writeDomains);
+        if (needsFreshAuth(ROUTES['/me/resetPassword'].sensitivity)) await requireFreshAuth(auth, env);
+        const res = await resolveForWrite(env, caches.default, domain);
+        if (res.status === 'none') return json({ error: 'No app organization is configured for this domain' }, 404, cors);
+        if (res.status === 'ambiguous') throw new HttpError(409, 'App organization binding is ambiguous for this domain');
+        const users = res.users ?? [];
+        if (!buildExtIndex(users, res.entry.branchid).get(ext)) return json({ error: 'No app user to reset for this extension' }, 404, cors);
+        const email = record ? nsUserToElig(record, ext, 0).email : '';
+        const result = await resetPassword({ nsWrite: new NsWriteClient({ server: env.NS_SERVER, token: auth.token }), rtWrite: makeWriteClient(env), users, orgid: res.entry.orgid, branchid: res.entry.branchid, domain, ext, suffix: rtConfig.suffix, email });
+        await invalidateOrgUsers(caches.default, res.entry.orgid);
+        return json({ ok: true, ...result }, 200, cors);
+      }
+
+      // Activate / deactivate (write). Chain: feature (fail-closed) → domain → WRITABLE rail → READABLE
+      // scope → forceFresh → (activate only) eligibility → write → cache invalidate.
+      if (url.pathname === '/ringotel/activate' && request.method === 'POST') {
+        if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
+        const body = (await request.json().catch(() => null)) as { domain?: string; ext?: string; activate?: boolean; force?: boolean } | null;
+        const ext = str(body?.ext);
+        if (!ext) return json({ error: 'Provide { ext }' }, 400, cors);
+        const wantActive = body?.activate !== false; // default: activate
+        requireWriteFeature(auth, 'ringotel.activate', policies);
+        const domain = requireDomainValue(auth, str(body?.domain), env);
+        const rtConfig = resolveRingotelConfig(env);
+        assertDomainWritable(domain, rtConfig.writeDomains);
+        await assertDomainReadable(client, domain);
+        if (needsFreshAuth(ROUTES['/ringotel/activate'].sensitivity)) await requireFreshAuth(auth, env);
+
+        const res = await resolveForWrite(env, caches.default, domain);
+        if (res.status === 'none') return json({ error: 'No app organization is configured for this domain' }, 404, cors);
+        if (res.status === 'ambiguous') throw new HttpError(409, 'App organization binding is ambiguous for this domain');
+        const users = res.users ?? [];
+        const nsWrite = new NsWriteClient({ server: env.NS_SERVER, token: auth.token });
+        const rtWrite = makeWriteClient(env);
+        const common = { nsWrite, rtWrite, users, orgid: res.entry.orgid, branchid: res.entry.branchid, domain, ext, suffix: rtConfig.suffix };
+
+        let result;
+        if (wantActive) {
+          const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
+          if (!nsUser) return json({ error: 'User not found' }, 404, cors);
+          const devices = await nsWrite.getDevices(domain, ext);
+          const eu = nsUserToElig(nsUser, ext, devices.length);
+          // `force` is a reseller RUNTIME override (bypasses soft, never hard); honored only for a reseller.
+          const elig = evaluateEligibility(eu, { domain, isReseller: isResellerScope(auth.principal!.scope), force: body?.force === true }, rtConfig);
+          if (!elig.activatable) return json({ error: 'Not eligible for activation', tier: elig.tier, reasons: elig.reasons }, 403, cors);
+          result = await activate({ ...common, name: nsDisplayName(nsUser) || ext, email: eu.email });
+        } else {
+          // Best-effort identity sync on deactivate too: the RT user stays as a visible directory entry.
+          // If the NS user is gone (a common reason to deactivate) the fetch is null → deactivate skips
+          // the sync and just turns the user off.
+          const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
+          const name = nsUser ? nsDisplayName(nsUser) || undefined : undefined;
+          const email = nsUser ? nsUserToElig(nsUser, ext, 0).email || undefined : undefined;
+          result = await deactivate({ ...common, name, email });
+        }
+        await invalidateOrgUsers(caches.default, res.entry.orgid);
+        return json({ ok: true, ...result }, 200, cors);
+      }
+
+      // Reset the app password (write). Requires an existing app user for the extension.
+      if (url.pathname === '/ringotel/resetPassword' && request.method === 'POST') {
+        if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
+        const body = (await request.json().catch(() => null)) as { domain?: string; ext?: string } | null;
+        const ext = str(body?.ext);
+        if (!ext) return json({ error: 'Provide { ext }' }, 400, cors);
+        requireWriteFeature(auth, 'ringotel.resetPassword', policies);
+        const domain = requireDomainValue(auth, str(body?.domain), env);
+        const rtConfig = resolveRingotelConfig(env);
+        assertDomainWritable(domain, rtConfig.writeDomains);
+        await assertDomainReadable(client, domain);
+        if (needsFreshAuth(ROUTES['/ringotel/resetPassword'].sensitivity)) await requireFreshAuth(auth, env);
+
+        const res = await resolveForWrite(env, caches.default, domain);
+        if (res.status === 'none') return json({ error: 'No app organization is configured for this domain' }, 404, cors);
+        if (res.status === 'ambiguous') throw new HttpError(409, 'App organization binding is ambiguous for this domain');
+        const users = res.users ?? [];
+        if (!buildExtIndex(users, res.entry.branchid).get(ext)) return json({ error: 'No app user to reset for this extension' }, 404, cors);
+        const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
+        const email = nsUser ? nsUserToElig(nsUser, ext, 0).email : '';
+        const result = await resetPassword({ nsWrite: new NsWriteClient({ server: env.NS_SERVER, token: auth.token }), rtWrite: makeWriteClient(env), users, orgid: res.entry.orgid, branchid: res.entry.branchid, domain, ext, suffix: rtConfig.suffix, email });
+        await invalidateOrgUsers(caches.default, res.entry.orgid);
+        return json({ ok: true, ...result }, 200, cors);
       }
 
       return json({ error: 'Not found' }, 404, cors);
     } catch (err) {
       if (err instanceof HttpError) return json({ error: err.message, ...(err.reason ? { reason: err.reason } : {}) }, err.status, cors);
+      // A write resolve/precondition failure (ambiguous extension, reset on absent/non-active user) carries
+      // its own status (409/404); the message is our own descriptive text (ext number only, no secrets).
+      if (err instanceof RingotelWriteError) return json({ error: err.message }, err.status, cors);
       const status = err instanceof NsApiError ? (err.status === 401 || err.status === 403 ? err.status : 502) : 500;
       // Log the full error (incl. upstream NS path + response body) server-side only. The client gets a
       // generic message — NsApiError.message embeds internal API routes and up to 500 chars of the NS

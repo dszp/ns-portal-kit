@@ -22,3 +22,6 @@ worker-configuration.d.ts
 .DS_Store
 .remember/
 .vscode/
+
+# superpowers SDD scratch (briefs, reports, review diffs, progress ledger) — local only
+.superpowers/

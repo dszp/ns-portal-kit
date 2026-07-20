@@ -133,6 +133,15 @@ const realOM        = mkTok({ sub: '105@acme.example', user_scope: 'Office Manag
   ok((await callRt('/ringotel/orgs', realOM)).status === 403, '[rt-orgs] OM → 403');
   ok((await call('/ringotel/orgs', reseller)).status === 404, '[rt-orgs] no RINGOTEL_API_KEY → 404 (gate)');
 
+  // ── feature-config override reaches the routes (Task 3) ──────────────────────────────────────────
+  // Turn callflow.view off ⇒ even a reseller's /flow now 403s (defaults would 200).
+  const envOff = { ...env, PORTAL_FEATURES: JSON.stringify({ 'callflow.view': 'off' }) };
+  const callOff = (path: string, tok?: string) => worker.fetch(new Request(`https://svc.dev${path}`, tok ? { headers: { Authorization: `Bearer ${tok}` } } : {}), envOff as any, ctx);
+  ok((await callOff('/flow?kind=user&ref=100', reseller)).status === 403, '[cfg] PORTAL_FEATURES callflow.view=off ⇒ reseller /flow 403');
+  // A bad PORTAL_FEATURES ⇒ 500 (loud), even on /flow.
+  const envBad = { ...env, PORTAL_FEATURES: '{bad' };
+  ok((await worker.fetch(new Request('https://svc.dev/flow?kind=user&ref=100', { headers: { Authorization: `Bearer ${reseller}` } }), envBad as any, ctx)).status === 500, '[cfg] bad PORTAL_FEATURES ⇒ 500');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

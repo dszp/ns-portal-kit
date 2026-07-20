@@ -23,8 +23,18 @@
  * matches both refuse (never guess) rather than picking one silently.
  */
 
-import { RingotelReadClient, buildOrgBranchIndex, type OrgBranchEntry, type User } from '@dszp/ringotel-lib';
+import {
+  RingotelReadClient,
+  RingotelWriteClient,
+  buildOrgBranchIndex,
+  assessUserHealth,
+  type OrgBranchEntry,
+  type User,
+  type HealthFlag,
+  type HealthSeverity,
+} from '@dszp/ringotel-lib';
 import type { FlowGraph } from '@dszp/netsapiens-lib';
+import { resolveRingotelConfig } from './eligibility.js';
 
 /** Env subset this module reads. Kept structural so the Worker's own Env satisfies it. */
 export interface RingotelEnv {
@@ -46,6 +56,8 @@ export interface RingotelEnv {
   /** Optional JSON `{ "<nsDomain>": "<branchAddressToMatch>" }` for the rare domain whose Ringotel
    *  branch.address differs from the NS domain. Normally unnecessary (address == NS domain). */
   RINGOTEL_OVERRIDES?: string;
+  /** NS device-name suffix, e.g. 'r' → device '100r'. Default 'r'. Used for health classification. */
+  RINGOTEL_ACTIVATION_SUFFIX?: string;
 }
 
 /** Vendor name. Both labels default to it, so an unconfigured deploy says "Ringotel" — the truth —
@@ -191,6 +203,30 @@ function makeClient(env: RingotelEnv): RingotelReadClient {
   return new RingotelReadClient({ token: env.RINGOTEL_API_KEY!, ...(env.RINGOTEL_BASE_URL ? { baseUrl: env.RINGOTEL_BASE_URL } : {}) });
 }
 
+/** Construct the Ringotel WRITE client from env (the activation orchestration's mutation surface). */
+export function makeWriteClient(env: RingotelEnv): RingotelWriteClient {
+  return new RingotelWriteClient({ token: env.RINGOTEL_API_KEY!, ...(env.RINGOTEL_BASE_URL ? { baseUrl: env.RINGOTEL_BASE_URL } : {}) });
+}
+
+/** Evict an org's cached user list so the next read reflects a just-completed write (the "after" fence). */
+export async function invalidateOrgUsers(cache: Cache, orgid: string): Promise<void> {
+  await cache.delete(new Request(orgUsersKey(orgid)));
+}
+
+/**
+ * Force-fresh resolve an NS domain to its Ringotel org AND fetch that org's users, bypassing BOTH caches
+ * (directory + users) — the "before" fence for a write, so create-vs-update and the target user id are
+ * decided from current state, never a stale entry. Returns the resolution (none/ambiguous refuse) plus,
+ * when active, the fresh users.
+ */
+export async function resolveForWrite(env: RingotelEnv, cache: Cache, domain: string): Promise<OrgResolution & { users?: User[] }> {
+  const client = makeClient(env);
+  const res = await resolveOrgForDomain(client, cache, domain, parseOverrides(env), true);
+  if (res.status !== 'active') return res;
+  const users = await getOrgUsers(client, cache, res.entry.orgid, true);
+  return { ...res, users };
+}
+
 /** Banner endpoint body. `eligible` is a stubbed future signal (OneBill paid flag / client-type block). */
 export interface OrgStatusResponse {
   active: boolean;
@@ -220,7 +256,21 @@ export async function usersStatusForDomain(domain: string, env: RingotelEnv, cac
   const res = await resolveOrgForDomain(client, cache, domain, parseOverrides(env), opts.refresh);
   if (res.status !== 'active') return { active: false };
   const users = await getOrgUsers(client, cache, res.entry.orgid, opts.refresh);
-  return { active: true, users: usersStatusMap(users, res.entry.branchid) };
+  return { active: true, users: usersStatusMap(users, res.entry.branchid, resolveRingotelConfig(env).suffix) };
+}
+
+/**
+ * Per-user status with FRESH org-user data (cached directory + force-fresh users). The profile-page
+ * indicator uses this so a just-completed activation shows immediately, matching the n8n status check —
+ * the cached path (usersStatusForDomain) can otherwise lag a write until its cache-invalidate settles.
+ * Only the users are re-fetched (the org/branch directory is stable and stays cached).
+ */
+export async function usersStatusForDomainFresh(domain: string, env: RingotelEnv, cache: Cache): Promise<UsersStatusResponse> {
+  const client = makeClient(env);
+  const res = await resolveOrgForDomain(client, cache, domain, parseOverrides(env), false); // directory cached
+  if (res.status !== 'active') return { active: false };
+  const users = await getOrgUsers(client, cache, res.entry.orgid, true); // users FRESH (bypass + refresh cache)
+  return { active: true, users: usersStatusMap(users, res.entry.branchid, resolveRingotelConfig(env).suffix) };
 }
 
 /** Body of GET /ringotel/orgs: the caller's Ringotel-enabled domains → {orgId, appDomain}. */
@@ -303,15 +353,38 @@ export interface UserAppStatus {
   devices: number;
   /** Last-activity time (ms epoch, from `stime`); 0 if unknown. */
   lastSeen: number;
+  /**
+   * Deterministic record-health flags from `assessUserHealth` (@dszp/ringotel-lib) — computed from the
+   * ALREADY-cached Ringotel user data, so this costs no extra API call. `no-ns-device` is appended
+   * separately by the profile endpoint, which reads the user's device list anyway.
+   */
+  health: { flags: HealthFlag[]; severity: HealthSeverity };
 }
 
 /** Project a branch's Ringotel users to per-ext presence (branch-filtered). Presence = the user-level
  *  `state` (see `presenceOf`), NOT device `st`. */
-export function usersStatusMap(users: User[], branchid: string): Record<string, UserAppStatus> {
+export function usersStatusMap(users: User[], branchid: string, suffix = 'r'): Record<string, UserAppStatus> {
+  // Sibling counts must come from the RAW branch-filtered list: buildExtIndex below keys by extension
+  // and therefore collapses duplicates, which is exactly the condition the `duplicate` flag reports.
+  const perExt = new Map<string, number>();
+  for (const u of users) {
+    if (u.branchid != null && String(u.branchid) !== branchid) continue;
+    const ext = u.extension != null ? String(u.extension) : '';
+    if (ext) perExt.set(ext, (perExt.get(ext) ?? 0) + 1);
+  }
+
   const out: Record<string, UserAppStatus> = {};
   for (const [ext, u] of buildExtIndex(users, branchid)) {
     const state = Number(u.state) || 0;
-    out[ext] = { activated: Number(u.status) === 1, presence: presenceOf(u), label: stateLabel(state), state, devices: deviceCount(u), lastSeen: Number(u.stime) || 0 };
+    out[ext] = {
+      activated: Number(u.status) === 1,
+      presence: presenceOf(u),
+      label: stateLabel(state),
+      state,
+      devices: deviceCount(u),
+      lastSeen: Number(u.stime) || 0,
+      health: assessUserHealth(u, { ext, suffix, siblingCount: perExt.get(ext) ?? 1 }),
+    };
   }
   return out;
 }

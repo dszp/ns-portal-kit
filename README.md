@@ -5,8 +5,8 @@ Bring your own NetSapiens credentials and Cloudflare account.
 
 > ### 📖 Read **[SETUP.md](./SETUP.md)** first — before you deploy.
 > It's short, and it covers the two things the deploy form can't tell you: **which of the two modes you
-> want** (they're different products, and one needs JavaScript that isn't published yet), and **what
-> each field means**. Ten minutes there saves an afternoon.
+> want** (they're different products — one you open, one is a backend you inject into your portal), and
+> **what each field means**. Ten minutes there saves an afternoon.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dszp/ns-portal-kit)
 
@@ -20,9 +20,11 @@ Objects), so it deploys clean.
 carries the calling user's own login token and no credential is stored at all. Want both? Click the
 button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
 
-> **Portal backend mode needs an injection script that isn't published yet.** It's the backend half: nothing
-> calls it until JS running inside your Manager Portal does. A reference script is planned; until then
-> portal backend mode means writing that yourself. Standalone mode is complete and works today.
+> **Portal backend mode serves its own injection.** It's the backend half — nothing runs until JS inside
+> your Manager Portal calls it — but the Worker now **serves that JS**: point your portal's injected-script
+> slot at the primary (`/<PRIMARY_BASENAME>.js`) and it wires up the built-in features. Composing it into a
+> script you already inject, or adding your own gated secondaries (`PORTAL_SECONDARIES`), is optional.
+> Standalone mode needs nothing extra either way.
 
 - **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu → queue
   → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. Comes with a
@@ -102,8 +104,10 @@ user's `ns_t` (which the portal already issued), sends it here, and this Worker 
 NetSapiens verbatim — so every read runs **as that user**, with their scope enforced by the platform
 rather than by us. Your JS then updates the live page with what comes back.
 
-**You supply that JavaScript today** — a reference implementation is planned but not published yet, so
-portal backend mode is currently the advanced path. Standalone mode needs nothing extra.
+**The Worker serves that JavaScript** — point your Manager Portal's injected-script slot at the primary
+(`https://<your-worker>/<PRIMARY_BASENAME>.js`); it fetches the gated feature bundles (admin + self-service)
+and injects them. You can also compose it into a script you already inject, or add your own gated
+secondaries (`PORTAL_SECONDARIES`, external or private-R2). Standalone mode needs nothing extra.
 [The full flow, with a diagram →](./SETUP.md#4-portal-backend-mode-what-it-actually-is)
 
 ## Configuration

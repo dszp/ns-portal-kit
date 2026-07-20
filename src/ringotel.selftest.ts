@@ -179,5 +179,47 @@ ok(!('nope.svc' in em), 'enabledOrgs: no match → omitted (grey on client)');
 ok(!('clash.svc' in em), 'enabledOrgs: ambiguous (≥2 orgs) → omitted (domain-binding invariant)');
 ok(Object.keys(em).length === 2, 'enabledOrgs: only the two singly-matched domains present');
 
+// ── health flags on the users map ─────────────────────────────────────────────
+{
+  const mk = (p: Partial<User>): User =>
+    ({ id: 'i', branchid: 'BR1', extension: '100', created: 1000, stime: 5000, ...p }) as User;
+  // Exact full-set matching (order-independent) — pins the REAL flag set, not just "contains X", so a
+  // future rule change that adds/drops a co-occurring flag is caught here instead of silently passing.
+  const sameFlags = (flags: string[], expected: string[]) => JSON.stringify([...flags].sort()) === JSON.stringify([...expected].sort());
+
+  const healthy = usersStatusMap([mk({ status: 1, authname: '100r', trunkid: 'T1', trunkstate: 1 })], 'BR1');
+  ok(healthy['100']!.health.severity === 'ok', 'health: healthy user → ok');
+  ok(sameFlags(healthy['100']!.health.flags, []), 'health: healthy user → exactly no flags');
+
+  // No authname (→ brick) + trunkstate unset. This fixture ALSO has trunkid set and stime(5000) >
+  // created(1000), which correctly co-produces 'stale-registration' too (a bricked record still has a
+  // trunk and may have registered before it broke) — that co-occurrence is CORRECT and must stay, so pin
+  // the exact set rather than a subset that would hide a future change to either flag.
+  const bricked = usersStatusMap([mk({ status: 1, trunkid: 'T1' })], 'BR1');
+  ok(sameFlags(bricked['100']!.health.flags, ['brick', 'stale-registration']), 'health: missing authname + unset trunkstate (trunk present, previously seen) → exactly [brick, stale-registration]');
+  ok(bricked['100']!.health.severity === 'broken', 'health: brick → broken');
+
+  const dupes = usersStatusMap(
+    [
+      mk({ id: 'a', status: 1, authname: '100r', trunkid: 'T1', trunkstate: 1 }),
+      mk({ id: 'b', status: 1, authname: '100r', trunkid: 'T1', trunkstate: 1 }),
+    ],
+    'BR1',
+  );
+  ok(sameFlags(dupes['100']!.health.flags, ['duplicate']), 'health: two records at one ext, otherwise healthy → exactly [duplicate]');
+
+  const otherBranch = usersStatusMap(
+    [
+      mk({ id: 'a', status: 1, authname: '100r', trunkid: 'T1', trunkstate: 1 }),
+      mk({ id: 'b', branchid: 'BR2', status: 1, authname: '100r', trunkid: 'T1', trunkstate: 1 }),
+    ],
+    'BR1',
+  );
+  ok(sameFlags(otherBranch['100']!.health.flags, []), 'health: sibling in another branch is not a duplicate → exactly no flags');
+
+  const suffixed = usersStatusMap([mk({ status: 1, authname: '100x', trunkid: 'T1', trunkstate: 1 })], 'BR1', 'x');
+  ok(sameFlags(suffixed['100']!.health.flags, []), 'health: suffix parameter is honored (authname matches ext+suffix) → exactly no flags');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

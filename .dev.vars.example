@@ -20,3 +20,8 @@
 # LEAVE BLANK if you are running portal mode (PORTAL_MODE=1), where each request carries the calling
 # user's own ns_t and no stored token exists at all. See SETUP.md.
 NS_API_TOKEN=""
+
+# ── Optional: who sees which portal features. ──
+# Portal-mode features (call-flow, app columns, banner) are gated to roles by DEFAULT — you need nothing
+# here to get the defaults. To hide/re-level a feature or add a superadmin, set PORTAL_FEATURES (JSON) /
+# PORTAL_SUPERADMINS. Full level vocabulary, registry, and examples: SETUP.md → "Features & gating".

@@ -1,6 +1,6 @@
 {
   "name": "ns-portal-kit",
-  "version": "0.1.4",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.11.0",
@@ -14,7 +14,9 @@
     "type": "git",
     "url": "git+https://github.com/dszp/ns-portal-kit.git"
   },
-  "bugs": { "url": "https://github.com/dszp/ns-portal-kit/issues" },
+  "bugs": {
+    "url": "https://github.com/dszp/ns-portal-kit/issues"
+  },
   "homepage": "https://github.com/dszp/ns-portal-kit#readme",
   "//test": "test:worker is deliberately NOT in `test`: it needs a real domain snapshot, which is customer data and correctly absent from this repo. Run it by hand: pnpm test:worker <snapshot.json>",
   "scripts": {
@@ -31,8 +33,8 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@dszp/netsapiens-lib": "^0.1.1",
-    "@dszp/ringotel-lib": "^0.1.1"
+    "@dszp/netsapiens-lib": "^0.1.4",
+    "@dszp/ringotel-lib": "^0.1.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5",
