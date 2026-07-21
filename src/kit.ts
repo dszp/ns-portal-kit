@@ -346,6 +346,13 @@ var cb=tr.querySelector('input.inventoryChkBox[data-sipnumber]');if(!cb)continue
 var mm=(cb.getAttribute('data-sipnumber')||'').match(/SIP(\d+)@/i);if(!mm)continue;
 var d=cb.getAttribute('data-domain-owner')||dom();if(!d)continue;
 tr.dataset.svx='1';place(tr,btn(cb.getAttribute('data-formatednumber')||mm[1],'did',mm[1],d));}
+// Fallback anchor: the number's own edit link. The checkbox above is a RESELLER inventory-management
+// affordance (bulk-assign between domains) and is absent for an Office Manager, so every row bailed on
+// the first selector and no DID buttons rendered. The link is present in both views; rows the checkbox
+// pass already claimed carry data-svx and are skipped here, so the reseller keeps data-domain-owner —
+// which is authoritative when the owning domain isn't the one being viewed. SIP(\d+) yields the same
+// ref as data-sipnumber, and the trailing path segment is the domain, matching byLink's (ref,domain).
+byLink('a[href*="/portal/inventory/edit/phonenumber/"]',/\/inventory\/edit\/phonenumber\/SIP(\d+)@[^/]*\/([^/?#]+)/,'did');
 }
 function byLink(sel,re,kind){
 var ls=document.querySelectorAll(sel);

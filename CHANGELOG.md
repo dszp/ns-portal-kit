@@ -17,6 +17,18 @@ Compare that against the latest entry below to see whether there's anything wort
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-07-20
+
+### Fixed
+
+- Call-flow buttons now appear on the Phone Numbers (Inventory) page for non-reseller scopes. The page
+  was anchored solely to the bulk-select checkbox (`input.inventoryChkBox[data-sipnumber]`), which is a
+  reseller inventory-management affordance and is absent from the Office Manager view — so every row was
+  skipped and no diagram buttons rendered, while Users/Queues/Attendants worked. The number's own edit
+  link is now a fallback anchor. Rows the checkbox pass already claimed are skipped, so the reseller view
+  keeps using `data-domain-owner`, which stays authoritative when a number's owning domain isn't the one
+  being viewed.
+
 ## [0.2.5] — 2026-07-20
 
 ### Changed
