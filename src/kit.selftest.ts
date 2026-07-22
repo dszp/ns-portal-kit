@@ -328,6 +328,11 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(b.includes('function acctUl(') && b.includes('function accountMenu('), '[menus] the account dropdown is a supported target');
     ok(b.includes("ls[i].id!=='app-menu-list'"), '[menus] ...and never matches the Apps menu by mistake');
     ok(b.includes('svxacct'), '[menus] the account menu has its own idempotency guard');
+    // A <ul>'s textContent concatenates children with NO separator, so a JS-injected neighbour ("Partner
+    // Central") butts against the next item and any word-boundary test silently matches nothing. The
+    // sign-out probe must therefore run PER ITEM, never against the <ul>'s own text.
+    ok(b.includes('function hasSignOut(ul)') && b.includes('ul.children'), '[menus] sign-out is detected per item');
+    ok(!/log..s\*out..b\/i\.test\(ls\[i\]\.textContent/.test(b), '[menus] ...never against the concatenated <ul> text');
     ok(b.includes('divider'), '[menus] added account entries go above the divider + Log Out, not after them');
     // One add/hide implementation shared by both menus — a second copy is how two menus drift apart.
     ok((b.match(/function menuApply\(/g) || []).length === 1 && (b.match(/_svxadd/g) || []).length === 1,

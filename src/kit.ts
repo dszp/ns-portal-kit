@@ -718,12 +718,19 @@ function sep(){var li=document.createElement('li');li.className='divider _svxrow
 // the toolbar dropdown holding the profile link, or failing that a Log Out entry. Its items vary by scope
 // and mode (My Account / Profile / Messages, plus a vendor-injected Partner Central for resellers), which
 // is exactly why neither anchor may be an item we expect to be present.
+// Does this menu have a sign-out entry? Tested PER ITEM, never against the <ul>'s textContent: that
+// concatenates children with no separator ("Partner Central"+"Log Out" -> "CentralLog Out"), which makes
+// any word-boundary test fail and matched nothing at all. Anchoring on the item also stops a label like
+// "Log Outbound Calls" from counting.
+function hasSignOut(ul){var ch=ul.children;
+for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim()))return true}
+return false}
 function acctUl(){
 var scopes=[document.querySelector('ul.user-toolbar'),document];
 for(var s=0;s<scopes.length;s++){var root=scopes[s];if(!root)continue;
 // Log Out is the one entry present in every variant of this menu, so it is the primary anchor.
 var ls=root.querySelectorAll('ul.dropdown-menu');
-for(var i=0;i<ls.length;i++){if(ls[i].id!=='app-menu-list'&&/\blog\s*out\b/i.test(ls[i].textContent||''))return ls[i]}
+for(var i=0;i<ls.length;i++){if(ls[i].id!=='app-menu-list'&&hasSignOut(ls[i]))return ls[i]}
 // Fallback if a deployment relabels it: the dropdown holding this user's own profile link.
 var a=root.querySelector('ul.dropdown-menu a[href*="/portal/users/edit/profile/"]');
 var ul=a&&a.closest('ul.dropdown-menu');if(ul)return ul}
@@ -737,7 +744,7 @@ if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
 var u=acctUl();if(!u||u.dataset.svxacct)return;u.dataset.svxacct='1';
 // Insert into the FIRST group — above the divider that precedes Log Out — rather than after it.
 var lo=null,ch=u.children;
-for(var i=0;i<ch.length;i++){if(/\blog\s*out\b/i.test(ch[i].textContent||'')){lo=ch[i];break}}
+for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim())){lo=ch[i];break}}
 var before=lo;
 if(before&&before.previousElementSibling&&/divider/.test(before.previousElementSibling.className||''))before=before.previousElementSibling;
 menuApply(u,plan,before)})}
