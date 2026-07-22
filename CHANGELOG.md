@@ -15,6 +15,11 @@ Compare that against the latest entry below to see whether there's anything wort
 `git fetch upstream && git merge upstream/main` — see
 [SETUP.md → Getting updates later](./SETUP.md#7-getting-updates-later).
 
+**Why some versions have no release link:** this repository is published in batches, so several versions
+can land in one release. Every version is documented below, but only the ones that were published
+separately have a tag to link to — the entries between them describe changes that reached you in the next
+release. The version at `/health` always matches a heading here.
+
 ## [Unreleased]
 
 ## [0.2.12] — 2026-07-22
@@ -443,7 +448,11 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.12...HEAD
+[0.2.12]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.12
+[0.2.6]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.6
+[0.2.5]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.5
+[0.2.3]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.3
 [0.1.4]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.4
 [0.1.3]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.3
 [0.1.2]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.1.2

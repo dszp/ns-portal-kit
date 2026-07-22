@@ -953,7 +953,7 @@ export default {
         if (!auth.principal) throw new HttpError(403, 'The gated bundle requires a delegated ns_t');
         const allowedKeys = featurePolicyKeys().filter((k) => can(auth.principal!, k, policies));
         // Server tier-cache: key includes a host discriminator (caches.default is zone-shared across
-        // dia/portal/dev on acmevoice.cloud) + VERSION, so tiers never collide and a deploy busts it.
+        // dia/portal/dev on example.com) + VERSION, so tiers never collide and a deploy busts it.
         const tierKey = new Request(`https://inject.internal/${url.hostname}/portal/${tierHash(allowedKeys)}/${VERSION}`);
         const hit = await caches.default.match(tierKey);
         let bundle: string;
