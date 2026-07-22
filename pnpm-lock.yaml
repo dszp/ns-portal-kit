@@ -12,8 +12,8 @@ importers:
         specifier: ^0.1.5
         version: 0.1.5
       '@dszp/ringotel-lib':
-        specifier: ^0.1.5
-        version: 0.1.5
+        specifier: ^0.1.6
+        version: 0.1.6
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^5
@@ -84,8 +84,8 @@ packages:
     resolution: {integrity: sha512-tHkC4+3Jt8PypUrljpGz38TumcKOMB3OuxJFqq9T0tjCeN31y1QtoQhCnX8c2KhO6eKQ7/DoaBspOk4NYOWlnQ==}
     engines: {node: '>=20'}
 
-  '@dszp/ringotel-lib@0.1.5':
-    resolution: {integrity: sha512-ZS+3JhvveKrOemUl9T0ZJUKg5pCQAYXyyHjbiip0hgBq5LU5skyq6lSCOfmdV6MM5F1g+peZSTF9UB1bMpNDjg==}
+  '@dszp/ringotel-lib@0.1.6':
+    resolution: {integrity: sha512-cwcGv3J2rxExRR9fsUMkhu4+5hkiUs1uzJTsfRAyvDl5L+7yFuLDOMhFILCAMeEU2WjJV6u6BM156QkO8hs8hA==}
     engines: {node: '>=20'}
 
   '@emnapi/runtime@1.11.2':
@@ -684,7 +684,7 @@ snapshots:
 
   '@dszp/netsapiens-lib@0.1.5': {}
 
-  '@dszp/ringotel-lib@0.1.5': {}
+  '@dszp/ringotel-lib@0.1.6': {}
 
   '@emnapi/runtime@1.11.2':
     dependencies:

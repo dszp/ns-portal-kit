@@ -165,6 +165,21 @@ const M = (o: unknown) => ({ PORTAL_MENUS: JSON.stringify(o) });
   ok(at('https://s.example/', { title: 'Help for {fname}' }).title === 'Help for Ann', 'title interpolates');
   ok(at('https://s.example/?u={ext}').label === 'L', 'label without variables is untouched');
 
+  // A value must never be able to choose the DESTINATION. The scheme is fixed by the template, but the
+  // host is not — so a variable in the authority is refused outright (a domain admin sets their users'
+  // names, which would otherwise be a phishing primitive).
+  ok(threw(() => at('https://{fname}/support')), 'a variable cannot BE the host');
+  ok(threw(() => at('https://help-{fname}.example.com/x')), 'a variable cannot be part of the host');
+  ok(at('https://s.example/{ext}').url === 'https://s.example/100', '...but a variable in the PATH is fine');
+  ok(at('mailto:{email}').url.startsWith('mailto:'), '...and a mailto address may be a variable');
+
+  // label/title are read by humans, not parsed as URLs — encoding them would render %20 and %E2%80%99.
+  ok(at('https://s.example/', { title: 'Help for {name}' }).title === 'Help for Ann O\u2019Hara',
+    'title is NOT percent-encoded');
+  const lbl = resolveMenus(M({ apps: { add: [{ label: 'Ask {name}', url: 'https://s.example/' }] } }),
+    { domain: ACME, app: 'none', vars: VARS }).apps.add[0];
+  ok(lbl.label === 'Ask Ann O\u2019Hara', 'label is NOT percent-encoded');
+
   // {page} is CLIENT-resolved: the server validates it but must pass it through verbatim.
   ok(at('https://s.example/t?p={page}').url === 'https://s.example/t?p={page}', '{page} is passed through for the browser to fill');
   ok(at('https://s.example/t?p={PAGE}').url === 'https://s.example/t?p={page}', '{page} is normalized to one token the client can match');

@@ -104,7 +104,7 @@ const ALLOWED_SCHEME = /^(https:\/\/|mailto:)/i;
  * break out of a query value or inject another parameter. `@` is deliberately left readable: it is a legal
  * character in both a path and a query value, and encoding it would mangle every `mailto:` address.
  */
-function interpolate(s: string, vars: Record<string, string> | undefined, path: string): string {
+function interpolate(s: string, vars: Record<string, string> | undefined, path: string, encode = true): string {
   return s.replace(/\{([a-zA-Z]+)\}/g, (_m, name: string) => {
     const key = name.toLowerCase();
     if (!(MENU_VARS as readonly string[]).includes(key)) {
@@ -114,7 +114,9 @@ function interpolate(s: string, vars: Record<string, string> | undefined, path: 
     // match. Substituting an empty string here would silently drop the operator's placeholder.
     if (CLIENT_VARS.includes(key)) return `{${key}}`;
     const raw = (vars ?? {})[key] ?? '';
-    return encodeURIComponent(raw).replace(/%40/g, '@');
+    // Only a URL needs percent-encoding. A label or title lands in textContent/title, where encoding
+    // would render "Ann%20O%E2%80%99Hara" to the user.
+    return encode ? encodeURIComponent(raw).replace(/%40/g, '@') : raw;
   });
 }
 
@@ -126,10 +128,21 @@ const menuItemAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuItem => {
   // Validate the SCHEME on the template, before substitution: a value can only ever land inside a
   // query/path, never at the front, so it cannot turn an https link into something else.
   if (!ALLOWED_SCHEME.test(rawUrl)) throw new MenuConfigError(`${path}.url must start with https:// or mailto:`);
+  // The scheme is fixed by the template, but the HOST is not — `https://{fname}/x` or
+  // `https://help-{fname}.example.com/x` would let a value choose the destination (and `@`, left readable
+  // for mailto, can push the real host into userinfo). Values are the user's own NS fields, which a
+  // domain admin controls for their users, so this is a phishing primitive. Forbid variables in the
+  // authority outright: the destination must be a decision the operator made.
+  if (/^https:\/\//i.test(rawUrl)) {
+    const authority = rawUrl.slice('https://'.length).split(/[/?#]/)[0] ?? '';
+    if (authority.includes('{')) {
+      throw new MenuConfigError(`${path}.url must not use a {variable} in the host — the destination has to be fixed`);
+    }
+  }
   const url = interpolate(rawUrl, ctx.vars, `${path}.url`);
-  const label = interpolate(rawLabel, ctx.vars, `${path}.label`);
+  const label = interpolate(rawLabel, ctx.vars, `${path}.label`, false);
   const rawTitle = typeof v.title === 'string' && v.title.trim() ? v.title.trim() : undefined;
-  const title = rawTitle ? interpolate(rawTitle, ctx.vars, `${path}.title`) : undefined;
+  const title = rawTitle ? interpolate(rawTitle, ctx.vars, `${path}.title`, false) : undefined;
   return { label, url, ...(title ? { title } : {}) };
 };
 

@@ -311,12 +311,17 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(b.includes('return !!_AF.appAccess||!!_AF.menuConfig'), '[menus] the dispatcher gate admits a menuConfig-only tier (not just the inner guard)');
     ok(b.includes('r.menus&&r.menus.apps'), '[menus] the client consumes the server-resolved per-menu plan');
     ok(b.includes('_svxadd'), '[menus] added entries carry a marker class (idempotency + identifiable)');
-    ok(b.includes("a.rel='noopener'") && b.includes('a.textContent=fill('), '[menus] added anchors are noopener and set text via textContent (never innerHTML)');
+    ok(b.includes("a.rel='noopener noreferrer'") && b.includes('a.textContent=fillRaw('), '[menus] added anchors are noopener+noreferrer and set text via textContent (never innerHTML)');
     // {page} is the one variable the server cannot fill; the client substitutes the PATH only — never the
     // query, which can carry identifiers and this link may leave for a third party.
     ok(b.includes("split('{page}').join(pg)") && b.includes('encodeURIComponent(location.pathname)'),
       '[menus] {page} is filled client-side from the path only, percent-encoded');
     ok(!b.includes('location.search'), '[menus] the portal query string is never interpolated into an added link');
+    // A label/title is read by a human; only the URL needs encoding.
+    ok(b.includes('function fillRaw(') && b.includes('a.textContent=fillRaw('), '[menus] {page} renders as a plain path in label/title, encoded only in the href');
+    // The Referer on an outbound click carries the full portal URL incl. its query — the very thing
+    // {page} deliberately excludes. noreferrer closes that back door.
+    ok(!/rel='noopener'/.test(b), '[menus] outbound links are noreferrer too, not just noopener');
     ok(b.includes('if(!_AF.appAccess||!r.present)return'), '[menus] the sign-in section stays gated on its own flag after menu work is applied');
     // The account dropdown has no id and shares a generic class, so it is found by CONTENT — Log Out is
     // the only entry present in every variant (My Account / Profile / Messages / vendor-injected items).
