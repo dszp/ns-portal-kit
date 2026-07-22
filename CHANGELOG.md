@@ -22,6 +22,33 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.2.13] — 2026-07-22
+
+### Security
+
+- **A menu variable can no longer appear in a link's host.** `{ext}`, `{name}` and friends are filled from
+  the signed-in user's own directory record — but a template like `https://{fname}.example.com/x` would let
+  that field choose the *destination*, and a domain administrator sets those fields for their users. Values
+  are now refused in the host portion of an `https://` URL at startup, so the destination is always a
+  decision the operator made. Variables in the path or query are unaffected, as are `mailto:` addresses.
+- **Added links now send no referrer.** They already opened with `noopener`; they now also set
+  `noreferrer`, so the portal URL — including a query string that may carry identifiers — is not handed to
+  the destination. This closes the same gap that `{page}` deliberately avoids by sending only the path.
+
+### Fixed
+
+- **Variables in a `label` or `title` are no longer percent-encoded.** Those are read by a person, not
+  parsed as a URL, so a name containing a space or an apostrophe rendered as `Ann%20O%E2%80%99Hara`.
+- **Menu variables now resolve on deployments with no app integration.** They silently resolved to empty
+  there — on exactly the deployments that path exists to serve. `{page}` likewise now shows a readable path
+  in a label or title, while staying encoded inside the URL.
+- **The account menu is matched more precisely.** Its anchor is the sign-out entry, which previously also
+  matched unrelated text such as "Log Outbound Calls".
+
+### Changed
+
+- Requires `@dszp/ringotel-lib` **^0.1.6**.
+
 ## [0.2.12] — 2026-07-22
 
 ### Added
@@ -448,7 +475,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.12...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.13...HEAD
+[0.2.13]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.13
 [0.2.12]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.12
 [0.2.6]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.6
 [0.2.5]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.5

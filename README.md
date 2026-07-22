@@ -29,8 +29,21 @@ button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
 - **Call-flow diagrams** — resolve a domain's routing (DID → time-of-day → auto-attendant menu → queue
   → agents → voicemail/external) and render it as a Mermaid diagram, live from the API. Comes with a
   viewer: theme picker, pan/zoom, PNG export. *Both modes.*
-- **Ringotel app status** — a reseller banner, a per-user app column, and an app column on the domain
-  list. *Portal backend mode only* — these live inside the Manager Portal.
+- **Ringotel app status** — a reseller banner (with the app domain at a glance), a per-user app column,
+  and an app column on the domain list. *Portal backend mode only* — these live inside the Manager Portal.
+- **App sign-in details, shown to the user** — the Apps menu and the user's home page explain *how* that
+  specific person signs in to the softphone app: which app domain, which username, and where the password
+  comes from (their portal password under SSO, or the credentials email otherwise — worded from the
+  organization's own setting rather than hedged). Decided server-side; a user who cannot yet sign in is
+  told so instead of being shown credentials that would not work. *Portal backend mode only.*
+- **The same message, for operators** — on the user-profile page a reseller or office manager sees the
+  *user-visible* sign-in message for the person they are editing, so they can talk them through it or see
+  why that user is not set up yet. *Portal backend mode only.*
+- **Menu customization** — add and hide entries in the portal's Apps menu and the user's own account
+  dropdown, optionally **conditional on whether an app is actually active** for that domain. Added links
+  are static (label + `https://` or `mailto:`) and can interpolate the signed-in user's own details plus
+  the page they are on, which makes a "get help" link arrive already identified. *Portal backend mode
+  only.* See [SETUP.md](./SETUP.md#customizing-portal-menus-portal_menus).
 - **Enrichment on the diagrams** — app presence and desk-phone model/registration shown inline on agent
   lines. *Both modes, optional.*
 

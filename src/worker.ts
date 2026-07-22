@@ -1178,8 +1178,10 @@ export default {
         // surface still requires the integration, as before.
         if (!ringotelEnabled(env)) {
           if (!wantMenus) return json({ error: 'Not found' }, 404, cors);
-          const { domain: d0 } = await resolveSelfNsUser(client, auth.principal);
-          return json({ menus: resolveMenus(env, { domain: d0, app: 'none' }) }, 200, cors);
+          // Pass the same vars as the integrated path: without them {ext}/{name} would silently resolve
+          // empty on exactly the deployments this branch exists to serve.
+          const { ext: e0, domain: d0, record: r0 } = await resolveSelfNsUser(client, auth.principal);
+          return json({ menus: resolveMenus(env, { domain: d0, app: 'none', vars: menuVars(r0, e0, d0) }) }, 200, cors);
         }
 
         // Identity from `~` ONLY (resolveSelfNsUser). The org/status/eligibility/decision logic — incl.

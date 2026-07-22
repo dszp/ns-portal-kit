@@ -87,6 +87,26 @@ server-side from the bearer — so a caller can only ever read or write their **
 ext/domain are ignored; IDOR-proof by construction). `me.appStatus` (own home app-status) is exposed;
 `me.devices` + `me.resetPassword` ship gated `off`.
 
+**Two independent surfaces ride one self route.** `/me/app-access` carries both the **sign-in details**
+(`me.appAccess`) and the resolved **menu plan** (`me.menuConfig`), because both need the same organization
+read; each is gated on its own key, so either may run without the other and neither permitted is a `403`.
+A menus-only caller receives no sign-in fields at all — the surfaces are separated in the response, not
+merely unused by the client.
+
+**One decision, two viewers.** The sign-in decision (which mode, which username, which password source)
+is computed by a single projection shared by the self route and the admin profile view, and rendered from
+a single client-side model shared by all three surfaces. The operator therefore sees exactly what the user
+sees: the wording cannot drift, because there is only one copy of it. Advisory outcomes structurally carry
+no username or app domain, so a client keying "show credentials" off their presence cannot show them to
+someone who should not sign in.
+
+**Menu config is resolved server-side, per user.** The client is never handed the fleet's configuration —
+only the outcome for its own caller. Targeting is one rule (a default plus specific overrides, most
+specific winning: domain → app state → `*`), which expresses "everywhere", "everywhere except these" and
+"only these" without separate include/exclude syntax. Added entries are static and may interpolate the
+caller's **own** fields; a variable may not appear in a URL's host, so a value can never choose the
+destination. Hiding is cosmetic and fail-open — an entry that cannot be found is skipped, never an error.
+
 ## Worker-served injection
 
 Portal-backend mode serves its own client JS, **per tier**, instead of shipping a static file (`kit.ts`):

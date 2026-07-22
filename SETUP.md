@@ -291,7 +291,10 @@ refused at startup, so a dangerous scheme can never reach the page.
     "url": "mailto:support@example.com?subject=Help%20for%20{name}%20({ext})" } ] } }
 ```
 
-Values are percent-encoded, so a name containing a space or `&` cannot inject an extra query parameter.
+Values are percent-encoded in the URL, so a name containing a space or `&` cannot inject an extra query
+parameter. A variable may **not** appear in the host — `https://{fname}.example.com/x` is refused at
+startup — because the destination has to be a decision you made, not one a user's own profile field can
+change. In a `label` or `title` the value is shown as-is (no encoding), since those are read by a person.
 Everything except `{page}` is substituted on the server from the signed-in user's **own** record — one user
 can never interpolate another's details. `{page}` is filled in the browser and is the **path only**, never
 the query string, since a portal URL's query can carry identifiers and the link may leave for a third party.

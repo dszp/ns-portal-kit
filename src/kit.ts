@@ -302,19 +302,21 @@ if(a&&a.textContent.trim().toLowerCase()===String(h).trim().toLowerCase())ul.chi
 var add=(plan&&plan.add)||[];if(!add.length)return;
 // {page} is the one variable the server can't fill. PATH only — a portal URL's query can carry
 // identifiers and these links may leave for a third party.
-var pg=encodeURIComponent(location.pathname);
+var pg=encodeURIComponent(location.pathname),pgRaw=location.pathname;
 function fill(s){return String(s==null?'':s).split('{page}').join(pg)}
+// A label or title is read by a human, not parsed as a URL — show the plain path there.
+function fillRaw(s){return String(s==null?'':s).split('{page}').join(pgRaw)}
 var seen=[];
 add.forEach(function(m){if(!m||!m.url||seen.indexOf(m.url)>=0)return;seen.push(m.url);
 var li=document.createElement('li');li.className='_svxadd';li.setAttribute('data-u',m.url);
-var a=document.createElement('a');a.textContent=fill(m.label);a.href=fill(m.url);a.target='_blank';a.rel='noopener';
-if(m.title)a.title=fill(m.title);li.appendChild(a);
+var a=document.createElement('a');a.textContent=fillRaw(m.label);a.href=fill(m.url);a.target='_blank';a.rel='noopener noreferrer';
+if(m.title)a.title=fillRaw(m.title);li.appendChild(a);
 if(before&&before.parentNode===ul)ul.insertBefore(li,before);else ul.appendChild(li)})}
 function aaDownloads(target,asButtons){(_KC.dl||[]).forEach(function(d){
 if(asButtons){var col=document.createElement('div');col.style.cssText='display:flex;flex-direction:column;align-items:center;gap:2px';
-var a=document.createElement('a');a.className='btn btn-small';a.textContent=d.label;a.href=d.url;a.target='_blank';a.rel='noopener';if(d.title)a.title=d.title;col.appendChild(a);
+var a=document.createElement('a');a.className='btn btn-small';a.textContent=d.label;a.href=d.url;a.target='_blank';a.rel='noopener noreferrer';if(d.title)a.title=d.title;col.appendChild(a);
 if(d.showUrl!==false)col.appendChild(aaUrlLine(d.url,true));target.appendChild(col)}
-else{var li=document.createElement('li');var a2=document.createElement('a');a2.textContent=d.label;a2.href=d.url;a2.target='_blank';a2.rel='noopener';if(d.title)a2.title=d.title;li.appendChild(a2);target.appendChild(li);
+else{var li=document.createElement('li');var a2=document.createElement('a');a2.textContent=d.label;a2.href=d.url;a2.target='_blank';a2.rel='noopener noreferrer';if(d.title)a2.title=d.title;li.appendChild(a2);target.appendChild(li);
 if(d.showUrl!==false)target.appendChild(aaUrlLine(d.url,false))}
 })}
 `;
@@ -721,7 +723,7 @@ var scopes=[document.querySelector('ul.user-toolbar'),document];
 for(var s=0;s<scopes.length;s++){var root=scopes[s];if(!root)continue;
 // Log Out is the one entry present in every variant of this menu, so it is the primary anchor.
 var ls=root.querySelectorAll('ul.dropdown-menu');
-for(var i=0;i<ls.length;i++){if(ls[i].id!=='app-menu-list'&&/log\s*out/i.test(ls[i].textContent||''))return ls[i]}
+for(var i=0;i<ls.length;i++){if(ls[i].id!=='app-menu-list'&&/\blog\s*out\b/i.test(ls[i].textContent||''))return ls[i]}
 // Fallback if a deployment relabels it: the dropdown holding this user's own profile link.
 var a=root.querySelector('ul.dropdown-menu a[href*="/portal/users/edit/profile/"]');
 var ul=a&&a.closest('ul.dropdown-menu');if(ul)return ul}
@@ -735,7 +737,7 @@ if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
 var u=acctUl();if(!u||u.dataset.svxacct)return;u.dataset.svxacct='1';
 // Insert into the FIRST group — above the divider that precedes Log Out — rather than after it.
 var lo=null,ch=u.children;
-for(var i=0;i<ch.length;i++){if(/log\s*out/i.test(ch[i].textContent||'')){lo=ch[i];break}}
+for(var i=0;i<ch.length;i++){if(/\blog\s*out\b/i.test(ch[i].textContent||'')){lo=ch[i];break}}
 var before=lo;
 if(before&&before.previousElementSibling&&/divider/.test(before.previousElementSibling.className||''))before=before.previousElementSibling;
 menuApply(u,plan,before)})}

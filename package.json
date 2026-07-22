@@ -1,6 +1,6 @@
 {
   "name": "ns-portal-kit",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.11.0",
@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@dszp/netsapiens-lib": "^0.1.5",
-    "@dszp/ringotel-lib": "^0.1.5"
+    "@dszp/ringotel-lib": "^0.1.6"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5",
