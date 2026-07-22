@@ -16,6 +16,7 @@
  */
 import { isAllowed, type Principal } from '@dszp/netsapiens-lib';
 import { resolveGate, FeaturesConfigError, type Gate } from './features.js';
+import { parseDownloads } from './appAccess.js';
 import { VERSION } from './brand.js';
 
 /** The subset of the Worker `Env` the kit helpers read. Structural, so worker.ts's `Env` satisfies it. */
@@ -32,6 +33,8 @@ export interface KitEnv {
   RINGOTEL_LABEL_SHORT?: string;
   /** Optional app-dashboard link base for enriched lines; empty ⇒ plain label, no hyperlink. Gated only. */
   RINGOTEL_APP_BASE_URL?: string;
+  /** JSON array of app-download links rendered in the stock Apps menu. Self bundle only. Unset ⇒ []. */
+  PORTAL_APP_DOWNLOADS?: string;
 }
 
 /** Loud, distinct error for a bad kit config value so the caller can map it to a 500 (fail closed). */
@@ -57,6 +60,7 @@ export const FEATURE_KEYS = [
   { flag: 'profileStatus', key: 'ringotel.profileStatus' },
   { flag: 'activate', key: 'ringotel.activate' },
   { flag: 'resetPassword', key: 'ringotel.resetPassword' },
+  { flag: 'profileAppAccess', key: 'ringotel.profileAppAccess' },
 ] as const;
 
 /** All policy keys a principal is tested against for the bundle (in registry order). */
@@ -68,6 +72,8 @@ export const SELF_FEATURE_KEYS = [
   { flag: 'appStatus', key: 'me.appStatus' },
   { flag: 'devices', key: 'me.devices' },
   { flag: 'resetPassword', key: 'me.resetPassword' },
+  { flag: 'appAccess', key: 'me.appAccess' },
+  { flag: 'menuConfig', key: 'me.menuConfig' },
 ] as const;
 
 /** The self bundle's policy keys, in order. */
@@ -250,6 +256,67 @@ function dom(){return(typeof window.current_domain!=='undefined'&&window.current
 function masq(){try{return !!(document.querySelector('.mask-bar')||document.querySelector('a[href*="endMasquerade"]'))}catch(e){return false}}
 function jget(p){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw new Error(x.status);return x.json()})}
 function jpost(p,body){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{method:'POST',headers:{Authorization:'Bearer '+j,'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(x){if(!x.ok)throw new Error(x.status);return x.json()})}
+// ── Shared app-access sign-in rendering — the SINGLE source of the sign-in verbiage/decision, used by
+// the Apps menu, the home card, AND the admin profile block, so the wording can never fork. ──
+function copyBtn(v,name){var b=document.createElement('button');b.type='button';b.title='Click to copy';b.setAttribute('aria-label','Copy'+(name?' '+name:''));
+b.textContent='⧉';   // ⧉ copy glyph (textContent, never innerHTML)
+b.style.cssText='justify-self:end;width:18px;height:18px;border:1px solid #d5d9dd;border-radius:3px;background:#fafbfc;cursor:pointer;padding:0;font:11px/16px system-ui,sans-serif;color:#8a9199;text-align:center;flex:none';
+// Flip to a green ✓ ONLY on an actual successful copy — writeText returns a promise, so a plain
+// try/catch would flash success even when the clipboard write is denied.
+b.addEventListener('click',function(e){e.preventDefault();
+function done(){b.textContent='✓';b.style.borderColor='#3a7d3a';b.style.color='#3a7d3a';
+setTimeout(function(){b.textContent='⧉';b.style.borderColor='#d5d9dd';b.style.color='#8a9199'},1100)}
+try{var p=navigator.clipboard.writeText(v);if(p&&p.then){p.then(done,function(){})}else{done()}}catch(x){}});
+return b}
+// Where the app password actually is depends on a per-organization setting. When the server could read
+// it we say the true thing; when it could not, we keep the old hedge rather than assert either case.
+function pwHint(r){
+if(r&&r.hPIE===false)return 'Find the credentials in your email.';
+if(r&&r.hPIE===true)return 'Click the emailed one-time link to reveal your credentials.';
+return 'In the email itself, or behind the one-time link in it.'}
+function aaModel(r,L){var m=r&&r.mode,sso=m==='sso',pw=m==='password';
+if(sso||pw){return {signable:true,advisory:null,fields:[
+{k:'Domain',v:(r.appDomain||''),hint:'The same for everyone in your organization.',warn:false,copy:true},
+{k:'Username',v:(r.username||''),hint:sso?'Your full portal sign-in — not just your extension.':'Your app username — not your portal sign-in.',warn:sso,copy:true},
+{k:'Password',v:(sso?'Your portal password':'From your welcome email'),hint:sso?'The same one you use here.':pwHint(r),warn:false,copy:false}
+]}}
+return {signable:false,fields:[],advisory:{t:(m==='needs-portal-setup'
+?'Your portal sign-in isn’t set up yet. Contact your administrator.'
+:m==='unavailable'
+?'The '+L+' sign-in status is temporarily unavailable — please try again in a moment.'
+:'The '+L+' isn’t set up for this extension. Contact your administrator if you think it should be.'),warn:true}}}
+function aaUrlLine(url,asDiv){var w=document.createElement(asDiv?'div':'li');
+w.style.cssText='display:flex;align-items:center;gap:6px;font-size:11px;color:#8a9199;word-break:break-all'+(asDiv?';margin-top:2px':';padding:0 16px 4px');
+if(!asDiv)w.className='_svxrow';
+var s=document.createElement('span');s.textContent=url;s.style.cursor='pointer';s.title='Click to copy';
+var cb=copyBtn(url,'URL');s.addEventListener('click',function(e){e.preventDefault();cb.click()});
+w.appendChild(s);w.appendChild(cb);return w}
+// Apply a resolved menu plan to a <ul>. Hiding is fail-OPEN (an entry we can't find is skipped, so a
+// portal rename degrades to "it stays" rather than a broken menu) and uses display:none rather than
+// removal, since stock scripts may expect their own element to exist. The before arg inserts ahead of an
+// element instead of appending: the account menu wants new items in the first group, not after Log Out.
+function menuApply(ul,plan,before){
+(plan&&plan.hide||[]).forEach(function(h){
+for(var i=0;i<ul.children.length;i++){var a=ul.children[i].querySelector('a');
+if(a&&a.textContent.trim().toLowerCase()===String(h).trim().toLowerCase())ul.children[i].style.display='none'}});
+var add=(plan&&plan.add)||[];if(!add.length)return;
+// {page} is the one variable the server can't fill. PATH only — a portal URL's query can carry
+// identifiers and these links may leave for a third party.
+var pg=encodeURIComponent(location.pathname);
+function fill(s){return String(s==null?'':s).split('{page}').join(pg)}
+var seen=[];
+add.forEach(function(m){if(!m||!m.url||seen.indexOf(m.url)>=0)return;seen.push(m.url);
+var li=document.createElement('li');li.className='_svxadd';li.setAttribute('data-u',m.url);
+var a=document.createElement('a');a.textContent=fill(m.label);a.href=fill(m.url);a.target='_blank';a.rel='noopener';
+if(m.title)a.title=fill(m.title);li.appendChild(a);
+if(before&&before.parentNode===ul)ul.insertBefore(li,before);else ul.appendChild(li)})}
+function aaDownloads(target,asButtons){(_KC.dl||[]).forEach(function(d){
+if(asButtons){var col=document.createElement('div');col.style.cssText='display:flex;flex-direction:column;align-items:center;gap:2px';
+var a=document.createElement('a');a.className='btn btn-small';a.textContent=d.label;a.href=d.url;a.target='_blank';a.rel='noopener';if(d.title)a.title=d.title;col.appendChild(a);
+if(d.showUrl!==false)col.appendChild(aaUrlLine(d.url,true));target.appendChild(col)}
+else{var li=document.createElement('li');var a2=document.createElement('a');a2.textContent=d.label;a2.href=d.url;a2.target='_blank';a2.rel='noopener';if(d.title)a2.title=d.title;li.appendChild(a2);target.appendChild(li);
+if(d.showUrl!==false)target.appendChild(aaUrlLine(d.url,false))}
+})}
 `;
 
 const KIT_ADMIN_BODY = String.raw`
@@ -290,11 +357,15 @@ if(document.getElementById('_svx_res'))return;
 var d=dom();
 if(d===_bnSkip||banner._p===d)return;
 banner._p=d;
-jget('/ringotel/org?domain='+encodeURIComponent(d)).then(function(r){
+jget('/rapp/org?domain='+encodeURIComponent(d)).then(function(r){
 banner._p=null;
 if(document.getElementById('_svx_res'))return;
 if(!r||(!r.active&&!r.eligible)){_bnSkip=d;return;}
-var nm=_KC.label;
+// The app domain is domain-global (same for every user here, SSO or not), so showing it in the toolbar
+// is a genuine at-a-glance fact rather than per-user detail. The toolbar is a fixed-height row with
+// limited width, so when we spend room on the domain we buy it back with the SHORT label, and the
+// domain itself truncates rather than pushing the row. Full value stays in the title.
+var nm=(r.active&&r.appDomain&&_KC.labelShort)?_KC.labelShort:_KC.label;
 var li=document.createElement('li');li.id='_svx_res';
 var sp=document.createElement('span');sp.className='dropdown language-dropdown';
 var ic=document.createElement('i');ic.className='icon icon-cloud';
@@ -303,8 +374,12 @@ if(r.active){
 var lnk=!!(r.orgId&&_KC.appBase);
 var a=document.createElement(lnk?'a':'span');a.style.fontWeight='bold';a.style.color='darkgreen';a.textContent=nm+' Active';
 if(lnk){a.href=_KC.appBase+'/account/en-US/#/orgs/'+encodeURIComponent(r.orgId)+'/dashboard';a.target='_blank';a.rel='noopener noreferrer'}
-if(r.appDomain)a.title='App Domain: '+r.appDomain;
+if(r.appDomain)a.title=_KC.label+' domain: '+r.appDomain;
 sp.appendChild(a);
+if(r.appDomain){var dm=document.createElement('span');dm.textContent=': '+r.appDomain;
+dm.title=_KC.label+' domain: '+r.appDomain;
+dm.style.cssText='font-weight:400;color:#6b747c;max-width:13em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom';
+sp.appendChild(dm)}
 }else{
 var lb=document.createElement('span');lb.style.fontWeight='bold';lb.style.cursor='default';lb.style.color='#c09853';
 lb.textContent=nm+' Not Active';lb.title=nm+' not activated for this PBX domain';
@@ -329,7 +404,7 @@ if(!/^\/portal\/users\/?($|index)/.test(location.pathname))return;
 if(!_AF.userStatus){colRemove();return}
 if(!_uOb){_uOb=1;new MutationObserver(uSched).observe(document.body,{childList:true,subtree:true})}
 var d=dom();if(!d){colRemove();return}
-if(_uDom!==d){_uDom=d;_uAct=false;_uD={};_uBusy=true;jget('/ringotel/users?domain='+encodeURIComponent(d)).then(function(r){_uAct=!!(r&&r.active);_uD=(r&&r.users)||{};_uBusy=false;uSched()}).catch(function(){_uAct=false;_uD={};_uBusy=false})}
+if(_uDom!==d){_uDom=d;_uAct=false;_uD={};_uBusy=true;jget('/rapp/users?domain='+encodeURIComponent(d)).then(function(r){_uAct=!!(r&&r.active);_uD=(r&&r.users)||{};_uBusy=false;uSched()}).catch(function(){_uAct=false;_uD={};_uBusy=false})}
 if(_uBusy)return;
 if(_uAct)colBuild();else colRemove();
 }
@@ -405,7 +480,7 @@ var _rtMap=null,_rtBusy=false;
 function rtTable(){return document.querySelector('table.fixed-table-header')}
 function rtHeader(){var t=rtTable();if(!t)return;var hrs=t.querySelectorAll(':scope > thead > tr');for(var i=0;i<hrs.length;i++){var hr=hrs[i];if(hr.querySelector('th.svx-rtcol'))continue;var after=hr.children[1];if(!after)continue;var th=document.createElement('th');th.className='svx-rtcol';th.textContent=_KC.labelShort;th.style.textAlign='center';hr.insertBefore(th,after)}}
 function rtFill(){var t=rtTable();if(!t||!_rtMap)return;var rows=t.querySelectorAll(':scope > tbody > tr');for(var i=0;i<rows.length;i++){var tr=rows[i];if(tr.querySelector('td.svx-rtcol'))continue;var dc=tr.children[1];if(!dc)continue;var la=tr.children[0]&&tr.children[0].querySelector('a');var d=la?(la.textContent||'').trim().toLowerCase():'';var td=document.createElement('td');td.className='svx-rtcol';td.style.textAlign='center';td.style.whiteSpace='nowrap';var e=(d&&Object.prototype.hasOwnProperty.call(_rtMap,d))?_rtMap[d]:null,el;if(e){if(_KC.appBase){el=document.createElement('a');el.href=_KC.appBase+'/account/en-US/#/orgs/'+encodeURIComponent(e.orgId)+'/dashboard';el.target='_blank';el.rel='noopener noreferrer';el.style.textDecoration='none'}else{el=document.createElement('span')}el.style.fontSize='16px';if(e.appDomain)el.title='App Domain: '+e.appDomain;el.textContent='☁'}else{el=document.createElement('span');el.textContent='–';el.style.color='#9aa0a6'}td.appendChild(el);tr.insertBefore(td,dc)}}
-function domCol(){if(_rtMap){rtHeader();rtFill();return}if(_rtBusy)return;_rtBusy=true;jget('/ringotel/orgs').then(function(r){_rtMap=(r&&r.enabled)||{}}).catch(function(){_rtMap={}}).then(function(){_rtBusy=false;rtHeader();rtFill();var t=rtTable(),tb=t&&t.querySelector(':scope > tbody');if(tb&&!tb._svxRt){tb._svxRt=1;new MutationObserver(function(){rtFill()}).observe(tb,{childList:true})}})}
+function domCol(){if(_rtMap){rtHeader();rtFill();return}if(_rtBusy)return;_rtBusy=true;jget('/rapp/orgs').then(function(r){_rtMap=(r&&r.enabled)||{}}).catch(function(){_rtMap={}}).then(function(){_rtBusy=false;rtHeader();rtFill();var t=rtTable(),tb=t&&t.querySelector(':scope > tbody');if(tb&&!tb._svxRt){tb._svxRt=1;new MutationObserver(function(){rtFill()}).observe(tb,{childList:true})}})}
 function _kscope(){try{var t=tok();if(!t)return '';var p=t.split('.')[1];if(!p)return '';var j=JSON.parse(decodeURIComponent(escape(atob(p.replace(/-/g,'+').replace(/_/g,'/')))));return ''+(j.user_scope||j.scope||'')}catch(e){return ''}}
 function _isRes(){var s=_kscope().toLowerCase();return s==='reseller'||s==='super user'||s==='superuser'||s==='super-user'}
 // Pending-change flag: set when WE trigger an activate/deactivate (Save or force); consumed once on the
@@ -424,9 +499,17 @@ function el(){return new Date().getTime()-t0}
 function fin(r){if(fired)return;fired=true;try{cb(r)}catch(e){}}
 function nap(){return el()<3000?300:1000}
 setTimeout(function(){fin(null)},10500);
-(function tick(){if(fired)return;jget('/ringotel/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)+'&fresh=1').then(function(r2){if(fired)return;var now=!!(r2&&r2.status&&r2.status.activated);if(now===want||el()>=10000){fin(r2)}else{setTimeout(tick,nap())}}).catch(function(){if(fired)return;if(el()>=10000){fin(null)}else{setTimeout(tick,nap())}})})()
+(function tick(){if(fired)return;jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)+'&fresh=1').then(function(r2){if(fired)return;var now=!!(r2&&r2.status&&r2.status.activated);if(now===want||el()>=10000){fin(r2)}else{setTimeout(tick,nap())}}).catch(function(){if(fired)return;if(el()>=10000){fin(null)}else{setTimeout(tick,nap())}})})()
 }
-function profExt(){try{if(masq()){return window.sub_user!=null?(''+window.sub_user):''}var seg=decodeURIComponent((location.pathname.split('/').pop()||''));var m=seg.match(/^([^@]+)@/);if(m)return m[1];var q=document.querySelectorAll('span.uneditable-input');for(var k=0;k<q.length;k++){var t=(q[k].textContent||'').trim();if(/^\d{3,6}$/.test(t))return t}}catch(e){}return ''}
+function profExt(){try{
+// The profile page's OWN extension is authoritative for WHOSE profile this is — derive it from the URL
+// segment, then the form, FIRST. window.sub_user (the masqueraded identity) is only a fallback for a
+// self-profile page that carries no ext (e.g. My Account under masquerade). Using it first made an OM
+// who masqueraded and then opened ANOTHER user's profile read/activate/reset THEMSELVES (1042 vs 1045).
+var seg=decodeURIComponent((location.pathname.split('/').pop()||''));var m=seg.match(/^([^@]+)@/);if(m)return m[1];
+var q=document.querySelectorAll('span.uneditable-input');for(var k=0;k<q.length;k++){var t=(q[k].textContent||'').trim();if(/^\d{3,6}$/.test(t))return t}
+if(masq())return window.sub_user!=null?(''+window.sub_user):'';
+}catch(e){}return ''}
 function profEmail(){try{for(var i=0;i<10;i++){var f=document.getElementById('UserEmailAddress'+i);if(f&&f.value&&f.value.trim())return f.value.trim()}var q=document.querySelectorAll('input[name^="data[User][email_address]"]');for(var k=0;k<q.length;k++){if(q[k].value&&q[k].value.trim())return q[k].value.trim()}}catch(e){}return ''}
 // On Save we only RECORD the intent (a cross-origin POST fired during the Save reload gets cancelled).
 // The reloaded page (stable, no navigation) fires the actual write via jpost — see actSection phase 2.
@@ -453,13 +536,22 @@ fs.appendChild(cl);fs.appendChild(cc);
 var anchor=null,lgs=panel.querySelectorAll('legend');for(var i=0;i<lgs.length;i++){if(/caller id/i.test(lgs[i].textContent||'')){anchor=lgs[i].closest('fieldset')||lgs[i];break}}
 if(anchor&&anchor.parentNode)anchor.parentNode.insertBefore(fs,anchor);else panel.appendChild(fs);
 hookSave(d,ext);
-function done(r2){var s=document.getElementById('_svx_act');if(s)s.remove();actSection(panel,d,ext,email,r2?{active:r2.active,status:r2.status,eligibility:r&&r.eligibility}:r,true)}
-jpost('/ringotel/activate',{domain:d,ext:ext,activate:pend}).then(function(){pollUntil(d,ext,pend,done)}).catch(function(){done(null)});
+function done(r2){rebuildAct(panel,d,ext,email,r2?{active:r2.active,status:r2.status,eligibility:r&&r.eligibility}:r)}
+jpost('/rapp/activate',{domain:d,ext:ext,activate:pend}).then(function(){pollUntil(d,ext,pend,done)}).catch(function(){done(null)});
 }
 function actSection(panel,d,ext,email,r,noRefresh){
 if(document.getElementById('_svx_act'))return;
+// No app org bound to this domain ⇒ render NOTHING. On /rapp/user, active means "org present" (NOT
+// "user activated"), so a domain that doesn't run the app was still getting a full App Status block
+// reading "Inactive" — an app it cannot have, offered to whoever could see the profile. A degraded
+// org read lands here too, which is the right way to fail: say less rather than claim a state.
+if(!r||!r.active)return;
 if(!noRefresh){var _p=getPend(d,ext);if(_p!==null&&(!!(r&&r.status&&r.status.activated))!==_p){actLoading(panel,d,ext,email,r,_p);return}}
 var active=!!(r&&r.status&&r.status.activated),canAct=!!_AF.activate,canReset=!!_AF.resetPassword;
+// Only when we KNOW it will provision: a not-activated user whose app-access mode resolved to 'sso'
+// means SSO is on AND create-on-login is enabled AND they're eligible (see resolveAppAccess). Absent
+// projection / any other mode ⇒ leave a plain 'Inactive'.
+var willAuto=!!(r&&r.appAccess&&r.appAccess.mode==='sso'&&!active);
 var fs=document.createElement('div');fs.id='_svx_act';fs.style.marginTop='20px';
 var lg=document.createElement('legend');lg.textContent=_KC.label+' Status';fs.appendChild(lg);
 var cl=document.createElement('label');cl.className='control-label';cl.textContent='Status';
@@ -467,7 +559,7 @@ var cc=document.createElement('div');cc.className='controls';
 var wc=document.createElement('label');wc.className='checkbox';
 var chk=document.createElement('input');chk.type='checkbox';chk.id='_svx_act_tgl';chk.checked=active;chk.setAttribute('data-init',active?'1':'0');var init=active;
 var st=document.createElement('span');st.style.fontWeight='bold';st.style.marginLeft='8px';
-function setL(){if(chk.checked){st.textContent=(chk.checked===init)?'Activated':'Activate on Save (creates and emails a new password)';st.style.color='green'}else if(chk.checked===init){st.textContent='Inactive';st.style.color=''}else{st.textContent='Deactivate on Save (reactivation creates and emails a new password)';st.style.color='#c0392b'}}
+function setL(){if(chk.checked){st.textContent=(chk.checked===init)?'Activated':'Activate on Save (creates and emails a new password)';st.style.color='green'}else if(chk.checked===init){st.textContent=willAuto?'Inactive (will auto-activate on login)':'Inactive';st.style.color=''}else{st.textContent='Deactivate on Save (reactivation creates and emails a new password)';st.style.color='#c0392b'}}
 setL();
 var elig=r&&r.eligibility,dis=false,tip='',showForce=false;
 if(!canAct){dis=true;tip='Contact an administrator to change this.'}
@@ -480,20 +572,52 @@ wc.appendChild(chk);wc.appendChild(st);cc.appendChild(wc);
 if(canReset&&active&&!masq()){
 var rb=document.createElement('button');rb.type='button';rb.className='btn btn-default';rb.textContent='Reset '+_KC.label+' Password';rb.style.cssText='display:block;margin-top:8px';
 if(!email){rb.disabled=true;rb.title='An email address is required.'}
-rb.addEventListener('click',function(){if(!confirm('Reset the '+_KC.label+' password and email a new one to the user?'))return;rb.disabled=true;rb.textContent='Resetting…';jpost('/ringotel/resetPassword',{domain:d,ext:ext}).then(function(){rb.textContent='Password reset — emailed'}).catch(function(){rb.textContent='Reset failed';rb.disabled=false})});
+rb.addEventListener('click',function(){if(!confirm('Reset the '+_KC.label+' password and email a new one to the user?'))return;rb.disabled=true;rb.textContent='Resetting…';jpost('/rapp/resetPassword',{domain:d,ext:ext}).then(function(){rb.textContent='Password reset — emailed'}).catch(function(){rb.textContent='Reset failed';rb.disabled=false})});
 cc.appendChild(rb);
 }
 if(showForce){
 var fb=document.createElement('button');fb.type='button';fb.textContent='Force-activate App';fb.title=tip;
 fb.style.cssText='display:block;margin-top:8px;background:#f5f5f5;color:#333;border:1px solid #e8930c;border-radius:4px;padding:4px 10px;cursor:pointer';
-fb.addEventListener('click',function(){if(!confirm('Force-activate '+_KC.label+' for this user, overriding the exclusion?'))return;fb.disabled=true;fb.textContent='Activating…';jpost('/ringotel/activate',{domain:d,ext:ext,activate:true,force:true}).then(function(){pollUntil(d,ext,true,function(r2){if(r2&&r2.status&&r2.status.activated){var s=document.getElementById('_svx_act');if(s)s.remove();actSection(panel,d,ext,email,{active:r2.active,status:r2.status,eligibility:r&&r.eligibility},true)}else{fb.textContent='Activated — reload to refresh'}})}).catch(function(e){fb.disabled=false;fb.textContent='Force-activate App';alert('Force-activate failed: '+(e&&e.message?e.message:e))})});
+fb.addEventListener('click',function(){if(!confirm('Force-activate '+_KC.label+' for this user, overriding the exclusion?'))return;fb.disabled=true;fb.textContent='Activating…';jpost('/rapp/activate',{domain:d,ext:ext,activate:true,force:true}).then(function(){pollUntil(d,ext,true,function(r2){if(r2&&r2.status&&r2.status.activated){rebuildAct(panel,d,ext,email,{active:r2.active,status:r2.status,eligibility:r&&r.eligibility})}else{fb.textContent='Activated — reload to refresh'}})}).catch(function(e){fb.disabled=false;fb.textContent='Force-activate App';alert('Force-activate failed: '+(e&&e.message?e.message:e))})});
 cc.appendChild(fb);
 }
 fs.appendChild(cl);fs.appendChild(cc);
+// User-visible app sign-in message — the SAME projection + verbiage the user sees (r.appAccess from
+// /rapp/user, rendered via the shared aaModel), so the operator sees a masqueraded copy. Gated on
+// ringotel.profileAppAccess. Absent when the write-poll reconstructs r (r.appAccess dropped) ⇒ hidden
+// until reload rather than showing a stale message.
+if(_AF.profileAppAccess&&r&&r.appAccess&&r.appAccess.present){var aa=r.appAccess,AL=_KC.label;
+var hd=document.createElement('div');hd.textContent='User-visible '+AL+' sign-in message:';
+hd.style.cssText='margin-top:12px;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#8a9199';
+// Align with the form's value column (.controls indents past the label column), and frame the message
+// in a light border so it reads as "the user's own view", distinct from the operator's controls above.
+var actl=document.createElement('div');actl.className='controls';actl.appendChild(hd);
+var abox=document.createElement('div');abox.style.cssText='display:inline-block;border:1px solid #d5d9dd;border-radius:5px;padding:9px 12px;background:#fafbfc;min-width:240px;margin-top:4px';
+var awrap=document.createElement('div');awrap.style.cssText='display:grid;gap:10px;text-align:left';
+var amdl=aaModel(aa,AL);
+if(amdl.signable){amdl.fields.forEach(function(f){var dd=document.createElement('div');
+var kk=document.createElement('div');kk.textContent=f.k;kk.style.cssText='font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:#8a9199';
+var vr=document.createElement('div');vr.style.cssText='display:flex;align-items:center;gap:6px;margin-top:1px';
+var vv=document.createElement('span');vv.textContent=f.v;vv.style.cssText='font-size:13.5px;color:#1a1d21;word-break:break-all';vr.appendChild(vv);
+if(f.copy&&f.v)vr.appendChild(copyBtn(f.v,f.k));
+dd.appendChild(kk);dd.appendChild(vr);
+if(f.hint){var hh=document.createElement('div');hh.textContent=f.hint;hh.style.cssText='font-size:12px;margin-top:2px;color:'+(f.warn?'#8a6d3b':'#6b747c');dd.appendChild(hh)}
+awrap.appendChild(dd)})}
+else if(amdl.advisory){var av=document.createElement('div');av.textContent=amdl.advisory.t;av.style.cssText='font-size:12.5px;color:#8a6d3b';awrap.appendChild(av)}
+abox.appendChild(awrap);
+var adv=document.createElement('div');adv.style.cssText='display:flex;gap:12px;flex-wrap:wrap;margin-top:8px';aaDownloads(adv,true);if(adv.children.length)abox.appendChild(adv);
+actl.appendChild(abox);fs.appendChild(actl)}
 var anchor=null,lgs=panel.querySelectorAll('legend');for(var i=0;i<lgs.length;i++){if(/caller id/i.test(lgs[i].textContent||'')){anchor=lgs[i].closest('fieldset')||lgs[i];break}}
 if(anchor&&anchor.parentNode)anchor.parentNode.insertBefore(fs,anchor);else panel.appendChild(fs);
 hookSave(d,ext);
 }
+// After a write settles, re-read the section from /rapp/user (non-fresh: the activate/reset write
+// invalidated the org-users cache, so this returns the TRUE post-write status AND the app-access
+// projection). Gives the operator the updated user-visible message without a page reload; on a read
+// failure it falls back to the reconstructed r (status only, no message — the pre-fix behavior).
+function rebuildAct(panel,d,ext,email,fallback){
+function show(rr){var s=document.getElementById('_svx_act');if(s)s.remove();actSection(panel,d,ext,email,rr,true)}
+jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)).then(show,function(){show(fallback)})}
 var _actSched=false;
 function profileActivation(){
 if(!_AF.profileStatus)return;
@@ -502,7 +626,7 @@ var panel=document.querySelector('.profile-panel-main');if(!panel)return;
 var d=dom();if(!d)return;var ext=profExt();if(!ext)return;
 _actSched=true;var email=profEmail();
 // Phase 1: cached read → instant display (actSection then does a ~1s live poll to catch a just-saved change).
-jget('/ringotel/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)).then(function(r){_actSched=false;actSection(panel,d,ext,email,r)}).catch(function(){_actSched=false});
+jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)).then(function(r){_actSched=false;actSection(panel,d,ext,email,r)}).catch(function(){_actSched=false});
 }
 var F=[
 {p:/^\//,m:banner},
@@ -523,8 +647,9 @@ var ob=new MutationObserver(sched);ob.observe(document.documentElement,{childLis
 setTimeout(function(){ob.disconnect()},8000);`;
 
 /** The SELF feature body: own-account features. Neutral — the label comes from `_KC` (post-auth), every
- * gate is an `_AF.<flag>` flag, selectors are generic Manager-Portal DOM. Only `me.appStatus` renders UI
- * today (the home widget); `me.devices`/`me.resetPassword` are server-only until exposed. */
+ * gate is an `_AF.<flag>` flag, selectors are generic Manager-Portal DOM. `me.appStatus` renders the
+ * home widget (status + `me.appAccess` sign-in details/downloads, reusing `aaFetch`) and `me.appAccess`
+ * also renders the Apps-menu rows; `me.devices`/`me.resetPassword` are server-only until exposed. */
 const KIT_SELF_BODY = String.raw`
 function homeStatus(){
 if(!_AF.appStatus)return;
@@ -544,9 +669,114 @@ var pp=document.createElement('p');var st=document.createElement('strong');
 if(r.active){st.textContent='Activated';st.style.color='green'}else{st.textContent='Inactive';st.style.color='black'}
 pp.appendChild(st);bd.appendChild(pp);card.appendChild(h);card.appendChild(bd);
 panel2.parentNode.insertBefore(card,panel2.nextSibling);
+if(_AF.appAccess){aaFetch(function(r2){
+if(!r2||!r2.present)return;
+if(document.getElementById('_svx_home')!==card)return;
+// Not activated but the mode resolved to 'sso' ⇒ SSO + create-on-login: it activates on first sign-in,
+// so 'Inactive' alone is misleading. (Same signal the profile view uses.)
+if(!r.active&&r2.mode==='sso'){st.textContent='Inactive (will auto-activate on login)'}
+var wrap=document.createElement('div');wrap.style.cssText='display:grid;gap:11px;margin:12px 0 14px;text-align:left';
+function fld(k,v,hint,warn){var d=document.createElement('div');
+var kk=document.createElement('div');kk.textContent=k;
+kk.style.cssText='font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:#8a9199';
+var vv=document.createElement('div');vv.textContent=v;
+vv.style.cssText='font-size:13.5px;color:#1a1d21;word-break:break-all;margin-top:1px';
+d.appendChild(kk);d.appendChild(vv);
+if(hint){var hh=document.createElement('div');hh.textContent=hint;
+hh.style.cssText='font-size:12px;margin-top:2px;color:'+(warn?'#8a6d3b':'#6b747c');d.appendChild(hh)}
+return d}
+var mdl=aaModel(r2,_KC.label);
+if(mdl.signable){mdl.fields.forEach(function(f){wrap.appendChild(fld(f.k,f.v,f.hint,f.warn))});card.appendChild(wrap)}
+if((_KC.dl||[]).length){var br=document.createElement('div');br.style.cssText='display:flex;gap:12px;flex-wrap:wrap;justify-content:center';
+aaDownloads(br,true);card.appendChild(br)}
+})}
 }).catch(function(){homeStatus._p=0});
 }
-var F=[{p:/^\/portal\/home/,m:homeStatus,a:function(){return !!_AF.appStatus}}];
+var _aaP=null;
+// Memoise the IN-FLIGHT PROMISE, not the resolved value: two callers arriving before the first
+// response (the Apps menu + the home card both call this on /portal/home) must share ONE request —
+// /me/app-access makes three uncached upstream calls, so a duplicate is expensive. On failure,
+// null out _aaP so the next call retries (a transient error shouldn't wedge this open forever);
+// callers attached to the failed promise are swallowed, same as before.
+function aaFetch(cb){if(!_aaP)_aaP=jget('/me/app-access').catch(function(e){_aaP=null;throw e});_aaP.then(cb,function(){})}
+function row(k,v,hint,copy){
+var li=document.createElement('li');li.className='_svxrow';
+li.style.cssText='display:grid;grid-template-columns:62px 1fr 20px;gap:8px;align-items:baseline;padding:2px 14px 2px 16px;font-size:12.5px';
+var ks=document.createElement('span');ks.textContent=k;ks.style.color='#999';
+var vs=document.createElement('span');vs.textContent=v;vs.style.cssText='color:#1a1d21;word-break:break-all'+(copy?';font-family:monospace':'');
+li.appendChild(ks);li.appendChild(vs);
+if(copy){li.appendChild(copyBtn(v,k))}else{li.appendChild(document.createElement('span'))}
+return li}
+function note(t,warn){var li=document.createElement('li');li.className='_svxrow';
+li.style.cssText='padding:1px 16px 6px;font-size:11.5px;color:'+(warn?'#8a6d3b':'#8a9199');
+li.textContent=t;return li}
+function sep(){var li=document.createElement('li');li.className='divider _svxrow';return li}
+// The user's own name dropdown in the toolbar. Unlike the Apps menu it has NO id and wears a generic
+// Bootstrap class (dropdown-menu pull-right) that other dropdowns share, so it is identified by CONTENT:
+// the toolbar dropdown holding the profile link, or failing that a Log Out entry. Its items vary by scope
+// and mode (My Account / Profile / Messages, plus a vendor-injected Partner Central for resellers), which
+// is exactly why neither anchor may be an item we expect to be present.
+function acctUl(){
+var scopes=[document.querySelector('ul.user-toolbar'),document];
+for(var s=0;s<scopes.length;s++){var root=scopes[s];if(!root)continue;
+// Log Out is the one entry present in every variant of this menu, so it is the primary anchor.
+var ls=root.querySelectorAll('ul.dropdown-menu');
+for(var i=0;i<ls.length;i++){if(ls[i].id!=='app-menu-list'&&/log\s*out/i.test(ls[i].textContent||''))return ls[i]}
+// Fallback if a deployment relabels it: the dropdown holding this user's own profile link.
+var a=root.querySelector('ul.dropdown-menu a[href*="/portal/users/edit/profile/"]');
+var ul=a&&a.closest('ul.dropdown-menu');if(ul)return ul}
+return null}
+function accountMenu(){
+if(!_AF.menuConfig)return;
+var ul=acctUl();if(!ul||ul.dataset.svxacct)return;
+aaFetch(function(r){
+var plan=r&&r.menus&&r.menus.account;if(!plan)return;
+if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
+var u=acctUl();if(!u||u.dataset.svxacct)return;u.dataset.svxacct='1';
+// Insert into the FIRST group — above the divider that precedes Log Out — rather than after it.
+var lo=null,ch=u.children;
+for(var i=0;i<ch.length;i++){if(/log\s*out/i.test(ch[i].textContent||'')){lo=ch[i];break}}
+var before=lo;
+if(before&&before.previousElementSibling&&/divider/.test(before.previousElementSibling.className||''))before=before.previousElementSibling;
+menuApply(u,plan,before)})}
+function appsMenu(){
+// Two independent surfaces share this menu: menu customization (menuConfig) and the sign-in panel
+// (appAccess). Either alone is a reason to touch the menu.
+if(!_AF.appAccess&&!_AF.menuConfig)return;
+var ul=document.getElementById('app-menu-list');if(!ul||ul.dataset.svx)return;
+aaFetch(function(r){
+if(!ul||ul.dataset.svx)return;ul.dataset.svx='1';
+// ONE guard on the <ul>, not per row. Bootstrap's dropdown closes on a document-level click, and a
+// click's target is the nearest common ancestor of mousedown and mouseup — so selecting text inside a
+// row and releasing outside it resolves the target to the <ul>, ABOVE any per-row listener, and the
+// menu closes. Verified live 2026-07-21. Stock items are all <a href> and SHOULD close+navigate;
+// everything else (our rows, the copy buttons, an ancestor-resolved click) is swallowed.
+ul.addEventListener('click',function(e){if(!e.target.closest('a[href]'))e.stopPropagation()});
+// Menu customization is independent of whether the domain runs the app — a domain served by another
+// app, or none, still gets its curated menu. The server resolved which entries apply to THIS user.
+var plan=(r.menus&&r.menus.apps)||{hide:(r.hide||[]),add:[]};
+// Divider before any appended group, so added entries read as ours rather than stock ones.
+if((plan.add||[]).length)ul.appendChild(sep());
+menuApply(ul,plan,null);
+if(!_AF.appAccess||!r.present)return;
+var L=_KC.label;
+// Widen the dropdown: the stock menu is sized for one-word labels, so a username like
+// 100@acme wraps mid-token at Bootstrap's default width. 300px fits a typical login; a very
+// long NS login still word-breaks rather than overflowing. Only when we add sign-in content.
+ul.style.minWidth='300px';
+// Download FIRST — getting the app is the common errand.
+if((_KC.dl||[]).length){ul.appendChild(sep());aaDownloads(ul,false)}
+ul.appendChild(sep());
+var h=document.createElement('li');h.className='_svxrow';
+h.style.cssText='padding:6px 16px 3px;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#999';
+h.textContent='Sign in to '+L;ul.appendChild(h);
+var mdl=aaModel(r,L);
+if(mdl.signable){mdl.fields.forEach(function(f){ul.appendChild(row(f.k,f.v,null,f.copy));ul.appendChild(note(f.hint,f.warn))})}
+else{ul.appendChild(note(mdl.advisory.t,true))}
+})}
+var F=[{p:/^\/portal\/home/,m:homeStatus,a:function(){return !!_AF.appStatus}},
+{p:/^\//,m:appsMenu,a:function(){return !!_AF.appAccess||!!_AF.menuConfig}},
+{p:/^\//,m:accountMenu,a:function(){return !!_AF.menuConfig}}];
 function run(){for(var i=0;i<F.length;i++){try{var f=F[i];if(f.p.test(location.pathname)&&(!f.a||f.a()))f.m()}catch(e){}}}
 var raf=0;function sched(){if(raf)return;raf=requestAnimationFrame(function(){raf=0;run()})}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run);else run();
@@ -558,13 +788,22 @@ setTimeout(function(){ob.disconnect()},8000);`;
  * so this is a pure fn of its inputs and the per-tier cache key covers everything. Label rides `_KC`
  * (post-auth) — never a literal, so the served bytes stay neutral/mirror-safe. `appBase` requires https
  * so a misconfigured value can't inject a `javascript:` href. */
+/** Strip whole-line comment lines from the injected body before serving. Source keeps its comments for
+ * maintainability; the client does not need the prose. Only lines whose first non-space characters are a
+ * line comment are dropped — never a trailing comment — so a mid-line double-slash inside a string,
+ * regex, or URL is left untouched. Blank runs left behind collapse. Not a minifier: no rename or join. */
+function stripLineComments(js: string): string {
+  const isFullLineComment = (ln: string): boolean => ln.replace(/^\s+/, '').slice(0, 2) === '//';
+  return js.split('\n').filter((ln) => !isFullLineComment(ln)).join('\n').replace(/\n\n+/g, '\n');
+}
+
 function wrapBundle(featureKeys: ReadonlyArray<{ flag: string; key: string }>, allowedKeys: string[], env: KitEnv, body: string): string {
   const af = featureKeys.map((f) => `${f.flag}:${allowedKeys.includes(f.key)}`).join(',');
   const label = (env.RINGOTEL_LABEL ?? '').trim() || 'Ringotel';
   const labelShort = (env.RINGOTEL_LABEL_SHORT ?? '').trim() || label;
   const appBaseRaw = (env.RINGOTEL_APP_BASE_URL ?? '').trim();
   const appBase = /^https:\/\//i.test(appBaseRaw) ? appBaseRaw : '';
-  const cfg = JSON.stringify({ label, labelShort, appBase });
+  const cfg = JSON.stringify({ label, labelShort, appBase, dl: parseDownloads(env) });
   return `(function(){
 "use strict";
 var _AF={${af}};
@@ -572,7 +811,7 @@ var _KC=${cfg};
 window.__kitCfg=window.__kitCfg||{};window.__kitCfg.af=_AF;window.__kitCfg.kc=_KC;
 var B=window.__kitCfg.base;
 if(!B)return;
-${body}
+${stripLineComments(body)}
 }());
 `;
 }

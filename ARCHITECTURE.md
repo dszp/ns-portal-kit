@@ -116,7 +116,7 @@ invariant**, not a convention. Copy this shape for new integrations.
 ## Ringotel writes — activation & password reset
 
 The Worker's writes all flow through one orchestration (`ringotelActivation.ts`), across two surfaces: the
-**admin** profile-page controls (`/ringotel/activate`, `/ringotel/resetPassword`) and the **self-service**
+**admin** profile-page controls (`/rapp/activate`, `/rapp/resetPassword`) and the **self-service**
 reset (`/me/resetPassword`, the self tier). It runs **activate / deactivate / reset** over two portable
 clients: `@dszp/netsapiens-lib`'s `NsWriteClient` (provision the NS softphone device
 `<ext><suffix>`, read its generated SIP password) and `@dszp/ringotel-lib`'s write client (create/attach/

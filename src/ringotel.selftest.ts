@@ -149,7 +149,7 @@ ok(classifyOrgMatch(cidx, 'weird', { weird: 'domd' }).status === 'active', 'clas
 // ── usersStatusMap (per-ext presence from the user-level `state`) ─────────────────
 const suUsers: User[] = [
   { id: 'u1', extension: '105', branchid: 'B2', status: 1, state: 1, stime: 1784056572780, devs: [{ id: 'd1', st: 1 }, { id: 'd2', st: 2 }] }, // Online, 2 devices
-  { id: 'u2', extension: '100', branchid: 'B2', status: 1, state: 2, devs: [{ id: 'd3', st: 2 }] }, // Available
+  { id: 'u2', extension: '100', branchid: 'B2', status: 1, state: 2, username: '100r', devs: [{ id: 'd3', st: 2 }] }, // Available
   { id: 'u3', extension: '106', branchid: 'B2', status: 1, state: 5, devs: [] },                    // Available on PBX
   { id: 'u4', extension: '104', branchid: 'B2', status: 1, state: 0, devs: [] },                    // Offline
   { id: 'u5', extension: '107', branchid: 'B2', status: 1, state: 4, devs: [{ id: 'd7', st: 1 }] }, // unknown non-zero (Busy/DND/At-the-Desk) → active
@@ -164,6 +164,8 @@ ok(sMap['106']!.presence === 'pbx' && sMap['106']!.label === 'Available on PBX' 
 ok(sMap['104']!.presence === 'offline' && sMap['104']!.label === 'Offline', 'usersStatusMap: 104 Offline (state 0) → offline (gray)');
 ok(sMap['107']!.presence === 'active' && sMap['107']!.label === 'Status 4', 'usersStatusMap: unknown non-zero state → active + "Status 4"');
 ok(sMap['109']!.activated === false, 'usersStatusMap: 109 status 0 → not activated (empty)');
+ok(sMap['100']!.username === '100r', 'usersStatusMap: projects the Ringotel SIP username (app-access password mode needs it)');
+ok(sMap['105']!.username === undefined, 'usersStatusMap: no username on the record → field absent, not a guessed value');
 
 // ── enabledOrgsForDomains (bulk enabled map for the /portal/domains app-status column) ──
 const idxCol: OrgBranchEntry[] = [

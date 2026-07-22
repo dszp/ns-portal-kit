@@ -8,6 +8,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveFlow, type Snapshot } from '@dszp/netsapiens-lib';
+import { INDEX_REFRESH_LOCK_KEY } from './ringotel.js';
 
 // With no argument, run against the committed, fully-genericized fixture so `pnpm test:worker` just
 // works (and can sit in the CI `test` aggregate). Pass a path to point it at any other snapshot's JSON
@@ -42,7 +43,13 @@ class MemoryCache {
     return this.store.delete(req.url);
   }
 }
-(globalThis as any).caches = { default: new MemoryCache() };
+const memCache = new MemoryCache();
+(globalThis as any).caches = { default: memCache };
+// The one artifact that actually needs resetting between "force a fresh directory dig" scenarios: the
+// directory-refresh coalescing lock (60s TTL in production; this stub's `match` has no expiry check, so
+// it never self-clears here). Delete just that key rather than the whole cache — a blanket clear would
+// also nuke the JWT-verdict cache and any org/user-status entries other assertions still rely on.
+const clearRefreshLock = () => memCache.store.delete(INDEX_REFRESH_LOCK_KEY);
 
 // --- stub global fetch: /jwt → 200 valid; NS v2 reads → fixture ---
 let jwtCalls = 0;
@@ -56,6 +63,11 @@ let rtRpc: Array<{ method: string; params: any }> = []; // captured Ringotel RPC
 let nsDevices: any[] = []; // NS user devices (write-route tests)
 let nsDevicesFail = false; // when set, the devices GET returns non-2xx (no-ns-device: read-failure case)
 let nsUserRec: any = null; // NS single-user record (eligibility; write-route tests)
+// Fix 2 (transient-upstream-failure) test knobs: fail JUST the `~` self-read, or JUST the specific-ext
+// eligibility read, independently — both otherwise share nsUserRec/the same regex, so without these two
+// flags there's no way to fail one without failing the other.
+let nsSelfReadFail = false;
+let nsEligReadFail = false;
 const j = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
 const nf = () => new Response('[]', { status: 404 });
 (globalThis as any).fetch = async (input: string, init?: any) => {
@@ -129,7 +141,12 @@ const nf = () => new Response('[]', { status: 404 });
     return j(nsDevices.find((x: any) => x.device === decodeURIComponent(m![3]!)) ?? {});
   }
   m = path.match(/^\/domains\/([^/]+)\/users\/([^/]+)$/);
-  if (m) return nsUserRec ? j(nsUserRec) : nf();
+  if (m) {
+    const isSelf = m[1] === '~' && m[2] === '~';
+    if (isSelf && nsSelfReadFail) return new Response('{"error":"upstream"}', { status: 500 });
+    if (!isSelf && nsEligReadFail) return new Response('{"error":"upstream"}', { status: 500 });
+    return nsUserRec ? j(nsUserRec) : nf();
+  }
   return nf();
 };
 
@@ -286,40 +303,40 @@ const ok = (c: boolean, m: string) => {
     ok(halfRoot.status === 503 && /ACCESS_TEAM_DOMAIN/.test(halfRootBody), '[gate] ACCESS_AUD without team domain -> setup checklist names the missing var');
   }
 
-  // ================= /ringotel/org route (standalone mode; ?refresh bypasses cross-test cache) =================
+  // ================= /rapp/org route (standalone mode; ?refresh bypasses cross-test cache) =================
   rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
   rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
   const rEnvS = { ...sEnv, RINGOTEL_API_KEY: 'rt-key' };
   const roCall = (p: string, env2: any = rEnvS) => worker.fetch(new Request(`https://w.dev${p}`), env2 as any, ctx);
 
-  const ro = await roCall(`/ringotel/org?domain=${domain}&refresh=ringotel`);
+  const ro = await roCall(`/rapp/org?domain=${domain}&refresh=ringotel`);
   const rob = await ro.json();
   ok(ro.status === 200 && rob.active === true && rob.orgId === 'RTORG' && rob.appDomain === domain && rob.eligible === true, '[ringotel/org] active → {active,orgId,appDomain,eligible}');
-  const roNone = await roCall(`/ringotel/org?domain=readable.example&refresh=ringotel`);
+  const roNone = await roCall(`/rapp/org?domain=readable.example&refresh=ringotel`);
   const roNoneB = await roNone.json();
   ok(roNone.status === 200 && roNoneB.active === false && roNoneB.eligible === true, '[ringotel/org] NS-readable but no Ringotel org → {active:false,eligible:true}');
   // The fleet-wide Ringotel key must not answer for a domain this token cannot read in NS.
-  ok((await roCall(`/ringotel/org?domain=forbidden.example&refresh=ringotel`)).status === 403,
+  ok((await roCall(`/rapp/org?domain=forbidden.example&refresh=ringotel`)).status === 403,
     '[ringotel/org] domain NOT readable in NS → 403 (standalone mode is bounded by NS scope too)');
-  ok((await roCall(`/ringotel/org?domain=${domain}`, sEnv)).status === 404, '[ringotel/org] no RINGOTEL_API_KEY → 404 (gate)');
+  ok((await roCall(`/rapp/org?domain=${domain}`, sEnv)).status === 404, '[ringotel/org] no RINGOTEL_API_KEY → 404 (gate)');
 
-  const ru = await roCall(`/ringotel/users?domain=${domain}&refresh=ringotel`);
+  const ru = await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
   const rub = await ru.json();
   ok(ru.status === 200 && rub.active === true && rub.users['100'] && rub.users['100'].activated === true && rub.users['100'].presence === 'active' && rub.users['100'].label === 'Online', '[ringotel/users] active → per-ext status map (presence from state)');
-  const ruNone = await roCall(`/ringotel/users?domain=readable.example&refresh=ringotel`);
+  const ruNone = await roCall(`/rapp/users?domain=readable.example&refresh=ringotel`);
   const ruNoneB = await ruNone.json();
   ok(ruNone.status === 200 && ruNoneB.active === false && !ruNoneB.users, '[ringotel/users] NS-readable but no Ringotel org → {active:false}');
-  ok((await roCall(`/ringotel/users?domain=forbidden.example&refresh=ringotel`)).status === 403,
+  ok((await roCall(`/rapp/users?domain=forbidden.example&refresh=ringotel`)).status === 403,
     '[ringotel/users] domain NOT readable in NS → 403');
-  ok((await roCall(`/ringotel/users?domain=${domain}`, sEnv)).status === 404, '[ringotel/users] no RINGOTEL_API_KEY → 404 (gate)');
+  ok((await roCall(`/rapp/users?domain=${domain}`, sEnv)).status === 404, '[ringotel/users] no RINGOTEL_API_KEY → 404 (gate)');
 
   // ── suffix threading regression guard ──────────────────────────────────────────
   // usersStatusForDomain/usersStatusForDomainFresh must pass resolveRingotelConfig(env).suffix through as
   // usersStatusMap's third argument. If either wrapper regresses to usersStatusMap(users, branchid) —
   // dropping that argument — the suffix silently falls back to the default 'r', and every user in a
   // deployment configured with a DIFFERENT suffix gets falsely flagged 'authname-drift'. Prove this against
-  // the LIVE /ringotel/users route (not usersStatusMap directly, which only proves the parameter itself
+  // the LIVE /rapp/users route (not usersStatusMap directly, which only proves the parameter itself
   // works, not that the wrapper threads it) with a non-default suffix and an authname that matches it.
   rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
@@ -327,7 +344,7 @@ const ok = (c: boolean, m: string) => {
 
   // Sanity first: under the DEFAULT suffix ('r', no env override) this exact authname genuinely IS a
   // mismatch — establishes the fixture is discriminating before trusting the override case below.
-  const ruDefaultSuffix = await roCall(`/ringotel/users?domain=${domain}&refresh=ringotel`, rEnvS);
+  const ruDefaultSuffix = await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`, rEnvS);
   const ruDefaultSuffixB = await ruDefaultSuffix.json();
   ok(
     ruDefaultSuffix.status === 200 && (ruDefaultSuffixB.users?.['100']?.health?.flags ?? []).includes('authname-drift'),
@@ -335,7 +352,7 @@ const ok = (c: boolean, m: string) => {
   );
 
   const suffixEnv = { ...rEnvS, RINGOTEL_ACTIVATION_SUFFIX: 'x' };
-  const ruSuffix = await roCall(`/ringotel/users?domain=${domain}&refresh=ringotel`, suffixEnv);
+  const ruSuffix = await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`, suffixEnv);
   const ruSuffixB = await ruSuffix.json();
   const flags100 = ruSuffixB.users?.['100']?.health?.flags ?? [];
   ok(
@@ -369,10 +386,194 @@ const ok = (c: boolean, m: string) => {
     ok((await meCall('/me/status', { ...pEnv, PORTAL_MODE: '' })).status !== 200, '[me/status] non-portal env → not served');
     // portal.self off is a TOTAL kill-switch — even an admin (skips the fence) is denied /me/* directly.
     ok((await meCall('/me/status', { ...pEnv, PORTAL_FEATURES: JSON.stringify({ 'portal.self': 'off' }) }, mkTok({ user_scope: 'Reseller' }))).status === 403, '[me/status] portal.self off → 403 even for an admin (total kill-switch)');
-    // Regression: /ringotel/user (admin) still works after the computeUserStatus refactor.
-    const ru2 = await meCall(`/ringotel/user?domain=${domain}&ext=100`, pEnv, mkTok({ user_scope: 'Reseller' }));
+    // Regression: /rapp/user (admin) still works after the computeUserStatus refactor.
+    const ru2 = await meCall(`/rapp/user?domain=${domain}&ext=100`, pEnv, mkTok({ user_scope: 'Reseller' }));
     const ru2b = await ru2.json();
     ok(ru2.status === 200 && ru2b.active === true && ru2b.ext === '100', '[ringotel/user] admin route intact (active=org-present) post-refactor');
+  }
+
+  // ================= /me/app-access (Task 5, self-service sign-in details) =================
+  {
+    // No bearer ⇒ 401 (portal mode is delegated-only; resolveAuth refuses before any route logic runs).
+    const noAuth = await worker.fetch(new Request(`https://w.dev/me/app-access`, { headers: { Origin: 'https://portal.example.com' } }), pEnv as any, ctx);
+    ok(noAuth.status === 401, '[me/app-access] no bearer ⇒ 401');
+
+    // POST ⇒ 405 (read-only route; never added to WRITE_PATHS).
+    const postRes = await worker.fetch(new Request(`https://w.dev/me/app-access`, { method: 'POST', headers: { Origin: 'https://portal.example.com' } }), pEnv as any, ctx);
+    ok(postRes.status === 405, '[me/app-access] rejects POST (not in WRITE_PATHS)');
+
+    // Password mode: no SSO configured, org active, own ext '100' activated with a SIP username.
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
+    rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, username: '100r', devs: [{ id: 'd', st: 1 }] }];
+    nsUserRec = { user: '100', domain, email: `u@${domain}`, 'account-status': 'standard', 'user-scope': 'Basic User', 'login-username': `100@${domain}` };
+    await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`); // warms BOTH the directory + org-users caches
+
+    const r1 = await meCall('/me/app-access');
+    ok(r1.status === 200, '[me/app-access] valid self ns_t ⇒ 200');
+    const b1 = await r1.json();
+    ok(typeof b1.mode === 'string', '[me/app-access] response carries a mode');
+    ok(!('password' in b1) && !('qr' in b1), '[me/app-access] response never carries a password or QR');
+    ok(b1.present === true && b1.mode === 'password' && b1.username === '100r', '[me/app-access] no SSO configured ⇒ password mode, SIP username from computeUserStatus');
+    ok(Array.isArray(b1.downloads) && Array.isArray(b1.hide) && typeof b1.label === 'string', '[me/app-access] carries downloads/hide/label');
+
+    // IDOR: a query domain/ext is ignored — identity comes from the `~` self-wildcard only.
+    const r2 = await meCall('/me/app-access?ext=999&domain=readable.example');
+    const b2 = await r2.json();
+    ok(r2.status === 200 && JSON.stringify(b1) === JSON.stringify(b2), '[me/app-access] ignores client ext/domain (self-scoped, identical body)');
+
+    // SSO mode: bind the org's SSO service to ours and give the caller a usable NS login.
+    // The directory refresh is coalesced fleet-wide for ~60s (INDEX_REFRESH_MIN_INTERVAL) so a naive
+    // second `refresh=ringotel` call in the same run would silently serve the stale directory cached by
+    // an earlier test; evict just the refresh lock so this scenario's org data actually lands.
+    clearRefreshLock();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org', params: { sso: '9/netsapiens_sso' } }];
+    await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
+    const ssoEnv = { ...pEnv, RINGOTEL_SSO_SERVICE: 'netsapiens_sso' };
+    const r3 = await meCall('/me/app-access', ssoEnv);
+    const b3 = await r3.json();
+    ok(r3.status === 200 && b3.mode === 'sso' && b3.username === `100@${domain}`, '[me/app-access] SSO bound + usable login ⇒ sso mode, login-username VERBATIM (never assembled as user@domain)');
+
+    // ---- Fix 2: a transient upstream failure must degrade to "we cannot answer", never to a confident
+    // WRONG advisory. Both scenarios are SSO-bound (reusing the org from the SSO-mode test just above),
+    // where a null self-record or a null eligibility read would otherwise be silently coerced into an
+    // affirmative-sounding mode (needs-portal-setup / not-set-up) by the old code.
+
+    // The `~` self-read fails (a momentary NS blip). Even though nsUserRec below describes a perfectly
+    // usable SSO login, the Worker must never see it — resolveSelfNsUser swallows the failure and returns
+    // record: null, and the handler must not paper over that with `{}`.
+    nsUserRec = { user: '100', domain, email: `u@${domain}`, 'account-status': 'standard', 'user-scope': 'Basic User', 'login-username': `100@${domain}` };
+    nsSelfReadFail = true;
+    const r3d = await meCall('/me/app-access', ssoEnv);
+    const b3d = await r3d.json();
+    ok(r3d.status === 200 && b3d.present === true && b3d.mode === 'unavailable',
+      '[me/app-access] SSO-bound + failed self read (record: null) ⇒ unavailable, not needs-portal-setup');
+    ok(!('username' in b3d) && !('appDomain' in b3d),
+      '[me/app-access] unavailable-on-self-read-failure carries neither username nor appDomain');
+    nsSelfReadFail = false;
+
+    // The self read succeeds (SSO-usable), but the per-ext eligibility read (evaluateEligibilityForExt's
+    // own NS-user GET) fails. `eligible` must not be treated as a genuine ineligibility verdict.
+    nsEligReadFail = true;
+    const r3e = await meCall('/me/app-access', ssoEnv);
+    const b3e = await r3e.json();
+    ok(r3e.status === 200 && b3e.present === true && b3e.mode === 'unavailable',
+      '[me/app-access] SSO-bound + failed eligibility read ⇒ unavailable, not not-set-up');
+    ok(!('username' in b3e) && !('appDomain' in b3e),
+      '[me/app-access] unavailable-on-eligibility-failure carries neither username nor appDomain');
+    nsEligReadFail = false;
+
+    // ---- Advisory modes: route-level coverage (Fix 1's org.appDomain leak lived exactly here — a green
+    // suite that only checked `mode` on these two paths is how it shipped). Each asserts absence of
+    // BOTH username and appDomain, not merely the right mode, since that's the property Fix 1 restores.
+
+    // needs-portal-setup: still SSO-bound (org from the scenario above), but the NS self-record cannot
+    // complete an SSO login at all (no portal access) — fires before eligibility/activation are even
+    // considered. The org is ACTIVE and has an appDomain (org.appDomain === domain, set above), so this is
+    // exactly the case where the unconditional spread used to leak it.
+    nsUserRec = { ...nsUserRec, 'user-scope': 'No Portal' };
+    const r3b = await meCall('/me/app-access', ssoEnv);
+    const b3b = await r3b.json();
+    ok(r3b.status === 200 && b3b.present === true && b3b.mode === 'needs-portal-setup',
+      '[me/app-access] SSO bound + user-scope "No Portal" ⇒ needs-portal-setup');
+    ok(!('username' in b3b) && !('appDomain' in b3b),
+      '[me/app-access] needs-portal-setup carries NEITHER username NOR appDomain');
+
+    // not-set-up: non-SSO path, org active (and its appDomain is set, same as above), but no activated
+    // Ringotel user exists for this ext — `resolveAppAccess`'s `!input.activated ⇒ not-set-up` branch.
+    nsUserRec = { user: '100', domain, email: `u@${domain}`, 'account-status': 'standard', 'user-scope': 'Basic User' };
+    rtUsers = []; // no user record for ext '100' ⇒ computeUserStatus reports not activated
+    await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
+    const r3c = await meCall('/me/app-access'); // pEnv: no RINGOTEL_SSO_SERVICE ⇒ non-SSO path
+    const b3c = await r3c.json();
+    ok(r3c.status === 200 && b3c.present === true && b3c.mode === 'not-set-up',
+      '[me/app-access] non-SSO + not activated ⇒ not-set-up');
+    ok(!('username' in b3c) && !('appDomain' in b3c),
+      '[me/app-access] not-set-up carries NEITHER username NOR appDomain');
+
+    // Admin third-party projection: /rapp/user returns the SAME app-access projection /me/app-access
+    // computes (shared helper ⇒ no drift), gated on ringotel.profileAppAccess (default office_manager, so
+    // a reseller has it). Same fixture state (non-SSO, ext 100 not activated ⇒ not-set-up).
+    const resTokAA = mkTok({ user_scope: 'Reseller' });
+    const ruAA = await meCall(`/rapp/user?domain=${domain}&ext=100`, pEnv, resTokAA);
+    const ruAAb = await ruAA.json();
+    ok(ruAA.status === 200 && ruAAb.appAccess && ruAAb.appAccess.mode === b3c.mode,
+      '[ringotel/user] includes appAccess projection matching /me/app-access for the same user (no drift)');
+    ok(!('username' in ruAAb.appAccess) && !('appDomain' in ruAAb.appAccess),
+      '[ringotel/user] appAccess advisory mode carries NEITHER username NOR appDomain');
+    const ruOff = await meCall(`/rapp/user?domain=${domain}&ext=100`, { ...pEnv, PORTAL_FEATURES: JSON.stringify({ 'ringotel.profileAppAccess': 'off' }) }, resTokAA);
+    const ruOffb = await ruOff.json();
+    ok(ruOff.status === 200 && !('appAccess' in ruOffb), '[ringotel/user] ringotel.profileAppAccess off ⇒ no appAccess key (status route still serves)');
+
+    // Org inactive (no Ringotel org bound for this domain) ⇒ unavailable; the hide list still resolves
+    // (a domain may run another white-label app and still want stock entries hidden).
+    clearRefreshLock();
+    rtOrgs = [];
+    rtBranches = [];
+    await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
+    const r4 = await meCall('/me/app-access', { ...pEnv, PORTAL_APPS_HIDE: 'SNAPmobile Web' });
+    const b4 = await r4.json();
+    ok(r4.status === 200 && b4.present === false && b4.mode === 'unavailable' && b4.hide[0] === 'SNAPmobile Web', '[me/app-access] no Ringotel org ⇒ unavailable, hide list still resolved');
+
+    // Feature gates: the route carries TWO independent surfaces (sign-in details = me.appAccess, menu
+    // customization = me.menuConfig). Either one alone still serves; neither ⇒ 403. With only menus
+    // permitted the sign-in fields must be ABSENT, not merely unused by the client.
+    {
+      const menusOnly = await meCall('/me/app-access', { ...pEnv, PORTAL_FEATURES: JSON.stringify({ 'me.appAccess': 'off' }) });
+      const mb = await menusOnly.json();
+      ok(menusOnly.status === 200, '[me/app-access] me.appAccess off but me.menuConfig on → still served (menus surface)');
+      ok(!('mode' in mb) && !('username' in mb) && !('appDomain' in mb),
+        '[me/app-access] menus-only response carries NO sign-in fields');
+      ok(mb.menus && mb.menus.apps && Array.isArray(mb.menus.apps.hide) && Array.isArray(mb.menus.apps.add),
+        '[me/app-access] menus-only response carries the resolved menu plan');
+
+      const accessOnly = await meCall('/me/app-access', { ...pEnv, PORTAL_FEATURES: JSON.stringify({ 'me.menuConfig': 'off' }) });
+      const ab = await accessOnly.json();
+      ok(accessOnly.status === 200 && !('menus' in ab) && 'mode' in ab,
+        '[me/app-access] me.menuConfig off → sign-in details served, no menu plan');
+
+      ok((await meCall('/me/app-access', { ...pEnv, PORTAL_FEATURES: JSON.stringify({ 'me.appAccess': 'off', 'me.menuConfig': 'off' }) })).status === 403,
+        '[me/app-access] BOTH surfaces off → 403');
+    }
+
+    // Non-portal env ⇒ fenced (no delegated self surface off-portal).
+    ok((await meCall('/me/app-access', { ...pEnv, PORTAL_MODE: '' })).status !== 200, '[me/app-access] non-portal env → not served');
+
+    // Config guard: a malformed PORTAL_APP_DOWNLOADS fails the WHOLE Worker loudly (like featuresConfigError).
+    ok((await meCall('/me/app-access', { ...pEnv, PORTAL_APP_DOWNLOADS: 'not json' })).status === 500, '[me/app-access] malformed PORTAL_APP_DOWNLOADS → 500 (fail closed, loud)');
+
+    // No RINGOTEL_API_KEY at all ⇒ 404 (ringotelEnabled gate), matching every other Ringotel route.
+    // No app integration configured: the SIGN-IN surface needs it and is gone (404 when that is all the
+    // caller was allowed), but MENU customization does not — static add/hide must work for a deployment
+    // that runs no app at all, so it still serves with the app state resolved as 'none'.
+    ok((await meCall('/me/app-access', { ...pEnv, RINGOTEL_API_KEY: '', PORTAL_FEATURES: JSON.stringify({ 'me.menuConfig': 'off' }) })).status === 404,
+      '[me/app-access] no RINGOTEL_API_KEY and no menu surface → 404');
+    {
+      const noKey = await meCall('/me/app-access', { ...pEnv, RINGOTEL_API_KEY: '' });
+      const nb = await noKey.json();
+      ok(noKey.status === 200 && nb.menus && nb.menus.apps, '[me/app-access] no RINGOTEL_API_KEY → menu config still served');
+      ok(!('mode' in nb) && !('username' in nb), '[me/app-access] ...and it carries no sign-in fields');
+    }
+    {
+      // The app axis resolves to 'none' with no integration, so an app-conditional rule targeting 'none'
+      // applies — the case a mirror adopter with no app integration actually configures.
+      const menusNoApp = await meCall('/me/app-access', {
+        ...pEnv, RINGOTEL_API_KEY: '',
+        PORTAL_MENUS: JSON.stringify({ apps: { hide: { app: { ringotel: ['X'], none: ['Y'] } } } }),
+      });
+      const mb = await menusNoApp.json();
+      ok(menusNoApp.status === 200 && mb.menus.apps.hide[0] === 'Y', '[me/app-access] with no integration the app state is "none"');
+    }
+
+    // Restore the shared fixture state that later blocks (/me/devices, write routes) depend on. Evict
+    // the refresh lock too — the "no org" scenario just cached an empty directory, and a later forced
+    // refresh would otherwise coalesce onto that stale (org-less) entry.
+    clearRefreshLock();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
+    rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
+    nsUserRec = { user: '100', domain, email: `u@${domain}` };
+    await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
   }
 
   // ================= /me/devices + /me/resetPassword: built but default OFF (2026-07-18) =================
@@ -402,28 +603,28 @@ const ok = (c: boolean, m: string) => {
   // Method gate: POST to a GET-only route → 405.
   ok((await dcall('/flow', { Authorization: `Bearer ${resellerTok}` }, 'POST')).status === 405, '[write] POST to a GET-only route → 405');
   // Gate: no RINGOTEL_API_KEY → 404.
-  ok((await wcall('/ringotel/activate', { domain, ext: '100' }, { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '' })).status === 404, '[write] activate with no RINGOTEL_API_KEY → 404');
+  ok((await wcall('/rapp/activate', { domain, ext: '100' }, { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '' })).status === 404, '[write] activate with no RINGOTEL_API_KEY → 404');
   // Write-domain safety rail: empty allowlist refuses all writes (fail-closed).
-  ok((await wcall('/ringotel/activate', { domain, ext: '100' }, { ...wEnv, RINGOTEL_WRITE_DOMAINS: '' })).status === 403, '[write] activate refused when RINGOTEL_WRITE_DOMAINS empty (fail-closed rail)');
-  ok((await wcall('/ringotel/activate', { domain, ext: '100' }, { ...wEnv, RINGOTEL_WRITE_DOMAINS: 'other.example' })).status === 403, '[write] activate refused when domain not on the write allowlist');
+  ok((await wcall('/rapp/activate', { domain, ext: '100' }, { ...wEnv, RINGOTEL_WRITE_DOMAINS: '' })).status === 403, '[write] activate refused when RINGOTEL_WRITE_DOMAINS empty (fail-closed rail)');
+  ok((await wcall('/rapp/activate', { domain, ext: '100' }, { ...wEnv, RINGOTEL_WRITE_DOMAINS: 'other.example' })).status === 403, '[write] activate refused when domain not on the write allowlist');
   // No principal (service mode) → 403 fail-closed.
   {
     const sWrite = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '', ALLOW_UNGATED_SERVICE_TOKEN: '1', RINGOTEL_API_KEY: 'rt-key', RINGOTEL_WRITE_DOMAINS: domain };
-    const r = await worker.fetch(new Request('https://w.dev/ringotel/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain, ext: '100' }) }), sWrite as any, ctx);
+    const r = await worker.fetch(new Request('https://w.dev/rapp/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain, ext: '100' }) }), sWrite as any, ctx);
     ok(r.status === 403, '[write] activate in service mode (no principal) → 403 fail-closed');
   }
   // forceFresh: a write drives a fresh /jwt (revocation-gap close).
   {
     rtUsers = [];
     const before = jwtCalls;
-    await wcall('/ringotel/activate', { domain, ext: '100' });
+    await wcall('/rapp/activate', { domain, ext: '100' });
     ok(jwtCalls > before, '[write] a write forces a fresh /jwt (jwtCalls incremented — revocation gap)');
   }
   // Happy path: activate a new user → 200 { ok, action:'created' }. nsUserRec carries first/last 'Test'/'User'.
   {
     rtUsers = [];
     rtRpc = [];
-    const r = await wcall('/ringotel/activate', { domain, ext: '100' });
+    const r = await wcall('/rapp/activate', { domain, ext: '100' });
     const b = await r.json();
     ok(r.status === 200 && b.ok === true && b.action === 'created', '[write] activate (new) → 200 { ok, action:created }');
     const cu = rtRpc.find((c) => c.method === 'createUser');
@@ -434,7 +635,7 @@ const ok = (c: boolean, m: string) => {
     rtUsers = [{ id: 'u100', extension: '100', branchid: 'RTBR', name: 'Stale Name', status: 0 }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
     rtRpc = [];
-    const r = await wcall('/ringotel/activate', { domain, ext: '100' });
+    const r = await wcall('/rapp/activate', { domain, ext: '100' });
     const b = await r.json();
     ok(r.status === 200 && b.action === 'updated', '[write] activate (existing/deactivated) → 200 { action:updated }');
     const uu = rtRpc.find((c) => c.method === 'updateUser');
@@ -449,7 +650,7 @@ const ok = (c: boolean, m: string) => {
       { id: 'live100', extension: '100', branchid: 'RTBR', name: 'Demo', username: '100r', authname: '100r', status: 1 },
     ];
     rtRpc = [];
-    const r = await wcall('/ringotel/activate', { domain, ext: '100' });
+    const r = await wcall('/rapp/activate', { domain, ext: '100' });
     const b = await r.json();
     const del = rtRpc.find((c) => c.method === 'deleteUser');
     ok(r.status === 200 && b.action === 'updated' && b.rtUserId === 'live100', '[write] duplicate ext → keeps the active record (action updated)');
@@ -462,14 +663,14 @@ const ok = (c: boolean, m: string) => {
       { id: 'tie1', extension: '100', branchid: 'RTBR', username: '100r', authname: '100r', status: 1 },
       { id: 'tie2', extension: '100', branchid: 'RTBR', username: '100r', authname: '100r', status: -1 },
     ];
-    const r = await wcall('/ringotel/activate', { domain, ext: '100' });
+    const r = await wcall('/rapp/activate', { domain, ext: '100' });
     ok(r.status === 409, '[write] SIP-identity tie → 409 (typed RingotelWriteError), not 500');
     rtUsers = [];
   }
   // Ineligible: a system user (srv_code non-blank) → 403 with reasons (HARD, non-overridable).
   {
     nsUserRec = { user: '100', srv_code: '99', email: `u@${domain}` };
-    const r = await wcall('/ringotel/activate', { domain, ext: '100' });
+    const r = await wcall('/rapp/activate', { domain, ext: '100' });
     const b = await r.json();
     ok(r.status === 403 && b.tier === 'hard' && Array.isArray(b.reasons), '[write] activate a system user (srv_code) → 403 ineligible (hard)');
     nsUserRec = { user: '100', srv_code: '', email: `u@${domain}`, 'first-name': 'Test' };
@@ -479,13 +680,13 @@ const ok = (c: boolean, m: string) => {
   {
     rtUsers = [];
     nsUserRec = { user: '100', srv_code: '', email: `u@${domain}`, 'first-name': 'SHARED', 'last-name': 'Line' };
-    const blocked = await wcall('/ringotel/activate', { domain, ext: '100' });
+    const blocked = await wcall('/rapp/activate', { domain, ext: '100' });
     ok(blocked.status === 403 && (await blocked.json()).tier === 'soft', '[write] soft-excluded (SHARED name) user → 403 without force');
     rtUsers = [];
-    const forced = await wcall('/ringotel/activate', { domain, ext: '100', force: true });
+    const forced = await wcall('/rapp/activate', { domain, ext: '100', force: true });
     ok(forced.status === 200 && (await forced.json()).action === 'created', '[write] reseller force:true overrides the soft exclusion → 200');
     nsUserRec = { user: '100', srv_code: '9', email: `u@${domain}` };
-    ok((await wcall('/ringotel/activate', { domain, ext: '100', force: true })).status === 403, '[write] force does NOT override a system user (HARD) → 403');
+    ok((await wcall('/rapp/activate', { domain, ext: '100', force: true })).status === 403, '[write] force does NOT override a system user (HARD) → 403');
     nsUserRec = { user: '100', srv_code: '', email: `u@${domain}`, 'first-name': 'Test' };
   }
 
@@ -494,7 +695,7 @@ const ok = (c: boolean, m: string) => {
   {
     rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, name: 'Stale Name' }];
     rtRpc = [];
-    const r = await wcall('/ringotel/activate', { domain, ext: '100', activate: false });
+    const r = await wcall('/rapp/activate', { domain, ext: '100', activate: false });
     ok(r.status === 200 && (await r.json()).action === 'deactivated', '[write] deactivate → 200 { action:deactivated }');
     const uu = rtRpc.find((c) => c.method === 'updateUser');
     ok(uu?.params.name === 'Test' && uu?.params.email === `u@${domain}`, '[write] deactivate also syncs NS name + email into the directory entry');
@@ -502,17 +703,17 @@ const ok = (c: boolean, m: string) => {
   // Reset requires an existing RT user.
   {
     rtUsers = [];
-    ok((await wcall('/ringotel/resetPassword', { domain, ext: '100' })).status === 404, '[write] reset with no RT user → 404');
+    ok((await wcall('/rapp/resetPassword', { domain, ext: '100' })).status === 404, '[write] reset with no RT user → 404');
     rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1 }];
-    const r = await wcall('/ringotel/resetPassword', { domain, ext: '100' });
+    const r = await wcall('/rapp/resetPassword', { domain, ext: '100' });
     ok(r.status === 200 && (await r.json()).action === 'reset', '[write] reset (existing RT user) → 200 { action:reset }');
   }
-  // Indicator (read) GET /ringotel/user → single-user status.
+  // Indicator (read) GET /rapp/user → single-user status.
   {
     rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
-    const r = await wcall('/ringotel/user?ext=100', null, wEnv, resellerTok, 'GET');
+    const r = await wcall('/rapp/user?ext=100', null, wEnv, resellerTok, 'GET');
     const b = await r.json();
-    ok(r.status === 200 && b.active === true && b.status && b.status.activated === true, '[write] GET /ringotel/user → single-user status indicator');
+    ok(r.status === 200 && b.active === true && b.status && b.status.activated === true, '[write] GET /rapp/user → single-user status indicator');
   }
 
   // ================= domain allowlist =================
@@ -544,10 +745,10 @@ const ok = (c: boolean, m: string) => {
   const opt = await dcall('/flow', { Origin: 'https://portal.example.com' }, 'OPTIONS');
   ok(opt.status === 204 && (opt.headers.get('Access-Control-Allow-Methods') || '').includes('POST'), 'OPTIONS preflight → 204 + CORS allows POST (write routes)');
 
-  // ── /ringotel/user: no-ns-device flag ─────────────────────────────────────────
+  // ── /rapp/user: no-ns-device flag ─────────────────────────────────────────
   // The org-users cache (keyed by orgid, warm from earlier tests) doesn't know this ext yet, and
   // computeUserStatus always reads with refresh:false — so prime it with a real refresh=ringotel read
-  // first (same pattern as the suffix-threading guard above), THEN hit /ringotel/user un-refreshed so
+  // first (same pattern as the suffix-threading guard above), THEN hit /rapp/user un-refreshed so
   // it exercises the exact cached path the profile endpoint uses in production.
   const ringotelUserCall = async ({ ext, devices }: { ext: string; devices: unknown }) => {
     rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
@@ -561,8 +762,8 @@ const ok = (c: boolean, m: string) => {
       nsDevicesFail = false;
       nsDevices = devices as any[];
     }
-    await roCall(`/ringotel/users?domain=${domain}&refresh=ringotel`);
-    return roCall(`/ringotel/user?domain=${domain}&ext=${ext}`);
+    await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
+    return roCall(`/rapp/user?domain=${domain}&ext=${ext}`);
   };
   const call = async (devices: unknown) => {
     const res = await ringotelUserCall({ ext: '1045', devices });

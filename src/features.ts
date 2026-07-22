@@ -112,12 +112,15 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
   { key: 'ringotel.profileStatus', name: 'App status on profile', description: 'The app active/inactive indicator on the user-profile page.', default: 'office_manager' },
   { key: 'ringotel.activate', name: 'App activate/deactivate', description: 'Activate or deactivate the app for a user from the profile page (write).', default: 'office_manager' },
   { key: 'ringotel.resetPassword', name: 'App password reset', description: 'Reset the app password for a user from the profile page (write).', default: 'office_manager' },
+  { key: 'ringotel.profileAppAccess', name: 'App sign-in details on profile', description: 'The user-visible app sign-in message (domain/username/password + downloads) on the user-profile page.', default: 'office_manager' },
   // Self-service tier (own-account features; orthogonal to the admin ladder). See
   // docs/superpowers/specs/2026-07-18-self-service-tier-home-status-design.md.
   { key: 'portal.self', name: 'Self-service entry', description: 'Receive the self-service bundle (own-account features).', default: 'all' },
   { key: 'me.appStatus', name: 'My app status (home)', description: "App active/inactive indicator on the user's own home page.", default: 'all' },
   { key: 'me.devices', name: 'My devices', description: "The user's own device list/registration/online status. Off by default.", default: 'off' },
   { key: 'me.resetPassword', name: 'Reset my app password', description: "Reset the user's own app password (own account; write). Off by default.", default: 'off' },
+  { key: 'me.appAccess', name: 'My app sign-in details', description: "The app's domain/username sign-in details and download links on the user's own surfaces.", default: 'all' },
+  { key: 'me.menuConfig', name: 'Portal menu customization', description: 'Static add/hide of portal menu entries, optionally conditional on which app is active.', default: 'all' },
 ];
 
 /** The registry's policy keys, in order (drives `_AF` + the default policy set). */

@@ -109,8 +109,8 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     // regex backslashes (a collapsed `/^\/portal/` → `/^/portal/` would be a SyntaxError here).
     let syntaxOk = true; try { new Script(body); } catch (e) { syntaxOk = false; }
     ok(syntaxOk, '[bundle] emitted JS compiles (String.raw kept the regex backslashes intact)');
-    ok(body.includes('user-toolbar') && body.includes('/ringotel/org') && body.includes('svx-appcol') && body.includes('Call Flow Diagram'), '[bundle] folded features present (banner + columns + call-flow)');
-    ok(body.includes('/ringotel/activate') && body.includes('/ringotel/resetPassword') && body.includes('profile-panel-main') && body.includes('jpost'), '[bundle] profile activation feature folded (activate + reset + jpost)');
+    ok(body.includes('user-toolbar') && body.includes('/rapp/org') && body.includes('svx-appcol') && body.includes('Call Flow Diagram'), '[bundle] folded features present (banner + columns + call-flow)');
+    ok(body.includes('/rapp/activate') && body.includes('/rapp/resetPassword') && body.includes('profile-panel-main') && body.includes('jpost'), '[bundle] profile activation feature folded (activate + reset + jpost)');
     ok(body.includes('force:true') && body.includes('Force-activate') && body.includes('_isRes'), '[bundle] reseller runtime force-activate override present');
     ok(body.includes('"label":"App"'), '[bundle] gated bundle carries the deployment label from RINGOTEL_LABEL');
     ok(body.includes('"appBase":"https://app.example.com"'), '[bundle] https app-base carried into _KC');
@@ -171,7 +171,7 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(brandedSelf.includes(SELF_BRAND_PROBE), '[self] a white-label value reaches the self bundle from env');
     ok(neutralSelf.includes('"label":"Ringotel"') && !neutralSelf.includes(SELF_BRAND_PROBE), '[self] neutral source (mirror-safe)');
     const adm = buildKitBundle(featurePolicyKeys(), baseEnv);
-    ok(adm.includes('callflow:true') && adm.includes('resetPassword:true') && !adm.includes('appStatus:'), '[admin] admin bundle unchanged (7 flags, no me.* flag)');
+    ok(adm.includes('callflow:true') && adm.includes('resetPassword:true') && adm.includes('profileAppAccess:true') && !adm.includes('appStatus:'), '[admin] admin bundle carries the 8 admin flags incl. profileAppAccess, no me.* flag');
   }
 
   // ── Self entry + fence + /kit/self.js route (Task 3, 2026-07-18) ──────────────────
@@ -243,6 +243,104 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(/var\s+_h\s*=/.test(src), '[kit] health marker uses a var (ES5 style, matches bundle)');
     new Script(src); // throws SyntaxError if the hand-written browser JS is malformed
     ok(true, '[kit] bundle with health markers still parses');
+  }
+
+  // ── Apps-menu rendering in the self bundle (Task 6, 2026-07-21) ─────────────────────
+  {
+    const b = buildSelfBundle(['me.appAccess', 'portal.self'], {} as any);
+    ok(b.includes('app-menu-list'), '[kit] self bundle targets the Apps menu');
+    // Whole-bundle substring checks on 'app-menu-list'/'stopPropagation' alone would stay green even
+    // if the guard were moved BACK into the per-row builders (row()/link()) — the exact regression
+    // this design guards against (a click's target is the nearest common ancestor of mousedown and
+    // mouseup, so drag-selecting text and releasing outside a row resolves to the <ul>, above any
+    // per-row listener — verified live on the production portal). Pin two properties instead:
+    // 1) the exact <ul>-level guard string is present (including its anchor exception), and
+    // 2) stopPropagation appears EXACTLY ONCE in this bundle. Moving it into row()/link() either
+    // removes this exact string or raises the count, so either mutation fails.
+    const UL_GUARD = "ul.addEventListener('click',function(e){if(!e.target.closest('a[href]'))e.stopPropagation()});";
+    ok(b.includes(UL_GUARD), '[kit] click guard is on the <ul>, not per row');
+    const stopPropCount = (b.match(/stopPropagation/g) || []).length;
+    ok(stopPropCount === 1, '[kit] click guard is on the <ul>, not per row');
+    // Assert the ABSENCE of branding without naming a brand — this file is published, so spelling the
+    // white-label name here would be the very leak the assertion exists to prevent. With no
+    // RINGOTEL_LABEL configured the bundle must carry the neutral vendor default and nothing else.
+    ok(b.includes('"label":"Ringotel"'), '[kit] unbranded env ⇒ neutral default label, no white-label literal');
+    let aaOk = true; try { new Function(b); } catch (e) { aaOk = false; }
+    ok(aaOk, '[kit] self bundle with app-access still parses');
+    // aaFetch must memoise the IN-FLIGHT PROMISE, not the resolved value — the old pattern
+    // (`if(_aa){cb(_aa);return}` gated on a value only set inside the .then) let two callers arriving
+    // before the first response each fire their own request. Pin both directions: the new dispatch
+    // is present, and the old resolve-only-memo dispatch string is gone (a revert reintroduces it).
+    ok(b.includes('_aaP'), '[kit] aaFetch memoises the in-flight promise (not just the resolved value)');
+    ok(!b.includes('if(_aa){cb(_aa);return}'), '[kit] aaFetch memoises the in-flight promise (not just the resolved value)');
+  }
+
+  // ── Home-card sign-in details (Task 7, 2026-07-21) ──────────────────────────────
+  {
+    const b = buildSelfBundle(['me.appAccess', 'me.appStatus', 'portal.self'], {} as any);
+    ok(b.includes('_svx_home'), '[kit] home card still built');
+    // The sign-in verbiage now lives in ONE place — aaModel — so the menu, home card, and admin block
+    // share it and cannot fork. The domain helper text (and each per-mode string) therefore appears
+    // EXACTLY ONCE in the bundle. A revert that re-inlines the strings into a surface raises the count
+    // and fails this; a surface that stops sourcing aaModel drops the aaModel reference below.
+    ok((b.match(/The same for everyone in your organization\./g) || []).length === 1, '[kit] domain helper text lives once (aaModel), not forked per surface');
+    ok((b.match(/Your portal password/g) || []).length === 1, '[kit] password verbiage lives once (aaModel)');
+    // The password's location is a per-org setting; when the server could read it we say the true thing,
+    // and when it could not we keep the hedge rather than assert either case.
+    ok(b.includes('function pwHint(r)') && b.includes('r.hPIE===false') && b.includes('r.hPIE===true'),
+      '[kit] the password hint branches on the org\'s reported setting');
+    ok(b.includes('In the email itself, or behind the one-time link in it.'),
+      '[kit] ...and still hedges when the setting is unknown');
+    ok(b.includes('function aaModel(') && b.includes('function copyBtn(') && b.includes('function aaDownloads('), '[kit] shared sign-in helpers present');
+    ok((b.match(/aaModel\(/g) || []).length >= 3, '[kit] both self surfaces (menu + home) source the shared aaModel (call + 2 uses)');
+    ok(b.includes("b.title='Click to copy'"), '[kit] copy button carries a Click to copy tooltip');
+    ok(b.includes('_KC.dl'), '[kit] downloads render from _KC.dl via aaDownloads');
+    // Absence of branding, asserted without naming a brand — see the note above.
+    ok(b.includes('"label":"Ringotel"'), '[kit] home card: unbranded env ⇒ neutral default label');
+    let hcOk = true; try { new Function(b); } catch (e) { hcOk = false; }
+    ok(hcOk, '[kit] self bundle with home-card sign-in details still parses');
+  }
+
+  // ── Menu config: static add/hide, independent of the sign-in surface (2026-07-22) ──
+  {
+    const b = buildSelfBundle(['me.menuConfig', 'portal.self'], {} as any);
+    ok(b.includes('menuConfig:true') && b.includes('appAccess:false'), '[menus] menuConfig-only tier: menu flag on, sign-in flag off');
+    ok(b.includes('!_AF.appAccess&&!_AF.menuConfig'), '[menus] the Apps menu runs when EITHER surface is enabled');
+    // The internal guard is unreachable unless the DISPATCHER also admits menuConfig — asserting only the
+    // guard string let a menus-only deployment silently do nothing while every test still passed.
+    ok(b.includes('return !!_AF.appAccess||!!_AF.menuConfig'), '[menus] the dispatcher gate admits a menuConfig-only tier (not just the inner guard)');
+    ok(b.includes('r.menus&&r.menus.apps'), '[menus] the client consumes the server-resolved per-menu plan');
+    ok(b.includes('_svxadd'), '[menus] added entries carry a marker class (idempotency + identifiable)');
+    ok(b.includes("a.rel='noopener'") && b.includes('a.textContent=fill('), '[menus] added anchors are noopener and set text via textContent (never innerHTML)');
+    // {page} is the one variable the server cannot fill; the client substitutes the PATH only — never the
+    // query, which can carry identifiers and this link may leave for a third party.
+    ok(b.includes("split('{page}').join(pg)") && b.includes('encodeURIComponent(location.pathname)'),
+      '[menus] {page} is filled client-side from the path only, percent-encoded');
+    ok(!b.includes('location.search'), '[menus] the portal query string is never interpolated into an added link');
+    ok(b.includes('if(!_AF.appAccess||!r.present)return'), '[menus] the sign-in section stays gated on its own flag after menu work is applied');
+    // The account dropdown has no id and shares a generic class, so it is found by CONTENT — Log Out is
+    // the only entry present in every variant (My Account / Profile / Messages / vendor-injected items).
+    ok(b.includes('function acctUl(') && b.includes('function accountMenu('), '[menus] the account dropdown is a supported target');
+    ok(b.includes("ls[i].id!=='app-menu-list'"), '[menus] ...and never matches the Apps menu by mistake');
+    ok(b.includes('svxacct'), '[menus] the account menu has its own idempotency guard');
+    ok(b.includes('divider'), '[menus] added account entries go above the divider + Log Out, not after them');
+    // One add/hide implementation shared by both menus — a second copy is how two menus drift apart.
+    ok((b.match(/function menuApply\(/g) || []).length === 1 && (b.match(/_svxadd/g) || []).length === 1,
+      '[menus] add/hide is implemented once and reused, not duplicated per menu');
+    let mOk = true; try { new Function(b); } catch (e) { mOk = false; }
+    ok(mOk, '[menus] self bundle with menu config parses');
+  }
+
+  // ── Admin profile-page sign-in block (2026-07-21) ───────────────────────────────
+  {
+    const b = buildKitBundle(['ringotel.profileStatus', 'ringotel.profileAppAccess'], { RINGOTEL_LABEL: 'App' });
+    ok(b.includes('_AF.profileAppAccess'), '[admin] sign-in block is gated on _AF.profileAppAccess');
+    ok(b.includes("'User-visible '+AL"), '[admin] framing header interpolates the app label (never a literal)');
+    ok(!b.includes('User-visible App sign-in'), '[admin] the label is NOT baked as a literal into the header (mirror-safe)');
+    ok(b.includes('r.appAccess') && (b.match(/aaModel\(/g) || []).length >= 2, '[admin] block consumes r.appAccess via the shared aaModel');
+    ok(b.includes('amdl.advisory'), '[admin] advisory modes render (admin sees why a user can\'t sign in)');
+    let abOk = true; try { new Function(b); } catch (e) { abOk = false; }
+    ok(abOk, '[admin] bundle with the sign-in block parses');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
