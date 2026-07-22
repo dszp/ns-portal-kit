@@ -51,11 +51,16 @@ import { needsSetup, setupHtml } from './setup.js';
 import { portalModeHtml } from './portalInfo.js';
 import { serviceTokenBlocked, exposureHtml, BLOCKED_REASON } from './exposure.js';
 import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeWriteClient, invalidateOrgUsers, resolveForWrite, buildExtIndex } from './ringotel.js';
-import { resolveRingotelConfig, ringotelConfigError, evaluateEligibility, type EligUser } from './eligibility.js';
+// The eligibility DECISION is the shared engine in the library — one implementation with the SSO worker,
+// so the two can't drift. Only this deployment's config parsing is local.
+import { evaluateEligibility, type EligUser } from '@dszp/netsapiens-lib';
+import { resolveRingotelConfig, ringotelConfigError } from './eligibility.js';
 import { activate, deactivate, resetPassword, isDomainWritable, RingotelWriteError } from './ringotelActivation.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
 import { accessConfig, verifyAccessRequest } from './access.js';
 import { resolveFeaturePolicies, featuresConfigError, parseSuperadmins } from './features.js';
+import { resolveMenus, menuConfigError, type MenuPlan } from './menus.js';
+import { resolveAppAccess, ssoEnabled, autoActivates, parseDownloads, parseHideList, appAccessConfigError, type AppAccessMode, type DownloadLink } from './appAccess.js';
 import {
   primaryBasename,
   primaryJs,
@@ -137,6 +142,18 @@ interface Env {
   /** WRITE SAFETY RAIL — allowlist of domains where writes may mutate. Empty ⇒ all writes refused
    *  (fail-closed); `*` ⇒ all scope-permitted; a CSV list ⇒ only those. NS + Ringotel are LIVE. */
   RINGOTEL_WRITE_DOMAINS?: string;
+
+  // ── Self-service app-access surface (me.appAccess; see src/appAccess.ts) ──────────────────
+  /** Ringotel org `params.sso` service NAME this deployment's SSO webhook answers for (the half after
+   *  the `/`). Unset ⇒ never claim SSO, even if an org has SOME service bound (fail closed). */
+  RINGOTEL_SSO_SERVICE?: string;
+  /** Does an SSO sign-in create the Ringotel account on demand? A different setting from the SSO
+   *  binding itself (not derivable from the org) — CSV of domains, `*` for all, unset ⇒ off. */
+  SSO_AUTO_ACTIVATE?: string;
+  /** Stock app-menu labels to hide, fleet-wide (CSV) or per-domain (JSON `{"<domain>":[...],"*":[...]}`). */
+  PORTAL_APPS_HIDE?: string;
+  /** JSON array of `{label,url,title?}` download links shown on the app-access surface. Unset ⇒ none. */
+  PORTAL_APP_DOWNLOADS?: string;
 
   // ── Optional integration: NetSapiens device details (basic; see src/nsDevices.ts) ──
   /** Truthy enables desk-phone enrichment (model + 🟢/🔴 registration presence) on ###/#### device lines. */
@@ -280,21 +297,22 @@ const ROUTES = {
   '/domains': { sensitivity: 'read' },
   '/entities': { sensitivity: 'read' },
   '/flow': { sensitivity: 'read' },
-  '/ringotel/org': { sensitivity: 'read' },
-  '/ringotel/users': { sensitivity: 'read' },
-  '/ringotel/orgs': { sensitivity: 'read' },
-  '/ringotel/user': { sensitivity: 'read' },
-  '/ringotel/activate': { sensitivity: 'write' },
-  '/ringotel/resetPassword': { sensitivity: 'write' },
+  '/rapp/org': { sensitivity: 'read' },
+  '/rapp/users': { sensitivity: 'read' },
+  '/rapp/orgs': { sensitivity: 'read' },
+  '/rapp/user': { sensitivity: 'read' },
+  '/rapp/activate': { sensitivity: 'write' },
+  '/rapp/resetPassword': { sensitivity: 'write' },
   '/kit/portal.js': { sensitivity: 'read' },
   '/kit/self.js': { sensitivity: 'read' },
   '/me/status': { sensitivity: 'read' },
   '/me/devices': { sensitivity: 'read' },
   '/me/resetPassword': { sensitivity: 'write' },
+  '/me/app-access': { sensitivity: 'read' },
 } satisfies Record<string, { sensitivity: CallSensitivity }>;
 
 /** POST paths — the write routes. Everything else is GET-only (405 otherwise). */
-const WRITE_PATHS = new Set(['/ringotel/activate', '/ringotel/resetPassword', '/me/resetPassword']);
+const WRITE_PATHS = new Set(['/rapp/activate', '/rapp/resetPassword', '/me/resetPassword']);
 
 /**
  * Loud, fail-closed validation of the static injection config (portal-mode-only). A malformed
@@ -618,6 +636,19 @@ function firstEmail(u: Record<string, unknown>): string {
   return '';
 }
 
+/**
+ * The caller's OWN facts, for `{var}` substitution in added menu entries. Sourced from the `~` self-read,
+ * so a user can only ever interpolate themselves — there is no path to another user's name or address.
+ * Missing fields resolve to an empty string rather than a literal placeholder.
+ */
+function menuVars(u: Record<string, unknown> | null, ext: string, domain: string): Record<string, string> {
+  const r = u ?? {};
+  const fname = str(r['first-name'] ?? r['first_name'] ?? r['name-first-name']);
+  const lname = str(r['last-name'] ?? r['last_name'] ?? r['name-last-name']);
+  const name = str(r['display-name'] ?? r['name'] ?? r['subscriber_name']) || [fname, lname].filter(Boolean).join(' ');
+  return { ext, domain, email: firstEmail(r), fname, lname, name };
+}
+
 function nsUserToElig(u: Record<string, unknown>, ext: string, deviceCount: number): EligUser {
   const first = str(u['first-name'] ?? u['first_name'] ?? u['name-first-name']);
   const last = str(u['last-name'] ?? u['last_name'] ?? u['name-last-name']);
@@ -678,7 +709,7 @@ async function assertDomainReadable(client: NsClient, domain: string): Promise<v
 
 /** Shared status projection: does `domain` have a bound Ringotel org (`present`), and is `ext` activated
  * within it (`active`)? Reads the cached org-users blob (~10-min TTL) — the SAME source the admin
- * `/ringotel/user` route uses, so self + admin reads share one Ringotel AdminAPI call. */
+ * `/rapp/user` route uses, so self + admin reads share one Ringotel AdminAPI call. */
 async function computeUserStatus(domain: string, ext: string, env: Env, cache: Cache): Promise<{ present: boolean; active: boolean; status: unknown }> {
   const all = await usersStatusForDomain(domain, env, cache, { refresh: false });
   const present = !!all.active;
@@ -696,6 +727,91 @@ async function resolveSelfNsUser(client: NsClient, principal: Principal): Promis
   const ext = rec && typeof rec.user === 'string' && rec.user.trim() ? rec.user.trim() : principal.user;
   const domain = normDomain(rec && typeof rec.domain === 'string' && rec.domain.trim() ? rec.domain.trim() : principal.domain);
   return { ext, domain, record: rec };
+}
+
+/**
+ * Per-user eligibility verdict for `ext`, via the SAME engine call `/rapp/user` uses (an NS user
+ * read + device count fed through `evaluateEligibility`) — NOT `orgStatusForDomain`'s `eligible`, which
+ * is an org-level stub, not a per-user verdict. Best-effort: any read failure yields `null` so the
+ * caller degrades (treats as ineligible) rather than fabricating a pass.
+ *
+ * Also returns the raw `devs` read (whatever `client.get` resolved, or `null` on a failed/absent read)
+ * so a caller that ALSO needs the device list — `/rapp/user`'s no-ns-device health flag — can reuse
+ * it instead of re-issuing the same devices GET a second time (one implementation, one NS round-trip).
+ */
+async function evaluateEligibilityForExt(
+  client: NsClient,
+  domain: string,
+  ext: string,
+  env: Env,
+  isReseller: boolean,
+  emailNotRequired = false,
+): Promise<{ activatable: boolean; tier: string; reasons: string[]; devs: unknown; nsUser: Record<string, unknown> } | null> {
+  if (!ext) return null;
+  const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
+  if (!nsUser) return null;
+  const devs = await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}/devices`).catch(() => null);
+  const devCount = Array.isArray(devs) ? devs.length : 0;
+  const rtConfig = resolveRingotelConfig(env);
+  const e = evaluateEligibility(nsUserToElig(nsUser, ext, devCount), { domain, isReseller, emailNotRequired }, rtConfig);
+  return { activatable: e.activatable, tier: e.tier, reasons: e.reasons, devs, nsUser };
+}
+
+/**
+ * The app-access sign-in projection for one user — SHARED by /me/app-access (self, record from `~`) and
+ * /rapp/user (admin, record = the target user). One implementation so self + admin cannot drift.
+ * `record === null` means the NS self/user read failed ⇒ fail-closed to `unavailable` on the SSO path.
+ */
+async function computeAppAccessProjection(
+  client: NsClient, ext: string, domain: string, record: Record<string, unknown> | null,
+  env: Env, isReseller: boolean, cache: Cache,
+): Promise<{ present: boolean; mode: AppAccessMode; username?: string; appDomain?: string; hPIE?: boolean; downloads: DownloadLink[]; hide: string[]; label: string }> {
+  const rec = record ?? {};
+  const hide = parseHideList(env, domain);
+  const downloads = parseDownloads(env);
+  const label = (env.RINGOTEL_LABEL ?? '').trim() || 'Ringotel';
+
+  const org = await orgStatusForDomain(domain, env, cache);
+  if (!org.active) return { present: false, mode: 'unavailable', downloads: [], hide, label };
+
+  const s = await computeUserStatus(domain, ext, env, cache);
+  const st = (s.status ?? {}) as { activated?: boolean; username?: string };
+
+  const ssoActive = ssoEnabled(org.ssoService, env);
+  const elig = ssoActive
+    ? await evaluateEligibilityForExt(client, domain, ext, env, isReseller, true) // emailNotRequired on SSO
+    : null;
+  const eligibilityAttempted = ssoActive;
+  if (ssoActive && (record === null || (eligibilityAttempted && elig === null))) {
+    return { present: true, mode: 'unavailable', downloads, hide, label };
+  }
+
+  const decision = resolveAppAccess({
+    orgActive: true,
+    ssoService: org.ssoService,
+    accountStatus: str(rec['account-status']),
+    userScope: str(rec['user-scope']),
+    eligible: elig?.activatable ?? false,
+    hardExcluded: elig?.tier === 'hard',
+    activated: st.activated ?? false,
+    autoActivate: autoActivates(domain, env),
+    loginUsername: str(rec['login-username']), // VERBATIM — never assembled as `${ext}@${domain}`
+    sipUsername: st.username,
+  }, env);
+
+  const usableMode = decision.mode === 'sso' || decision.mode === 'password';
+  return {
+    present: true,
+    mode: decision.mode,
+    ...(usableMode && org.appDomain ? { appDomain: org.appDomain } : {}),
+    ...(decision.username ? { username: decision.username } : {}),
+    // Whether the credentials email carries the password itself or hides it behind a one-time link is a
+    // per-org setting we can now read, so the password instruction states the user's ACTUAL case instead
+    // of hedging across both. Only meaningful on the password path; absent ⇒ the client keeps hedging.
+    // Terse on purpose — this is serialized to the browser (see OrgStatusResponse.hPIE).
+    ...(decision.mode === 'password' && typeof org.hPIE === 'boolean' ? { hPIE: org.hPIE } : {}),
+    downloads, hide, label,
+  };
 }
 
 export default {
@@ -726,7 +842,14 @@ export default {
     const featErr = featuresConfigError(env);
     if (featErr) return json({ error: 'Server misconfigured', reason: featErr }, 500, cors);
 
+    // Fail closed + loud on a malformed PORTAL_APP_DOWNLOADS / PORTAL_APPS_HIDE (me.appAccess config) —
+    // same fail-closed pattern as featErr above.
+    const appErr = appAccessConfigError(env);
+    if (appErr) return json({ error: 'Server misconfigured', reason: appErr }, 500, cors);
+
     // Fail closed + loud on bad RINGOTEL_* activation config (exclusion matchers, the write-domain rail).
+    const menuErr = menuConfigError(env);
+    if (menuErr) return json({ error: 'Server misconfigured', reason: menuErr }, 500, cors);
     const rtErr = ringotelConfigError(env);
     if (rtErr) return json({ error: 'Server misconfigured', reason: rtErr }, 500, cors);
 
@@ -818,7 +941,7 @@ export default {
       // its own gate, but /domains and /entities lean on resolveAuth's admin gate, so fence here.
       if (auth.self) {
         const sp = url.pathname;
-        const selfOk = portalMode(env) && (sp === '/me/status' || sp === '/me/devices' || sp === '/me/resetPassword' || sp === '/kit/self.js');
+        const selfOk = portalMode(env) && (sp === '/me/status' || sp === '/me/devices' || sp === '/me/resetPassword' || sp === '/me/app-access' || sp === '/kit/self.js');
         if (!selfOk) throw new HttpError(403, 'Not authorized for the svc portal');
       }
 
@@ -906,7 +1029,7 @@ export default {
         return json({ ...graph, __mermaid: toMermaid(graph) }, 200, cors);
       }
 
-      if (url.pathname === '/ringotel/org') {
+      if (url.pathname === '/rapp/org') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
@@ -920,7 +1043,7 @@ export default {
         return json(await orgStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
 
-      if (url.pathname === '/ringotel/users') {
+      if (url.pathname === '/rapp/users') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
@@ -934,7 +1057,7 @@ export default {
         return json(await usersStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
       }
 
-      if (url.pathname === '/ringotel/orgs') {
+      if (url.pathname === '/rapp/orgs') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         requireFeature(auth, 'ringotel.orgList', env, policies);
         // Scope = the caller's own NS-visible domains (never a client-supplied list). Same block/allow
@@ -951,7 +1074,7 @@ export default {
       // ── Ringotel activation (the profile-page feature) ────────────────────────────────
       // Single-user status indicator (read). Gated by ringotel.profileStatus; NS-scope-bound like the
       // other Ringotel reads.
-      if (url.pathname === '/ringotel/user') {
+      if (url.pathname === '/rapp/user') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const domain = requireDomain(auth, url, env);
         await maybeElevate(auth, domain, env);
@@ -969,30 +1092,35 @@ export default {
           status = all.active && ext && all.users ? (all.users[ext] ?? null) : null;
         } else {
           const s = await computeUserStatus(domain, ext, env, caches.default);
-          active = s.present; // preserve `/ringotel/user` semantics: `active` means "org present"
+          active = s.present; // preserve `/rapp/user` semantics: `active` means "org present"
           status = s.status;
         }
         // Eligibility (so the client shows a plain checkbox for a normal user, and a Force button ONLY for
         // a soft-excluded one). Best-effort: a read failure ⇒ null, and the client falls back gracefully.
+        // Shared with /me/app-access via evaluateEligibilityForExt — ONE implementation of the NS-user +
+        // devices read → evaluateEligibility call, so the two routes can't drift.
         let eligibility: { activatable: boolean; tier: string; reasons: string[] } | null = null;
+        // Reuse the NS-user record the eligibility read already fetched as the projection's record below,
+        // so a non-fresh /rapp/user reads the user once, not once here + once for the projection.
+        let sharedNsUser: Record<string, unknown> | null = null;
         if (ext && !wantFresh) {
-          const rtConfig = resolveRingotelConfig(env);
-          const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
-          if (nsUser) {
-            // `null` marks a FAILED read, which must stay distinguishable from a genuinely empty device
-            // list — otherwise a transient NS error would be reported as missing hardware below.
-            const devs = await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}/devices`).catch(() => null);
-            const devList = Array.isArray(devs) ? devs : [];
-            const devCount = devList.length;
-            const e = evaluateEligibility(nsUserToElig(nsUser, ext, devCount), { domain, isReseller: auth.principal ? isResellerScope(auth.principal.scope) : false }, rtConfig);
-            eligibility = { activatable: e.activatable, tier: e.tier, reasons: e.reasons };
+          const isReseller = auth.principal ? isResellerScope(auth.principal.scope) : false;
+          const elig = await evaluateEligibilityForExt(client, domain, ext, env, isReseller);
+          if (elig) {
+            sharedNsUser = elig.nsUser;
+            eligibility = { activatable: elig.activatable, tier: elig.tier, reasons: elig.reasons };
 
             // The one health flag that needs an upstream read. Free here: the device list was fetched
-            // for the eligibility count above. Only meaningful for an ACTIVATED app user — a user with
-            // no app is supposed to have no `<ext><suffix>` device.
+            // for the eligibility count above (reused from the shared helper, not re-fetched). Only
+            // meaningful for an ACTIVATED app user — a user with no app is supposed to have no
+            // `<ext><suffix>` device. `null` marks a FAILED read, which must stay distinguishable from a
+            // genuinely empty device list — otherwise a transient NS error would be reported as missing
+            // hardware below.
+            const devs = elig.devs;
+            const devList = Array.isArray(devs) ? devs : [];
             const st = status as { activated?: boolean; health?: { flags: HealthFlag[]; severity: string } } | null;
             if (devs !== null && st?.activated && st.health) {
-              const want = ext + rtConfig.suffix;
+              const want = ext + resolveRingotelConfig(env).suffix;
               if (!devList.some((d) => String((d as Record<string, unknown>)?.device ?? '') === want)) {
                 st.health.flags = [...st.health.flags, 'no-ns-device'];
                 st.health.severity = worstSeverity(st.health.flags);
@@ -1000,12 +1128,26 @@ export default {
             }
           }
         }
-        return json({ active: !!active, ext, status, eligibility }, 200, cors);
+        // Admin third-party app-access projection — the SAME helper /me/app-access uses, so the operator
+        // sees exactly the user's sign-in message. Gated on ringotel.profileAppAccess (default
+        // office_manager), so the extra NS-user read + larger payload are only paid on the profile page
+        // where the feature is on. Delegated (portal) principals only — service tokens (dia) have no
+        // "user-visible message" concept.
+        // Not on the ?fresh=1 poll: like `eligibility` above, the projection is skipped on the live poll
+        // (pollUntil discards it and reconstructs r without appAccess), so the poll stays cheap — the
+        // profile page pays it once, on the initial cached read.
+        let appAccess: Awaited<ReturnType<typeof computeAppAccessProjection>> | undefined;
+        if (ext && !wantFresh && auth.principal && can(auth.principal, 'ringotel.profileAppAccess', policies)) {
+          // sharedNsUser is the record the eligibility read fetched (null iff that read failed ⇒ the
+          // projection fails closed to `unavailable` on SSO, the correct degradation).
+          appAccess = await computeAppAccessProjection(client, ext, domain, sharedNsUser, env, isResellerScope(auth.principal.scope), caches.default);
+        }
+        return json({ active: !!active, ext, status, eligibility, ...(appAccess ? { appAccess } : {}) }, 200, cors);
       }
 
       // ── Self-service (own-account) routes ────────────────────────────────────────────
       // Own app status for the home widget. Identity comes from the NS `~` self-wildcard (authoritative,
-      // token-scoped) — never client input. Shares the Ringotel org-users cache with /ringotel/user.
+      // token-scoped) — never client input. Shares the Ringotel org-users cache with /rapp/user.
       if (portalMode(env) && url.pathname === '/me/status') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         if (!auth.principal) throw new HttpError(403, 'The self status route requires a delegated ns_t');
@@ -1014,6 +1156,51 @@ export default {
         const { ext, domain } = await resolveSelfNsUser(client, auth.principal);
         const s = await computeUserStatus(domain, ext, env, caches.default);
         return json({ active: s.active, present: s.present }, 200, cors);
+      }
+
+      // Own app-access sign-in details (mode + username + downloads + hide list) for the "how do I sign
+      // in" panel. Identity from the NS `~` self-wildcard ONLY — never a request parameter, so no
+      // cross-user read is expressible (see src/appAccess.ts for the pure decision matrix).
+      if (portalMode(env) && url.pathname === '/me/app-access') {
+        if (!auth.principal) throw new HttpError(403, 'The self app-access route requires a delegated ns_t');
+        if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
+        // This route now carries TWO independent surfaces: the sign-in details (me.appAccess) and portal
+        // menu customization (me.menuConfig). They ride one request because both need the same org read —
+        // but each is gated on its own key, so an operator can run stock-menu curation without the sign-in
+        // panel, or the reverse. Neither permitted ⇒ the route is not theirs to call.
+        const wantAccess = can(auth.principal, 'me.appAccess', policies);
+        const wantMenus = can(auth.principal, 'me.menuConfig', policies);
+        if (!wantAccess && !wantMenus) throw new HttpError(403, 'Not authorized: me.appAccess or me.menuConfig');
+
+        // Menu customization does NOT depend on the app integration — static add/hide is useful to a
+        // deployment that runs no app at all, and gating it behind RINGOTEL_API_KEY made it silently do
+        // nothing there. With no integration configured the app state is simply 'none'; the sign-in
+        // surface still requires the integration, as before.
+        if (!ringotelEnabled(env)) {
+          if (!wantMenus) return json({ error: 'Not found' }, 404, cors);
+          const { domain: d0 } = await resolveSelfNsUser(client, auth.principal);
+          return json({ menus: resolveMenus(env, { domain: d0, app: 'none' }) }, 200, cors);
+        }
+
+        // Identity from `~` ONLY (resolveSelfNsUser). The org/status/eligibility/decision logic — incl.
+        // the fail-closed guards and the SSO email-not-required rule — lives in computeAppAccessProjection,
+        // shared verbatim with the admin /rapp/user view so the two can never drift.
+        const { ext, domain, record } = await resolveSelfNsUser(client, auth.principal);
+        const proj = await computeAppAccessProjection(client, ext, domain, record, env, isResellerScope(auth.principal.scope), caches.default);
+
+        // Menu plan for THIS user's domain. `present` is the app-org signal the projection already
+        // resolved, so the app state costs no extra read. Only this user's outcome is returned — the
+        // fleet's config never reaches a client.
+        let menus: Record<string, MenuPlan> | undefined;
+        if (wantMenus) {
+          menus = resolveMenus(env, { domain, app: proj.present ? 'ringotel' : 'none', vars: menuVars(record, ext, domain) });
+        }
+
+        // The sign-in fields (mode/username/appDomain/downloads) belong to me.appAccess — a menus-only
+        // caller must not receive them. `hide` and `label` stay: `hide` for back-compat with clients that
+        // read it directly, `label` because it is already in the bundle's own config.
+        const body = wantAccess ? proj : { hide: proj.hide, label: proj.label };
+        return json({ ...body, ...(menus ? { menus } : {}) }, 200, cors);
       }
 
       // Own devices (read). Built but default off (me.devices). NS `~` self-wildcard — no ext derivation,
@@ -1051,7 +1238,7 @@ export default {
 
       // Activate / deactivate (write). Chain: feature (fail-closed) → domain → WRITABLE rail → READABLE
       // scope → forceFresh → (activate only) eligibility → write → cache invalidate.
-      if (url.pathname === '/ringotel/activate' && request.method === 'POST') {
+      if (url.pathname === '/rapp/activate' && request.method === 'POST') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const body = (await request.json().catch(() => null)) as { domain?: string; ext?: string; activate?: boolean; force?: boolean } | null;
         const ext = str(body?.ext);
@@ -1062,7 +1249,7 @@ export default {
         const rtConfig = resolveRingotelConfig(env);
         assertDomainWritable(domain, rtConfig.writeDomains);
         await assertDomainReadable(client, domain);
-        if (needsFreshAuth(ROUTES['/ringotel/activate'].sensitivity)) await requireFreshAuth(auth, env);
+        if (needsFreshAuth(ROUTES['/rapp/activate'].sensitivity)) await requireFreshAuth(auth, env);
 
         const res = await resolveForWrite(env, caches.default, domain);
         if (res.status === 'none') return json({ error: 'No app organization is configured for this domain' }, 404, cors);
@@ -1096,7 +1283,7 @@ export default {
       }
 
       // Reset the app password (write). Requires an existing app user for the extension.
-      if (url.pathname === '/ringotel/resetPassword' && request.method === 'POST') {
+      if (url.pathname === '/rapp/resetPassword' && request.method === 'POST') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         const body = (await request.json().catch(() => null)) as { domain?: string; ext?: string } | null;
         const ext = str(body?.ext);
@@ -1106,7 +1293,7 @@ export default {
         const rtConfig = resolveRingotelConfig(env);
         assertDomainWritable(domain, rtConfig.writeDomains);
         await assertDomainReadable(client, domain);
-        if (needsFreshAuth(ROUTES['/ringotel/resetPassword'].sensitivity)) await requireFreshAuth(auth, env);
+        if (needsFreshAuth(ROUTES['/rapp/resetPassword'].sensitivity)) await requireFreshAuth(auth, env);
 
         const res = await resolveForWrite(env, caches.default, domain);
         if (res.status === 'none') return json({ error: 'No app organization is configured for this domain' }, 404, cors);

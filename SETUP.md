@@ -135,9 +135,12 @@ yours match (they normally do), you need no overrides.
 ### App activation (writes)
 
 Lets authorized roles activate/deactivate a user's app and reset its password **from the NetSapiens user
-profile**. These are *writes*, so they're gated harder than the read features above. Three independently-
-gated features — `ringotel.profileStatus` (read indicator), `ringotel.activate`, `ringotel.resetPassword`
-(default level `office_manager`; re-level via `PORTAL_FEATURES`). Requires `RINGOTEL_API_KEY`.
+profile**. These are *writes*, so they're gated harder than the read features above. Four independently-
+gated features — `ringotel.profileStatus` (read indicator), `ringotel.activate`, `ringotel.resetPassword`,
+and `ringotel.profileAppAccess` (read-only: shows the operator the **user-visible app sign-in message** —
+the same domain/username/password instructions and download links that user sees, so you can walk them
+through sign-in or see why they can't yet) — all default level `office_manager`; re-level via
+`PORTAL_FEATURES`. Requires `RINGOTEL_API_KEY`.
 
 | Variable | Example | What it does |
 |---|---|---|
@@ -150,9 +153,154 @@ gated features — `ringotel.profileStatus` (read indicator), `ringotel.activate
 | `RINGOTEL_RESELLER_OVERRIDE` | `names,exts` or `all` | Which soft categories a reseller may override. A reseller can also force-activate one user at runtime. |
 
 **System/service users** (a non-blank `srv_code`) and non-3-4-digit extensions are **HARD**-excluded and
-can never be activated — not even by a reseller force. Activation requires an email on the user (the app
-emails the credentials). Writes require a delegated `ns_t` (never a stored service token) and force a fresh
-token re-validation before mutating.
+can never be activated — not even by a reseller force. Writes require a delegated `ns_t` (never a stored
+service token) and force a fresh token re-validation before mutating.
+
+**The email requirement applies to the *emailed* activation path, not to SSO.** Activating a user from the
+profile page emails them their credentials, so it needs an address on the NS user. An SSO sign-in creates
+the account from the user's own portal login and mails nothing, so on an SSO-bound domain
+(`RINGOTEL_SSO_SERVICE`) a user with no email address is still treated as eligible and is shown how to
+sign in. Soft and HARD exclusions are unaffected either way — only the address requirement is waived, and
+only where nothing would have been mailed.
+
+**Soft exclusions are creation-only.** They decide whether an account may be *created*; they never block a
+user who already has a working one from being shown how to sign in.
+
+> The eligibility decision itself lives in `@dszp/netsapiens-lib` (`evaluateEligibility`) so that every
+> consumer of that library — this portal backend and any SSO integration you run beside it — reaches the
+> same verdict from the same inputs. Only the configuration above is read here.
+
+### App sign-in details
+
+A self-service feature (`me.appAccess`, default `all`): the Apps menu and the user's own home-page card
+show **how** they sign in to their app — SSO with their portal password, a dedicated app password, or
+"not set up yet" — instead of a bare status dot. All four settings below are optional and fail closed:
+leave any of them unset and the deployment behaves as if the feature weren't configured (no SSO claimed,
+no create-on-login assumed, nothing hidden, no download links shown).
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `RINGOTEL_SSO_SERVICE` | `netsapiens_sso` | The NAME half of the SSO service your app fleet is bound to, when you also run the matching SSO integration. **Unset ⇒ never claim SSO** — a binding could point at a third-party identity provider, and claiming SSO wrongly tells a user to try a password that will not work. |
+| `SSO_AUTO_ACTIVATE` | domain CSV, or `*` | Whether your SSO integration creates an app account on first login for an eligible user who doesn't have one yet — this is a setting on that integration, not something derivable here. **Unset ⇒ assume off**, so such a user is told to contact an admin instead of being invited to a sign-in that would fail. `*` = every domain. |
+| `PORTAL_APPS_HIDE` | `SNAPmobile Web` (CSV), or a JSON object keyed per domain (`"*"` = default, `[]` = hide nothing there) | Stock Apps-menu entries to hide (e.g. one you don't offer). Not conditioned on whether the domain runs your app — a domain served by another white-label app is a normal outcome. |
+| `PORTAL_APP_DOWNLOADS` | `[{"label":"Get the App","url":"https://example.com/app","title":"...","showUrl":false}]` | JSON array of download links shown in menu order. `label` and an `https://` `url` are required; `title` is an optional tooltip. A small copyable URL line is shown under each link by default; set `"showUrl": false` on an entry to hide it (e.g. a long link that won't fit). Unset ⇒ no links. |
+
+### Customizing portal menus (`PORTAL_MENUS`)
+
+Add and hide entries in the portal's stock menus — optionally **only where your app is active**. Gated by
+`me.menuConfig` (default `all`). Unset ⇒ nothing changes.
+
+> Hiding a menu entry is **cosmetic, not a security control.** It removes a link, not access to whatever
+> the link pointed at. Never use it to "lock" a feature.
+
+**Which menus you can target.** Menus are referenced by name — you never supply a CSS selector, which
+would break on portal updates and would be a DOM-injection surface for anyone who can set an environment
+variable:
+
+| Name | Menu | Where entries are added |
+|---|---|---|
+| `apps` | the portal's **Apps** dropdown | appended after the stock entries |
+| `account` | the signed-in user's **own name** dropdown (My Account / Profile / Messages / sign out) | into the first group, **above** the divider and the sign-out entry |
+
+An unknown name is a startup error. The `account` menu carries no id and shares a generic class with other
+dropdowns, so it is located by its sign-out entry — the one item present in every variant of it.
+
+This does **not** require the Ringotel integration: with no `RINGOTEL_API_KEY` set, the app state is
+`none`, so static add/hide works on any deployment.
+
+Most people want one line, and that is still the answer:
+
+**1. Hide a stock entry everywhere.** (`PORTAL_APPS_HIDE` — unchanged, still supported.)
+
+```
+PORTAL_APPS_HIDE = SNAPmobile Web
+```
+
+**2. Hide it only where your app is active** — and leave the stock menu alone on domains that have no app,
+so those users keep their only softphone entry. *This is the case the simple form above cannot express.*
+
+```json
+{ "apps": { "hide": { "app": { "ringotel": ["SNAPmobile Web"], "none": [] } } } }
+```
+
+**3. The same, but not on one domain.** A domain entry wins outright, so `[]` means "change nothing here":
+
+```json
+{ "apps": { "hide": { "app":     { "ringotel": ["SNAPmobile Web"], "none": [] },
+                      "domains": { "acme.example": [] } } } }
+```
+
+**4. Add a static link for everyone.**
+
+```json
+{ "apps": { "add": [ { "label": "Support", "url": "https://support.example.com", "title": "Get help" } ] } }
+```
+
+**5. Put a help link on the user's own menu instead**, where it sits with their other personal actions
+rather than among the apps:
+
+```json
+{ "account": { "add": [ { "label": "Email Support",
+                          "url": "mailto:support@example.com?subject=Help%20for%20{name}%20({ext}@{domain})",
+                          "title": "Opens your mail client" } ] } }
+```
+
+Both menus take the same `hide` / `add` shapes and the same targeting rules, so anything below applies to
+either.
+
+#### How targeting works
+
+Anywhere a list of entries is accepted you may instead give an object, and **one rule covers every case: a
+default plus specific overrides.** There is no separate "include" and "exclude" syntax because you don't
+need one:
+
+| You want | Write |
+|---|---|
+| change everywhere | `["A"]` — or `{"*": ["A"]}` |
+| change everywhere **except** some | `{"*": ["A"], "acme.example": []}` |
+| change **only** some | `{"*": [], "acme.example": ["A"]}` |
+
+The same works on the app axis (`{"app": {"ringotel": [...], "none": []}}`), and both can be combined.
+**Precedence, most specific first: `domains` → `app` → `"*"`.** A matching `domains` entry wins outright —
+it is *not* merged with the app list — because otherwise "turn it off just here" would be inexpressible.
+
+App keys are `ringotel` (an app organization is active for the domain), `none` (none is), and `*` (either).
+A misspelled app or menu name is a **startup error**, not a silently-never-matching rule.
+
+`add` entries take `label`, a `url`, and an optional `title`. Added links open in a new tab.
+
+**URL schemes:** `https://` and `mailto:` only. Anything else — notably `javascript:` and `data:` — is
+refused at startup, so a dangerous scheme can never reach the page.
+
+**Variables.** `label`, `url` and `title` may contain placeholders, filled in per signed-in user:
+
+| Variable | Value |
+|---|---|
+| `{ext}` | their extension |
+| `{domain}` | their PBX domain |
+| `{email}` | their email address |
+| `{fname}` / `{lname}` | first / last name |
+| `{name}` | display name (falls back to first + last) |
+| `{page}` | the portal page they are on **when they click** |
+
+```json
+{ "apps": { "add": [
+  { "label": "Get help",
+    "url": "https://support.example.com/new?ext={ext}&domain={domain}&from={page}" },
+  { "label": "Email support",
+    "url": "mailto:support@example.com?subject=Help%20for%20{name}%20({ext})" } ] } }
+```
+
+Values are percent-encoded, so a name containing a space or `&` cannot inject an extra query parameter.
+Everything except `{page}` is substituted on the server from the signed-in user's **own** record — one user
+can never interpolate another's details. `{page}` is filled in the browser and is the **path only**, never
+the query string, since a portal URL's query can carry identifiers and the link may leave for a third party.
+A variable with no value becomes empty rather than leaving a literal `{email}` in a live link, and a
+misspelled one (`{emial}`) is a startup error.
+
+**Do not set both** `PORTAL_APPS_HIDE` and `PORTAL_MENUS.apps.hide` — that is a loud error rather than a
+precedence rule, since two places to look for one answer is how a menu ends up wrong with nobody able to
+say why. Use `PORTAL_MENUS` when you outgrow the one-liner.
 
 ### Call-flow diagrams (portal side)
 
@@ -369,10 +517,16 @@ call-center is exact and orthogonal.
 | `ringotel.userStatus` | Per-user app column (Users page) | `office_manager` |
 | `ringotel.orgList` | Per-domain app column (Domains page) | `reseller` |
 | `ringotel.refresh` | Force a fleet-wide app-directory rebuild | `reseller` |
+| `ringotel.profileStatus` | App active/inactive indicator on the user-profile page | `office_manager` |
+| `ringotel.activate` | Activate/deactivate the app for a user from the profile page (**write**) | `office_manager` |
+| `ringotel.resetPassword` | Reset a user's app password from the profile page (**write**) | `office_manager` |
+| `ringotel.profileAppAccess` | The user-visible app sign-in message on the user-profile page | `office_manager` |
 | `portal.self` | Receive the **self-service** bundle (own-account features) | `all` |
 | `me.appStatus` | App-status indicator on the user's **own** home page | `all` |
 | `me.devices` | The user's **own** device list/status | `off` |
 | `me.resetPassword` | Reset the user's **own** app password (write) | `off` |
+| `me.appAccess` | App sign-in details (mode, username, downloads) on the Apps menu and home card | `all` |
+| `me.menuConfig` | Portal menu customization (static add/hide, optionally app-conditional) | `all` |
 
 **Self-service is its own tier.** `portal.access` gates the admin bundle (admin ladder); `portal.self`
 gates a separate, minimal bundle of **own-account** features that even a Basic/Simple user receives.
@@ -589,7 +743,8 @@ that works will keep working.
 `NS_SERVER`, `NS_PORTAL_ISS`, `ALLOWED_DOMAINS`, `BLOCKED_DOMAINS`, `ALLOWED_ORIGINS`, `PORTAL_MODE`,
 `ACCESS_AUD`, `ACCESS_TEAM_DOMAIN`, `BRAND_ACCENT`, `RINGOTEL_PRESENCE`, `NS_DEVICE_DETAILS`,
 `RINGOTEL_BASE_URL`, `RINGOTEL_OVERRIDES`, `RINGOTEL_ACTIVATION_SUFFIX`, `RINGOTEL_EXCLUDE_*`,
-`RINGOTEL_RESELLER_OVERRIDE`. **`RINGOTEL_WRITE_DOMAINS`** and any exclusion values that name a real
+`RINGOTEL_RESELLER_OVERRIDE`, `RINGOTEL_SSO_SERVICE`, `SSO_AUTO_ACTIVATE`, `PORTAL_APPS_HIDE`, `PORTAL_MENUS`,
+`PORTAL_APP_DOWNLOADS`. **`RINGOTEL_WRITE_DOMAINS`** and any exclusion values that name a real
 domain or reseller are deployment-specific — prefer a **secret** (or a private, non-mirrored config) so a
 customer domain never lands in a committed file.
 

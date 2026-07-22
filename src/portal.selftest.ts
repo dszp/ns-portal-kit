@@ -84,32 +84,32 @@ const realOM        = mkTok({ sub: '105@acme.example', user_scope: 'Office Manag
 
   // ── feature split: OMs get the column, NOT Call Flow or the banner ──
   ok((await call('/flow?kind=user&ref=100', realOM)).status === 403, '[feat] OM /flow → 403 (callflow.view = reseller only)');
-  ok((await callRt('/ringotel/org?domain=acme.example', realOM)).status === 403, '[feat] OM /ringotel/org (banner) → 403 (reseller only)');
-  ok((await callRt('/ringotel/users?domain=acme.example', realOM)).status === 200, '[feat] real OM /ringotel/users (column) → 200');
-  ok((await callRt('/ringotel/users?domain=acme.example', maskedReseller)).status === 200, '[feat] masked-as-OM /ringotel/users → 200 (effective scope OM)');
-  ok((await callRt('/ringotel/users?domain=acme.example', randomUser)).status === 403, '[feat] Basic User /ringotel/users → 403');
+  ok((await callRt('/rapp/org?domain=acme.example', realOM)).status === 403, '[feat] OM /rapp/org (banner) → 403 (reseller only)');
+  ok((await callRt('/rapp/users?domain=acme.example', realOM)).status === 200, '[feat] real OM /rapp/users (column) → 200');
+  ok((await callRt('/rapp/users?domain=acme.example', maskedReseller)).status === 200, '[feat] masked-as-OM /rapp/users → 200 (effective scope OM)');
+  ok((await callRt('/rapp/users?domain=acme.example', randomUser)).status === 403, '[feat] Basic User /rapp/users → 403');
 
   // ── domain scope ──
   ok((await call('/flow?domain=other.example&kind=user&ref=100', reseller)).status === 200, '[scope] reseller cross-domain /flow → 200 (cross-domain unlock)');
   ok((await call('/flow?kind=user&ref=100', reseller)).status === 200, '[scope] reseller no ?domain → own domain 200');
-  ok((await callRt('/ringotel/users?domain=other.example', realOM)).status === 403, '[scope] OM cross-domain /ringotel/users → 403 (domain-locked)');
-  ok((await callRt('/ringotel/users?domain=acme.example', realOM)).status === 200, '[scope] OM own-domain /ringotel/users → 200');
+  ok((await callRt('/rapp/users?domain=other.example', realOM)).status === 403, '[scope] OM cross-domain /rapp/users → 403 (domain-locked)');
+  ok((await callRt('/rapp/users?domain=acme.example', realOM)).status === 200, '[scope] OM own-domain /rapp/users → 200');
 
   // ── Ringotel routes enforce NS scope on the requested domain (finding 1 / plan §1) ──
   // Unlike /flow, the Ringotel routes read from the fleet-wide key; a reseller reading a domain their
   // ns_t is NOT scoped to must be refused, not served from the fleet key.
-  ok((await callRt('/ringotel/users?domain=forbidden.example', reseller)).status === 403, '[rt-scope] reseller /ringotel/users on NS-forbidden domain → 403 (NS scope enforced)');
-  ok((await callRt('/ringotel/org?domain=forbidden.example', reseller)).status === 403, '[rt-scope] reseller /ringotel/org on NS-forbidden domain → 403');
-  ok((await callRt('/ringotel/users?domain=acme.example', reseller)).status === 200, '[rt-scope] reseller /ringotel/users on in-scope cross-domain → 200 (probe passes)');
+  ok((await callRt('/rapp/users?domain=forbidden.example', reseller)).status === 403, '[rt-scope] reseller /rapp/users on NS-forbidden domain → 403 (NS scope enforced)');
+  ok((await callRt('/rapp/org?domain=forbidden.example', reseller)).status === 403, '[rt-scope] reseller /rapp/org on NS-forbidden domain → 403');
+  ok((await callRt('/rapp/users?domain=acme.example', reseller)).status === 200, '[rt-scope] reseller /rapp/users on in-scope cross-domain → 200 (probe passes)');
 
   // ── portal env does NOT serve the internal viewer SPA (finding 4 / plan §3) ──
   ok((await call('/')).status === 404, '[spa] portal mode GET / → 404 (internal SPA withheld on delegated env)');
   ok((await call('/app')).status === 404, '[spa] portal mode GET /app → 404');
 
   // ── gate-off 404 (ringotelEnabled=false) + reseller happy path ──
-  ok((await call('/ringotel/org?domain=0000.12345.service', reseller)).status === 404, '[rt-gate] no RINGOTEL_API_KEY → /ringotel/org 404 (gate before policy)');
-  ok((await call('/ringotel/users?domain=0000.12345.service', reseller)).status === 404, '[rt-gate] no RINGOTEL_API_KEY → /ringotel/users 404');
-  ok((await callRt('/ringotel/org?domain=0000.12345.service', reseller)).status === 200, '[rt-gate] reseller /ringotel/org → 200');
+  ok((await call('/rapp/org?domain=0000.12345.service', reseller)).status === 404, '[rt-gate] no RINGOTEL_API_KEY → /rapp/org 404 (gate before policy)');
+  ok((await call('/rapp/users?domain=0000.12345.service', reseller)).status === 404, '[rt-gate] no RINGOTEL_API_KEY → /rapp/users 404');
+  ok((await callRt('/rapp/org?domain=0000.12345.service', reseller)).status === 200, '[rt-gate] reseller /rapp/org → 200');
 
   // ── force-fresh elevation (cross-domain = sensitive) ──
   // Warm the verdict cache with an own-domain read, then measure.
@@ -121,17 +121,17 @@ const realOM        = mkTok({ sub: '105@acme.example', user_scope: 'Office Manag
   await call('/flow?domain=other.example&kind=user&ref=100', reseller); // cross-domain → force-fresh
   ok(jwtCalls > n, '[fresh] cross-domain reseller read → force-fresh /jwt (revocation caught)');
 
-  // ── GET /ringotel/orgs: reseller enabled-map, scoped to listDomains (finding-1 boundary) ──
+  // ── GET /rapp/orgs: reseller enabled-map, scoped to listDomains (finding-1 boundary) ──
   // Directory has an org for 'anything' (the reseller's listDomains) AND 'secret.example' (NOT theirs).
   rtOrgs = [{ id: 'O1', domain: 'appdom' }, { id: 'O2', domain: 'appdom2' }];
   rtBranches = [{ id: 'B1', orgid: 'O1', address: 'anything' }, { id: 'B2', orgid: 'O2', address: 'secret.example' }];
-  const orgsRes = await callRt('/ringotel/orgs?refresh=ringotel', reseller);
+  const orgsRes = await callRt('/rapp/orgs?refresh=ringotel', reseller);
   const orgsBody = await orgsRes.json();
   ok(orgsRes.status === 200 && orgsBody.enabled && orgsBody.enabled['anything'] && orgsBody.enabled['anything'].orgId === 'O1', '[rt-orgs] reseller → enabled map for own domain');
   ok(!('secret.example' in orgsBody.enabled), '[rt-orgs] a directory-enabled domain NOT in listDomains is never returned (scoping)');
-  ok((await callRt('/ringotel/orgs', randomUser)).status === 403, '[rt-orgs] Basic User → 403 (ringotel.orgList reseller-only)');
-  ok((await callRt('/ringotel/orgs', realOM)).status === 403, '[rt-orgs] OM → 403');
-  ok((await call('/ringotel/orgs', reseller)).status === 404, '[rt-orgs] no RINGOTEL_API_KEY → 404 (gate)');
+  ok((await callRt('/rapp/orgs', randomUser)).status === 403, '[rt-orgs] Basic User → 403 (ringotel.orgList reseller-only)');
+  ok((await callRt('/rapp/orgs', realOM)).status === 403, '[rt-orgs] OM → 403');
+  ok((await call('/rapp/orgs', reseller)).status === 404, '[rt-orgs] no RINGOTEL_API_KEY → 404 (gate)');
 
   // ── feature-config override reaches the routes (Task 3) ──────────────────────────────────────────
   // Turn callflow.view off ⇒ even a reseller's /flow now 403s (defaults would 200).

@@ -121,5 +121,11 @@ ok(featuresConfigError({ PORTAL_SUPERADMINS: 'not-an-email' }) !== null, 'malfor
   ok(['portal.self', 'me.appStatus', 'me.devices', 'me.resetPassword'].every((k) => keys.includes(k)), 'registry has the self-tier keys');
 }
 
+// ── me.appAccess (Task 4) ─────────────────────────────────────────────────────
+const selfPolicies = resolveFeaturePolicies({});
+ok(FEATURE_REGISTRY.some((f) => f.key === 'me.appAccess'), 'registry has me.appAccess');
+ok(can(P('Basic User'), 'me.appAccess', selfPolicies), 'me.appAccess default admits a Basic User');
+ok(can(P('Reseller'), 'me.appAccess', selfPolicies), 'me.appAccess default admits a Reseller');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

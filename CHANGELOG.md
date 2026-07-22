@@ -17,6 +17,169 @@ Compare that against the latest entry below to see whether there's anything wort
 
 ## [Unreleased]
 
+## [0.2.12] — 2026-07-22
+
+### Added
+
+- **The user's own account dropdown is now a menu target** (`"account"`), alongside `"apps"`. Same add/hide
+  rules; entries are inserted into the first group, above the divider and Log Out, rather than appended
+  after them. Useful for a "get help" link that belongs with the user's own actions rather than with the
+  apps. The menu carries no id and shares a generic class with other dropdowns, so it is identified by
+  content — the sign-out entry, which is present in every variant of it — and the Apps menu is explicitly
+  excluded so the two can never be confused.
+
+## [0.2.11] — 2026-07-22
+
+### Added
+
+- **Portal menu customization (`PORTAL_MENUS`).** Add and hide entries in the portal's stock menus, and —
+  new — make that **conditional on whether an app is actually active for the domain**. The motivating case
+  was not expressible before: hide a stock softphone entry only where your own app is running, and leave
+  the stock menu alone on domains that have none, so those users keep their only softphone link.
+
+  Targeting is one rule — a default plus specific overrides — so "everywhere", "everywhere except these"
+  and "only these" all fall out of the same shape, on either the domain or the app axis, or both.
+  Precedence is most-specific-first: a domain entry, then app state, then the default. Entries added are
+  static (a label and an `https://` URL); a misspelled menu or app name is a startup error rather than a
+  rule that silently never matches. Gated by `me.menuConfig` (default on); unset ⇒ nothing changes.
+
+  `PORTAL_APPS_HIDE` keeps working exactly as before and remains the right answer for the common
+  one-liner. Setting both it and `PORTAL_MENUS`' apps hide list is a loud error rather than a silent
+  precedence rule.
+
+  **Upgrading with `me.appAccess` turned off:** that route previously refused every caller. It now also
+  serves the menu surface, which is on by default — so a deployment that disabled the sign-in panel will
+  find the route answering again (with menu data only; no sign-in fields). Set `me.menuConfig: "off"` as
+  well to keep it fully closed.
+
+  Added entries may use `mailto:` as well as `https://`, and may interpolate the signed-in user's own
+  details — `{ext}`, `{domain}`, `{email}`, `{fname}`, `{lname}`, `{name}` — plus `{page}`, the portal page
+  they are on when they click, which is useful for pre-filling a support request. Values are
+  percent-encoded so they cannot inject query parameters; `{page}` is the path only, never the query
+  string. A misspelled variable is a startup error rather than a literal brace in a live link.
+
+  Menu customization does **not** require the app integration: with no `RINGOTEL_API_KEY` configured the
+  app state is simply `none`, so static add/hide still works.
+
+### Changed
+
+- **The app-password instruction now says where the password actually is.** It previously hedged — "in the
+  email itself, or behind the one-time link in it" — because the deployment could not tell. The app
+  organization reports it, and it genuinely differs between organizations, so the instruction now states
+  the user's own case: the credentials are in the email, or a one-time link must be clicked to reveal them.
+  Where an organization does not report the setting the previous wording is kept rather than asserting
+  either case. Requires `@dszp/ringotel-lib` **^0.1.5**.
+
+## [0.2.10] — 2026-07-22
+
+### Added
+
+- **The app domain now shows in the toolbar banner**, e.g. "App Active: acme". It is the same value for
+  every user on a PBX domain — whether they sign in with SSO or an app password — so it is a useful
+  at-a-glance fact for whoever is looking at that domain, but it was previously only reachable by hovering
+  the banner. The toolbar is a fixed-height row, so the space is bought back by using
+  `RINGOTEL_LABEL_SHORT` when a domain is shown, and the domain truncates with an ellipsis rather than
+  widening the row; the full label and domain remain in the tooltip. Follows the existing banner gate
+  (`ringotel.orgStatus`, reseller by default).
+
+## [0.2.9] — 2026-07-22
+
+### Fixed
+
+- **A domain that doesn't run the app no longer shows an app-status section on the user profile.** The
+  section rendered as soon as the profile read returned, without checking whether the domain has an app
+  organization bound at all — so a domain with no app still showed "App Status → Inactive", offering an
+  app it cannot have to anyone who could see the profile. It now renders only when an organization is
+  bound; a degraded upstream read takes the same path, which is the correct failure (say less rather than
+  assert a state).
+
+### Changed
+
+- **The activation-eligibility decision now comes from `@dszp/netsapiens-lib` (requires `^0.1.5`).** This
+  Worker carried its own copy of that engine while other consumers used the library's, which is precisely
+  the divergence a shared library exists to prevent — and it had already begun to diverge. The copy is
+  gone; only this deployment's own configuration (the `RINGOTEL_*` environment parsing, its seeded name
+  matchers, the device suffix and the write rail) stays here, since the library deliberately ships no
+  defaults that would bind it to one deployment. No behavior change — the two implementations were
+  identical apart from the email-precondition waiver, which now lives in the library as
+  `EligContext.emailNotRequired` / `EligResult.emailWaived`.
+
+## [0.2.8] — 2026-07-22
+
+### Added
+
+- **App sign-in details on the user-profile page, for operators.** When a reseller or office manager
+  edits another user, the profile's app-status section now shows a **"User-visible app sign-in
+  message"** block — the same sign-in instructions (and download links) that user sees on their own
+  surfaces, so an operator can walk a user through sign-in, or see *why* a user can't yet (e.g. "not
+  set up"). It reuses the existing profile app-status read; gated by a new `ringotel.profileAppAccess`
+  feature (default office-manager). Advisory states omit any username, exactly as the self view does.
+- **Per-download `showUrl`.** Each `PORTAL_APP_DOWNLOADS` entry may set `"showUrl": false` to hide the
+  small copyable URL line rendered under its button (default: shown) — useful for a long link that
+  would not fit a menu width.
+
+### Changed
+
+- **"Inactive" now says when an account will create itself.** Where SSO *and* create-on-login are both
+  in play for an eligible user who has no app account yet, the status reads "Inactive (will auto-activate
+  on login)" instead of a bare "Inactive" — on both the profile page and the user's own home card. Shown
+  only when that outcome is actually known; otherwise the plain wording stands.
+- **Served bundles no longer ship their source comments.** The injected JavaScript is emitted without its
+  whole-line comments, cutting bytes sent to every portal page. Source keeps them.
+
+### Fixed
+
+- **SSO sign-in no longer requires the user to have an email address.** The email requirement exists
+  because activation *emails* credentials — but an SSO sign-in creates the account from the user's own
+  portal login and sends nothing, so requiring an address there wrongly told eligible users the app
+  "isn't set up". The requirement still applies to the welcome-email activation path.
+- **An already-activated user is no longer told the app "isn't set up".** Eligibility governs whether an
+  account may be *created*; it was also gating sign-in instructions, so a user who already had a working
+  account but later matched an exclusion was shown an advisory instead of how to sign in. Structural
+  exclusions (service/system identities) still apply.
+- **A temporary upstream failure now says so.** It previously reused the "isn't set up for this
+  extension" wording, which reads as a settled answer rather than "try again in a moment".
+- **The profile page now acts on the profile you are viewing while masquerading.** When an operator was
+  masquerading and opened *another* user's profile, the app-status section resolved the masqueraded
+  identity instead of the profile's own extension, so it displayed that other account's status,
+  eligibility and sign-in message. (Writes were already blocked during masquerade, so this was display
+  only.)
+- **The sign-in message refreshes after activate/deactivate** instead of disappearing until reload.
+
+## [0.2.7] — 2026-07-21
+
+### Added
+
+- **App sign-in details, shown to the user themselves.** The self-service bundle's Apps menu and
+  home-page card now explain *how* a given user signs in to their softphone/desktop/mobile app — SSO
+  ("sign in with your portal password") vs. a dedicated app password vs. "not set up yet" — instead of
+  a generic status dot. The decision is computed server-side from data already available (never
+  guessed client-side), and an advisory ("needs setup"/"unavailable") response structurally omits any
+  username, so a user who can't yet sign in is never shown credentials that won't work.
+- **Curate the Apps menu per deployment or per domain.** Two new settings: hide stock app entries you
+  don't offer (`PORTAL_APPS_HIDE`, a CSV for the whole fleet or a JSON object for per-domain overrides),
+  and add your own download links (`PORTAL_APP_DOWNLOADS`, ordered `{label, url, title?}` entries,
+  `url` must be `https://`).
+- **SSO awareness (`RINGOTEL_SSO_SERVICE`).** If your app fleet is bound to an SSO service and you also
+  run the matching SSO integration, set this to the service's name and users whose sign-in is bound to
+  it are told to use their portal password instead of a separate app password. **Unset by default —
+  never claims SSO exists** unless you explicitly confirm which service answers for it, since an SSO
+  binding could just as easily point at a third-party identity provider, and guessing wrong would send
+  a user to try a password that will never work.
+- **Create-on-login awareness (`SSO_AUTO_ACTIVATE`).** Whether an eligible user with no app account yet
+  gets one created automatically on their first SSO sign-in is a setting on the SSO integration itself,
+  not something this deployment can observe — so it's told here (a CSV of domains, or `*` for the whole
+  fleet). Left unset, an eligible-but-unactivated user is told to contact an admin rather than being
+  invited to attempt a sign-in that would fail.
+
+### Changed
+
+- **Two existing admin-gated responses grew a field.** `/rapp/org` now includes `ssoService` (the
+  org's raw SSO binding, unchanged since Ringotel already sent it — just not previously returned to
+  callers); `/rapp/users` now includes a per-extension `username` (the app sign-in name for a user
+  who has one). Both are additive fields on responses only reseller/office-manager tiers could already
+  read; neither is a secret.
+
 ## [0.2.6] — 2026-07-20
 
 ### Fixed

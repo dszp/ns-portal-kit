@@ -1,11 +1,15 @@
-/** Offline test for the Ringotel activation eligibility engine + config resolver. pnpm test:eligibility */
+/**
+ * Offline test for this deployment's config resolver, and for how that config drives the SHARED
+ * eligibility engine. The engine itself is `@dszp/netsapiens-lib`'s and has its own unit tests there —
+ * these are the integration assertions that our resolved `RingotelConfig` produces the verdicts this
+ * Worker depends on (seeded name matchers, per-domain ext overrides, reseller override, SSO waiver).
+ *   pnpm test:eligibility
+ */
+import { evaluateEligibility, type EligUser, type EligContext } from '@dszp/netsapiens-lib';
 import {
-  evaluateEligibility,
   resolveRingotelConfig,
   ringotelConfigError,
   RingotelConfigError,
-  type EligUser,
-  type EligContext,
   type RingotelConfig,
 } from './eligibility.js';
 
@@ -48,6 +52,16 @@ ok(evaluateEligibility(user({ ext: 'tod-open' }), admin, cfg()).tier === 'hard',
 ok(evaluateEligibility(user({ email: '' }), admin, cfg()).activatable === false, 'no email ⇒ not activatable');
 ok(evaluateEligibility(user({ email: '   ' }), admin, cfg()).activatable === false, 'whitespace email ⇒ not activatable');
 ok(evaluateEligibility(user({ email: '' }), admin, cfg()).tier === 'precondition', 'no email blocked at precondition tier (indicator still shows)');
+
+// --- emailNotRequired: the SSO/JIT path provisions on login and mails nothing, so the email
+//     precondition does not apply — but it must NOT rescue a HARD or SOFT exclusion ---
+const noEmailSso: EligContext = { domain: 'acme.example', isReseller: false, emailNotRequired: true };
+ok(evaluateEligibility(user({ email: '' }), noEmailSso, cfg()).activatable === true, 'emailNotRequired: no email is activatable on the SSO path');
+ok(evaluateEligibility(user({ email: '' }), noEmailSso, cfg()).tier === 'ok', 'emailNotRequired: an emailless SSO user lands at OK (no precondition block)');
+ok(evaluateEligibility(user({ email: 'a@b.example' }), noEmailSso, cfg()).activatable === true, 'emailNotRequired with an email present is still activatable');
+ok(evaluateEligibility(user({ email: '', srvCode: 'x' }), noEmailSso, cfg()).tier === 'hard', 'emailNotRequired does NOT rescue a HARD (system) user');
+ok(evaluateEligibility(user({ email: '', ext: '900' }), noEmailSso, cfg({ excludeExts: ['900'] })).tier === 'soft', 'emailNotRequired does NOT rescue a SOFT (excluded-ext) user');
+ok(evaluateEligibility(user({ email: '' }), admin, cfg()).tier === 'precondition', 'without emailNotRequired the email precondition still fires (default path unchanged)');
 
 // --- OK: valid user, no soft hits ---
 const good = evaluateEligibility(user(), admin, cfg());

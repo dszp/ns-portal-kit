@@ -63,7 +63,20 @@ export interface RingotelEnv {
 /** Vendor name. Both labels default to it, so an unconfigured deploy says "Ringotel" — the truth —
  *  rather than anyone's white-label branding. White-label names arrive via env, never source. */
 const DEFAULT_LABEL = 'Ringotel';
-const INDEX_KEY = 'https://ringotel-cache.internal/index';
+// The cached value is a PROJECTION of the Ringotel AdminAPI (buildOrgBranchIndex's OrgBranchEntry[]),
+// not raw API data — so a stale entry doesn't just go out of date, it can be missing a field the
+// CURRENT Worker code depends on. Deploying a new projected field with no key change means the newly
+// deployed Worker reads entries written by the PREVIOUSLY deployed Worker (up to INDEX_TTL old, per
+// colo) that lack it, and a falsy/absent read of that field is silently indistinguishable from "this
+// org genuinely doesn't have it" — e.g. `ssoService` added for this branch: without a version bump, a
+// pre-deploy entry has no `ssoService` ⇒ `ssoEnabled()` reads false ⇒ every user in an SSO-bound domain
+// is confidently told to use the app password from a welcome email, for up to an hour per colo, with no
+// error anywhere.
+// RULE: whenever a field is ADDED TO or REMOVED FROM the projected `OrgBranchEntry`, bump this version.
+// It is cheap insurance — the only cost is one extra fleet-wide re-dig — against a class of bug that is
+// otherwise silent and only shows up as "SSO users can't sign in right after a deploy".
+const INDEX_SHAPE_VERSION = 3; // v2: added ssoService · v3: added hidePassInEmail to the projected entry
+const INDEX_KEY = `https://ringotel-cache.internal/index-v${INDEX_SHAPE_VERSION}`;
 const INDEX_TTL = 3600; // 1h
 const USERS_TTL = 600; //  10m
 // A forced directory refresh re-digs the WHOLE fleet (~1 getOrganizations + 1 getBranches/org) against
@@ -71,7 +84,15 @@ const USERS_TTL = 600; //  10m
 // window fall through to the cached directory instead of re-digging. So even a caller authorized to
 // refresh (reseller) can't loop it into unbounded amplification. Paired with the per-caller policy gate
 // in the Worker (refreshRequested → ringotel.refresh).
-const INDEX_REFRESH_LOCK_KEY = 'https://ringotel-cache.internal/index-refresh-lock';
+// Exported so worker.selftest.ts's in-memory Cache API stub — whose `match` has no TTL/expiry check, so
+// this lock never self-clears the way the real Cache API entry does after INDEX_REFRESH_MIN_INTERVAL —
+// can evict just this one entry between scenarios instead of clearing the whole stub cache.
+// NOT given a shape-version component like INDEX_KEY above: the stored value is always the same inert
+// marker (`{ t: 1 }`), whose fields are never read — only its PRESENCE is checked (`if (locked)`). There
+// is no projected shape here to drift, so an older Worker's lock entry and a newer Worker's lock entry
+// mean exactly the same thing to both. Versioning it would be cargo-culting the INDEX_KEY fix onto a key
+// that has no analogous failure mode.
+export const INDEX_REFRESH_LOCK_KEY = 'https://ringotel-cache.internal/index-refresh-lock';
 const INDEX_REFRESH_MIN_INTERVAL = 60; // s — an actual re-dig happens at most once per minute, fleet-wide
 const orgUsersKey = (orgid: string) => `https://ringotel-cache.internal/org/${orgid}/users`;
 
@@ -233,6 +254,15 @@ export interface OrgStatusResponse {
   orgId?: string;
   appDomain?: string;
   eligible: boolean;
+  /** Raw `params.sso` for the org, when bound. Interpreting it is appAccess.ts's job. */
+  ssoService?: string;
+  /** Does this org's credentials email hide the password behind a one-time link? Absent when the org
+   *  doesn't report it — the consumer then hedges rather than asserting either case.
+   *  DELIBERATELY TERSE: this object is serialized to the browser, and a field spelled with the upstream
+   *  vendor's own parameter name announces what is underneath to anyone reading the network tab — the
+   *  same reason the routes are `/rapp/*`. The descriptive name stays in the library, which is not
+   *  client-visible. */
+  hPIE?: boolean;
 }
 
 /** Is domain D's Ringotel org active? Thin projection over the cached directory. */
@@ -240,7 +270,15 @@ export async function orgStatusForDomain(domain: string, env: RingotelEnv, cache
   const eligible = true; // TODO(eligible): compute from a future signal (OneBill paid-access flag / client-type block); false ⇒ client suppresses amber.
   const client = makeClient(env);
   const res = await resolveOrgForDomain(client, cache, domain, parseOverrides(env), opts.refresh);
-  if (res.status === 'active') return { active: true, orgId: res.entry.orgid, appDomain: res.entry.orgDomain ?? res.entry.host, eligible };
+  if (res.status === 'active')
+    return {
+      active: true,
+      orgId: res.entry.orgid,
+      appDomain: res.entry.orgDomain ?? res.entry.host,
+      eligible,
+      ...(res.entry.ssoService ? { ssoService: res.entry.ssoService } : {}),
+      ...(typeof res.entry.hidePassInEmail === 'boolean' ? { hPIE: res.entry.hidePassInEmail } : {}),
+    };
   return { active: false, eligible };
 }
 
@@ -273,7 +311,7 @@ export async function usersStatusForDomainFresh(domain: string, env: RingotelEnv
   return { active: true, users: usersStatusMap(users, res.entry.branchid, resolveRingotelConfig(env).suffix) };
 }
 
-/** Body of GET /ringotel/orgs: the caller's Ringotel-enabled domains → {orgId, appDomain}. */
+/** Body of GET /rapp/orgs: the caller's Ringotel-enabled domains → {orgId, appDomain}. */
 export interface OrgsStatusResponse {
   enabled: Record<string, { orgId: string; appDomain?: string }>;
 }
@@ -359,6 +397,8 @@ export interface UserAppStatus {
    * separately by the profile endpoint, which reads the user's device list anyway.
    */
   health: { flags: HealthFlag[]; severity: HealthSeverity };
+  /** Ringotel SIP username (`<ext><suffix>`) — what a non-SSO user types to sign in. */
+  username?: string;
 }
 
 /** Project a branch's Ringotel users to per-ext presence (branch-filtered). Presence = the user-level
@@ -384,6 +424,7 @@ export function usersStatusMap(users: User[], branchid: string, suffix = 'r'): R
       devices: deviceCount(u),
       lastSeen: Number(u.stime) || 0,
       health: assessUserHealth(u, { ext, suffix, siblingCount: perExt.get(ext) ?? 1 }),
+      ...(u.username ? { username: u.username } : {}),
     };
   }
   return out;
