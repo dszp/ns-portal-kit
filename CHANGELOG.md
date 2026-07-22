@@ -22,6 +22,17 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.2.14] — 2026-07-22
+
+### Fixed
+
+- **Entries added to the account menu could stop appearing for some roles.** The menu is located by its
+  sign-out entry, and 0.2.13 tightened that match so it would not also catch unrelated labels — but the
+  test ran against the menu's combined text, which joins items with no separator. An adjacent item ending
+  in a letter (for example a vendor-injected entry sitting directly above sign-out) therefore ran into it
+  and the match failed, so nothing was added. The check now examines each item on its own, which is
+  immune to how the markup is assembled and still ignores labels that merely begin with the same words.
+
 ## [0.2.13] — 2026-07-22
 
 ### Security
@@ -475,7 +486,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.13...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.14...HEAD
+[0.2.14]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.14
 [0.2.13]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.13
 [0.2.12]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.12
 [0.2.6]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.6
