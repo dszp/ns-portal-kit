@@ -340,6 +340,19 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     // One add/hide implementation shared by both menus — a second copy is how two menus drift apart.
     ok((b.match(/function menuApply\(/g) || []).length === 1 && (b.match(/_svxadd/g) || []).length === 1,
       '[menus] add/hide is implemented once and reused, not duplicated per menu');
+    // The Management dropdown is reseller-level nav with no id and a toggle carrying no href — the only
+    // anchor is the toggle's own LABEL, read from the toggle itself (never a container, for the same
+    // reason sign-out is tested per item).
+    ok(b.includes('function mgmtUl(') && b.includes('function managementMenu('), '[menus] the Management dropdown is a supported target');
+    ok(/a\.dropdown-toggle\[data-toggle="dropdown"\]/.test(b), '[menus] ...found via the dropdown toggle, not a positional selector');
+    ok(b.includes('t.nextElementSibling') && b.includes("li.querySelector('ul.dropdown-menu')"),
+      '[menus] ...accepting both Bootstrap shapes (menu after the toggle, or beside it in the same <li>)');
+    ok(b.includes('svxmgmt'), '[menus] the Management menu has its own idempotency guard');
+    // Appended, not inserted: this menu has no trailing sign-out to sit above.
+    ok(/menuApply\(u,plan,null\)/.test(b), '[menus] Management entries are appended at the end');
+    // Every menu surface is dispatched; a target the dispatcher never calls is a feature that silently
+    // does nothing (exactly the H1 from the menus review).
+    ok(/m:managementMenu,a:function\(\)\{return !!_AF\.menuConfig\}/.test(b), '[menus] managementMenu is actually dispatched, not just defined');
     let mOk = true; try { new Function(b); } catch (e) { mOk = false; }
     ok(mOk, '[menus] self bundle with menu config parses');
   }

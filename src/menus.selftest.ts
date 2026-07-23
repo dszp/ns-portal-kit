@@ -189,6 +189,16 @@ const M = (o: unknown) => ({ PORTAL_MENUS: JSON.stringify(o) });
   ok(noVars.url === 'https://s.example/?e=', 'an absent value resolves empty, never a literal {email}');
 }
 
+// ── The Management menu is a third target, with the same rules ─────────────
+{
+  const cfg = M({ management: { add: { scopes: { Reseller: [{ label: 'Provisioning', url: 'https://rps.example.com/x' }] }, '*': [] } } });
+  const at = (scope: string) => resolveMenus(cfg, { domain: ACME, app: 'none', scope }).management;
+  ok(at('Reseller').add[0]?.label === 'Provisioning', 'management: a reseller-scoped entry resolves');
+  ok(at('Office Manager').add.length === 0, 'management: everyone else gets nothing');
+  ok(threw(() => resolveMenus(M({ managment: { add: [] } }), { domain: ACME, app: 'none' })),
+    "a typo'd menu name is still a config error");
+}
+
 // ── The SCOPE axis: exact match, no nesting ────────────────────────────────
 // The motivating case is inexpressible with feature levels, where `office_manager` means "OM and everyone
 // above" — including the resellers you are trying to exclude.

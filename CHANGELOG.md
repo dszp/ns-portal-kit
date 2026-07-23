@@ -20,6 +20,20 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [0.2.16] — 2026-07-22
+
+### Added
+
+- **The Management menu is a third menu target** (`"management"`), alongside `"apps"` and `"account"` —
+  the top-nav dropdown the portal shows to administrative scopes. Useful for putting an operator tool
+  (device provisioning, a vendor portal) where an administrator already looks for that kind of thing.
+  Entries are appended after the portal's own, and the same targeting rules apply, so pairing it with the
+  `scopes` axis narrows it to exactly one role.
+
+  That menu carries no id and its toggle carries no link, so it is identified by the toggle's **label**.
+  A portal that renames it will simply not match — the entry is absent rather than landing somewhere
+  unintended, which is the failure mode worth having.
+
 ## [0.2.15] — 2026-07-22
 
 ### Added
@@ -516,7 +530,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.15...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.16...HEAD
+[0.2.16]: https://github.com/dszp/ns-portal-kit/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/dszp/ns-portal-kit/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.14
 [0.2.13]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.13
