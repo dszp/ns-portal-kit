@@ -20,6 +20,33 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [0.2.17] — 2026-07-23
+
+### Changed
+
+- **An email address removed in NetSapiens now reaches the app directory.** Activate, deactivate and
+  password-reset previously sent the address only when it was non-empty, so a user whose NetSapiens
+  address had been cleared kept whatever the app directory still held. That leftover address could
+  receive the app password for an extension that had since been reassigned — the new occupant's
+  credentials mailed to the previous one. NetSapiens is the source of truth for identity, so the current
+  value is now synced faithfully, blank included.
+- **A failed NetSapiens read no longer looks like a removal.** The address is three-state internally: a
+  read that failed leaves the directory value untouched, while a successful read showing no address
+  clears it. Only a genuine removal propagates.
+
+**Note:** a password reset for a user with no NetSapiens address now mails the new password nowhere,
+where it previously went to the stale address. That is deliberate — it must not reach the wrong person.
+Put an address on the NetSapiens user before resetting.
+
+### Fixed
+
+- **The app password reset button now appears greyed out while masquerading, instead of disappearing.**
+  A control that silently absents itself reads as "this user cannot be reset" rather than "you cannot do
+  this from here". It carries a hover tooltip explaining why, matching the activation checkbox beside it.
+- **A masqueraded session can no longer mistake a hidden email address for a removed one.** The portal
+  withholds account-security fields during masquerade, so the address reads as blank there whether or not
+  the user has one. Writes made from such a session now leave the stored address untouched.
+
 ## [0.2.16] — 2026-07-22
 
 ### Added
@@ -530,7 +557,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.16...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.17...HEAD
+[0.2.17]: https://github.com/dszp/ns-portal-kit/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/dszp/ns-portal-kit/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/dszp/ns-portal-kit/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.14

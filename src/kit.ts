@@ -571,11 +571,24 @@ else if(!active&&elig&&!elig.activatable){dis=true;tip=(elig.reasons&&elig.reaso
 if(dis){chk.disabled=true;wc.style.opacity='.6';st.style.opacity='.6';wc.title=tip}
 chk.addEventListener('change',setL);
 wc.appendChild(chk);wc.appendChild(st);cc.appendChild(wc);
-if(canReset&&active&&!masq()){
+// Shown while masquerading, but DISABLED — matching the activation checkbox above rather than
+// vanishing. Two reasons it must not just disappear: a control that silently absents itself reads as
+// "this user cannot be reset" instead of "you cannot do this from here", and under a mask the portal
+// withholds Change Account Security entirely, so email is blank because it is UNREADABLE, not
+// because it is unset — the 'requires an email' wording below would be an outright wrong explanation.
+// Mask check therefore comes FIRST. (The server-side write is unaffected: emailForWrite() in worker.ts
+// refuses to read a masked blank as a removal.)
+if(canReset&&active){
 var rb=document.createElement('button');rb.type='button';rb.className='btn btn-default';rb.textContent='Reset '+_KC.label+' Password';rb.style.cssText='display:block;margin-top:8px';
-if(!email){rb.disabled=true;rb.title='An email address is required.'}
+// The tooltip goes on a WRAPPER, not on the button: a disabled control receives no mouse events, so its
+// own title never renders. Same trick the activation checkbox uses (title on the enclosing label, not on
+// the disabled input) — without it the greyed button would explain nothing on hover.
+var rw=document.createElement('span');rw.style.display='block';var rtip='';
+if(masq()){rtip='Cannot reset the password while masquerading.'}
+else if(!email){rtip='An email address is required.'}
+if(rtip){rb.disabled=true;rb.title=rtip;rw.title=rtip;rw.style.opacity='.6'}
 rb.addEventListener('click',function(){if(!confirm('Reset the '+_KC.label+' password and email a new one to the user?'))return;rb.disabled=true;rb.textContent='Resetting…';jpost('/rapp/resetPassword',{domain:d,ext:ext}).then(function(){rb.textContent='Password reset — emailed'}).catch(function(){rb.textContent='Reset failed';rb.disabled=false})});
-cc.appendChild(rb);
+rw.appendChild(rb);cc.appendChild(rw);
 }
 if(showForce){
 var fb=document.createElement('button');fb.type='button';fb.textContent='Force-activate App';fb.title=tip;

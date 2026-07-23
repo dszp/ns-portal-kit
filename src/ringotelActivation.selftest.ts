@@ -87,6 +87,48 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     ok(!('name' in u.args), 'updateUser omits name when none is supplied (avoids blanking the Ringotel name)');
   }
 
+  // ── email is THREE-STATE: '' propagates a real removal, undefined (failed read) touches nothing ──
+  // The distinction is the whole point: a stale directory address can receive the app password for an
+  // extension that has since been reassigned, so a genuine removal MUST propagate — but a failed NS read
+  // must never look like one. `if (email)` could not tell them apart; `email !== undefined` can.
+  {
+    const { dw } = mockDevices({ '100r': 'OLDPW' });
+    const { rw, calls } = mockRt();
+    await activate({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 0 })] });
+    const u = calls.find((x) => x.m === 'updateUser')!;
+    ok('email' in u.args && u.args.email === '', 'activate PROPAGATES a blank email (NS is the source of truth for identity)');
+  }
+  {
+    const { dw } = mockDevices({ '100r': 'OLDPW' });
+    const { rw, calls } = mockRt();
+    const { email: _drop, ...noEmail } = base();
+    await activate({ ...noEmail, nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 0 })] });
+    const u = calls.find((x) => x.m === 'updateUser')!;
+    ok(!('email' in u.args), 'activate OMITS email when undefined (a failed NS read must not blank a good address)');
+  }
+  {
+    const { dw } = mockDevices({ '100r': 'PW2' });
+    const { rw, calls } = mockRt();
+    await resetPassword({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 1 })] });
+    const u = calls.find((x) => x.m === 'updateUser')!;
+    ok('email' in u.args && u.args.email === '', 'reset PROPAGATES a blank email, so the new password cannot be mailed to a stale address');
+  }
+  {
+    const { dw } = mockDevices({ '100r': 'PW2' });
+    const { rw, calls } = mockRt();
+    const { email: _drop, ...noEmail } = base();
+    await resetPassword({ ...noEmail, nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 1 })] });
+    const u = calls.find((x) => x.m === 'updateUser')!;
+    ok(!('email' in u.args), 'reset OMITS email when undefined (failed read leaves the stored address alone)');
+  }
+  {
+    const { dw } = mockDevices({ '100r': 'PW' });
+    const { rw, calls } = mockRt();
+    await deactivate({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 1 })] });
+    const u = calls.find((x) => x.m === 'updateUser')!;
+    ok('email' in u.args && u.args.email === '', 'deactivate PROPAGATES a blank email');
+  }
+
   // ── deactivate: best-effort identity sync, then deactivateUser (NON-BILLABLE) + delete device ──
   {
     const { dw, calls: dcalls } = mockDevices({ '100r': 'PW' });

@@ -9,6 +9,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveFlow, type Snapshot } from '@dszp/netsapiens-lib';
 import { INDEX_REFRESH_LOCK_KEY } from './ringotel.js';
+import { emailForWrite } from './worker.js';
+import type { Principal } from '@dszp/netsapiens-lib';
 
 // With no argument, run against the committed, fully-genericized fixture so `pnpm test:worker` just
 // works (and can sit in the CI `test` aggregate). Pass a path to point it at any other snapshot's JSON
@@ -794,6 +796,22 @@ const ok = (c: boolean, m: string) => {
     failed.status?.health?.flags?.includes('no-ns-device') !== true,
     '[ringotel/user] device read failure → no flag (absence of evidence is not evidence)',
   );
+
+  // ── emailForWrite: the three-state email contract, incl. the masquerade fail-closed rule ──
+  // A blank is a REMOVAL to be propagated only when we actually know it is one. Two ways not to know:
+  // the read failed, or the session is masked (email is auth-adjacent and may be redacted, not absent).
+  {
+    const plain = { scope: 'Office Manager' } as unknown as Principal;
+    const masked = { scope: 'Basic User', operator: { id: 'op@example.com' } } as unknown as Principal;
+    const withEmail = { email: 'user@example.com' };
+    ok(emailForWrite(null, '100', plain) === undefined, '[emailForWrite] failed read → undefined (never a removal)');
+    ok(emailForWrite({}, '100', plain) === '', '[emailForWrite] read ok + no address → \'\' (propagate the removal)');
+    ok(emailForWrite(withEmail, '100', plain) === 'user@example.com', '[emailForWrite] read ok + address → the address');
+    ok(emailForWrite({}, '100', masked) === undefined, '[emailForWrite] MASKED + blank → undefined (a redacted field is not a removal)');
+    ok(emailForWrite(withEmail, '100', masked) === 'user@example.com', '[emailForWrite] MASKED + address → still trusted (it can only have come from the record)');
+    ok(emailForWrite(null, '100', undefined) === undefined, '[emailForWrite] no principal + failed read → undefined');
+    ok(emailForWrite({}, '100', undefined) === '', '[emailForWrite] no principal (service mode) + blank → \'\'');
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

@@ -67,6 +67,18 @@ export interface ActivationOpts {
   /** NS device-name suffix (config; default 'r'). */
   suffix: string;
   name?: string;
+  /**
+   * The NetSapiens email address, and the DISTINCTION MATTERS:
+   *  - `undefined` — the NS user read FAILED or was not attempted. We know nothing; touch nothing.
+   *  - `''`        — the read SUCCEEDED and the user genuinely has no address. Propagate the removal.
+   *  - a string    — the current address. Propagate it.
+   *
+   * NetSapiens is the source of truth for identity, so a real removal must reach the app directory
+   * (a stale address there can receive an app password for an extension that has since been
+   * reassigned). But a failed read must never look like a removal — hence the three-state contract
+   * rather than a bare `if (email)`, which cannot tell them apart. Callers: pass `undefined` on a
+   * read failure, never `''`.
+   */
   email?: string;
 }
 
@@ -183,10 +195,12 @@ export async function activate(opts: ActivationOpts): Promise<ActivationResult> 
     const id = String(existing.id);
     // Sync the NS identity (name + email) into the Ringotel user BEFORE (re)activation, so a user that
     // existed-but-was-deactivated gets its current NS first/last-name + email — not whatever stale value
-    // the directory carried. name/email are only sent when supplied, so we never blank a good value.
+    // the directory carried. `email` is sent FAITHFULLY, blank included (see ActivationOpts.email) —
+    // only a failed read (`undefined`) leaves the directory value alone. `name` still guards on truthy:
+    // NS always has a display name, so blank there means "we didn't get one", not "it was removed".
     const changes: Rec = { status: 1, username, authname: username, password };
     if (opts.name) changes.name = opts.name;
-    if (email) changes.email = email;
+    if (opts.email !== undefined) changes.email = opts.email;
     await opts.rtWrite.updateUser(id, opts.orgid, changes);
     result = { action: 'updated', rtUserId: id };
   } else {
@@ -225,7 +239,7 @@ export async function deactivate(opts: ActivationOpts): Promise<ActivationResult
     // though deactivateUser overwrites the visible name.
     const changes: Rec = {};
     if (opts.name) changes.name = opts.name;
-    if (opts.email) changes.email = opts.email;
+    if (opts.email !== undefined) changes.email = opts.email;
     if (Object.keys(changes).length) await opts.rtWrite.updateUser(rtUserId!, opts.orgid, changes);
     await opts.rtWrite.deactivateUser(rtUserId!, opts.orgid);
     // Only now — after the canonical is deactivated — best-effort clean up any siblings.
@@ -245,7 +259,11 @@ export async function deactivate(opts: ActivationOpts): Promise<ActivationResult
  *  - Refuses a non-active user, so a reset can never (re)activate a deactivated account or recreate its NS
  *    device — closing the "reset silently reverses a deactivation" hole (incl. any self-service reset).
  *  - Syncs email FIRST, so the new-password email Ringotel sends goes to the CURRENT NS address, not a
- *    stale one. name/email are sent only when supplied, so a reset never blanks a good value.
+ *    stale one — INCLUDING when NetSapiens no longer has one, which is the case that matters: the
+ *    directory's leftover address may belong to whoever held this extension before. A blank there means
+ *    the reset mail goes nowhere, which is the intended outcome (it must not go to the wrong person);
+ *    the operator's fix is to put an address on the NetSapiens user. Only a FAILED read (`undefined`)
+ *    leaves the stored value alone.
  */
 export async function resetPassword(opts: ActivationOpts): Promise<ActivationResult> {
   const existing = resolveCanonical(opts);
@@ -258,7 +276,7 @@ export async function resetPassword(opts: ActivationOpts): Promise<ActivationRes
   const { password } = await ensureDevice(opts.nsWrite, opts.domain, opts.ext, deviceName);
   const changes: Rec = { username: deviceName, authname: deviceName, password };
   if (opts.name) changes.name = opts.name;
-  if (opts.email) changes.email = opts.email;
+  if (opts.email !== undefined) changes.email = opts.email;
   await opts.rtWrite.updateUser(id, opts.orgid, changes);
   await opts.rtWrite.resetUserPassword(id, opts.orgid);
   // Only now — after the canonical's password is reset — best-effort clean up any siblings.

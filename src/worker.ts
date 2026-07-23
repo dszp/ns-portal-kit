@@ -658,6 +658,32 @@ function nsUserToElig(u: Record<string, unknown>, ext: string, deviceCount: numb
 }
 
 /**
+ * The NS email to send on an app-directory write, honoring `ActivationOpts.email`'s three states:
+ * `undefined` = we don't know (touch nothing), `''` = the user genuinely has none (propagate the
+ * removal), a string = the current address.
+ *
+ * Two ways to not know, and only one of them is a failed request:
+ *  1. **The read failed** (`record` is null) — the obvious case.
+ *  2. **The session is MASQUERADING.** Email is auth-adjacent, and the portal does not let an operator
+ *     view or change a masked user's address — so a read on that session may be REDACTED rather than
+ *     truthful, and a redacted field is indistinguishable from a removed one. Propagating it would
+ *     silently wipe a good address, which is exactly what the three-state contract exists to prevent.
+ *     So a blank read under a mask means "unknown", never "removed". A non-blank value is still trusted:
+ *     it can only have come from the record. (The client already disables these controls while masked;
+ *     this is the server-side half, and it fails closed whether or not NS actually redacts the field.)
+ */
+export function emailForWrite(
+  record: Record<string, unknown> | null,
+  ext: string,
+  principal: Principal | undefined,
+): string | undefined {
+  if (!record) return undefined;
+  const email = nsUserToElig(record, ext, 0).email;
+  if (email) return email;
+  return principal?.operator ? undefined : '';
+}
+
+/**
  * The single display name to push into Ringotel for an NS user: `First Last` when either part exists,
  * else an explicit display-name field. Deliberately does NOT fall back to `subscriber_name`/`name` — in
  * NS those carry the extension number (n8n uses `subscriber_name` as the `<ext>r` device base), which
@@ -1239,7 +1265,7 @@ export default {
         if (res.status === 'ambiguous') throw new HttpError(409, 'App organization binding is ambiguous for this domain');
         const users = res.users ?? [];
         if (!buildExtIndex(users, res.entry.branchid).get(ext)) return json({ error: 'No app user to reset for this extension' }, 404, cors);
-        const email = record ? nsUserToElig(record, ext, 0).email : '';
+        const email = emailForWrite(record, ext, auth.principal);
         const result = await resetPassword({ nsWrite: new NsWriteClient({ server: env.NS_SERVER, token: auth.token }), rtWrite: makeWriteClient(env), users, orgid: res.entry.orgid, branchid: res.entry.branchid, domain, ext, suffix: rtConfig.suffix, email });
         await invalidateOrgUsers(caches.default, res.entry.orgid);
         return json({ ok: true, ...result }, 200, cors);
@@ -1277,14 +1303,14 @@ export default {
           // `force` is a reseller RUNTIME override (bypasses soft, never hard); honored only for a reseller.
           const elig = evaluateEligibility(eu, { domain, isReseller: isResellerScope(auth.principal!.scope), force: body?.force === true }, rtConfig);
           if (!elig.activatable) return json({ error: 'Not eligible for activation', tier: elig.tier, reasons: elig.reasons }, 403, cors);
-          result = await activate({ ...common, name: nsDisplayName(nsUser) || ext, email: eu.email });
+          result = await activate({ ...common, name: nsDisplayName(nsUser) || ext, email: emailForWrite(nsUser, ext, auth.principal) });
         } else {
           // Best-effort identity sync on deactivate too: the RT user stays as a visible directory entry.
           // If the NS user is gone (a common reason to deactivate) the fetch is null → deactivate skips
           // the sync and just turns the user off.
           const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
           const name = nsUser ? nsDisplayName(nsUser) || undefined : undefined;
-          const email = nsUser ? nsUserToElig(nsUser, ext, 0).email || undefined : undefined;
+          const email = emailForWrite(nsUser, ext, auth.principal);
           result = await deactivate({ ...common, name, email });
         }
         await invalidateOrgUsers(caches.default, res.entry.orgid);
@@ -1310,7 +1336,7 @@ export default {
         const users = res.users ?? [];
         if (!buildExtIndex(users, res.entry.branchid).get(ext)) return json({ error: 'No app user to reset for this extension' }, 404, cors);
         const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
-        const email = nsUser ? nsUserToElig(nsUser, ext, 0).email : '';
+        const email = emailForWrite(nsUser, ext, auth.principal);
         const result = await resetPassword({ nsWrite: new NsWriteClient({ server: env.NS_SERVER, token: auth.token }), rtWrite: makeWriteClient(env), users, orgid: res.entry.orgid, branchid: res.entry.branchid, domain, ext, suffix: rtConfig.suffix, email });
         await invalidateOrgUsers(caches.default, res.entry.orgid);
         return json({ ok: true, ...result }, 200, cors);
