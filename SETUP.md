@@ -201,9 +201,14 @@ variable:
 |---|---|---|
 | `apps` | the portal's **Apps** dropdown | appended after the stock entries |
 | `account` | the signed-in user's **own name** dropdown (My Account / Profile / Messages / sign out) | into the first group, **above** the divider and the sign-out entry |
+| `management` | the top-nav **Management** dropdown, which the portal shows to administrative scopes only | appended at the **end**, after the portal's own entries |
 
 An unknown name is a startup error. The `account` menu carries no id and shares a generic class with other
-dropdowns, so it is located by its sign-out entry — the one item present in every variant of it.
+dropdowns, so it is located by its sign-out entry — the one item present in every variant of it. The
+`management` menu likewise has no id, and its toggle carries no link either, so it is found by the
+toggle's **label**: a portal that renames that menu simply won't match, and your entry is absent rather
+than misplaced. Because the portal only shows that menu to administrative scopes, entries there are
+already limited to those users — pair it with the `scopes` axis below if you want to narrow it further.
 
 This does **not** require the Ringotel integration: with no `RINGOTEL_API_KEY` set, the app state is
 `none`, so static add/hide works on any deployment.
@@ -245,7 +250,16 @@ rather than among the apps:
                           "title": "Opens your mail client" } ] } }
 ```
 
-**6. Show it to office managers and their users, but not to resellers** — the support desk belongs to the
+**6. Add a tool to the Management menu, for resellers only.** The portal already restricts that menu to
+administrative scopes; the scope rung makes it exact:
+
+```json
+{ "management": { "add": { "scopes": { "Reseller": [ { "label": "Device Provisioning",
+                                                      "url": "https://provisioning.example.com/manage" } ] },
+                           "*": [] } } }
+```
+
+**7. Show it to office managers and their users, but not to resellers** — the support desk belongs to the
 customer, not to the partner who administers them:
 
 ```json

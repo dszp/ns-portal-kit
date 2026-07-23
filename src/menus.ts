@@ -37,11 +37,15 @@ export interface MenuPlan {
 /**
  * Menus we support by NAME. Operators never supply a selector — that would hand a DOM-injection surface to
  * whoever can set env vars, and it would break on every portal update. Adding a name is a code change:
- *   apps    — the portal's Apps dropdown (`ul#app-menu-list`)
- *   account — the user's own name dropdown in the toolbar (My Account / Profile / Messages / Log Out).
- *             It has NO id and shares a generic Bootstrap class, so the client identifies it by content.
+ *   apps       — the portal's Apps dropdown (`ul#app-menu-list`)
+ *   account    — the user's own name dropdown in the toolbar (My Account / Profile / Messages / Log Out).
+ *                It has NO id and shares a generic Bootstrap class, so the client identifies it by content.
+ *   management — the top-nav Management dropdown, present for administrative scopes only. Its toggle
+ *                carries no id and no href, so it is found by the toggle's own LABEL — which means a
+ *                portal that renames it will simply not match (nothing breaks; the entry is absent).
+ *                Entries are appended at the END, since this menu has no trailing sign-out to sit above.
  */
-export const MENU_NAMES = ['apps', 'account'] as const;
+export const MENU_NAMES = ['apps', 'account', 'management'] as const;
 export type MenuName = (typeof MENU_NAMES)[number];
 
 /**

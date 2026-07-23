@@ -754,6 +754,31 @@ for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').tri
 var before=lo;
 if(before&&before.previousElementSibling&&/divider/.test(before.previousElementSibling.className||''))before=before.previousElementSibling;
 menuApply(u,plan,before)})}
+// The top-nav Management dropdown (administrative scopes only). It has no id, and its toggle carries no
+// href either -- the ONLY anchor is the toggle's own label, so a portal that renames the menu simply does
+// not match and the entry is absent. That is the honest failure: nothing breaks, nothing lands elsewhere.
+// The toggle's text is read from the TOGGLE, never from a container, for the same reason the account menu
+// is tested per item. Its caret is an empty <i>, so trimmed textContent is the label alone.
+function mgmtUl(){
+var ts=document.querySelectorAll('a.dropdown-toggle[data-toggle="dropdown"]');
+for(var i=0;i<ts.length;i++){var t=ts[i];
+if(!/^management$/i.test((t.textContent||'').replace(/\s+/g,' ').trim()))continue;
+// Bootstrap puts the menu either directly after the toggle or beside it inside the same <li>. Accept
+// both rather than assume one: this markup is the vendor's, and it has changed before.
+var n=t.nextElementSibling;
+if(n&&n.tagName&&n.tagName.toLowerCase()==='ul'&&/dropdown-menu/.test(n.className||''))return n;
+var li=t.closest&&t.closest('li');var u=li&&li.querySelector('ul.dropdown-menu');if(u)return u}
+return null}
+function managementMenu(){
+if(!_AF.menuConfig)return;
+var ul=mgmtUl();if(!ul||ul.dataset.svxmgmt)return;
+aaFetch(function(r){
+var plan=r&&r.menus&&r.menus.management;if(!plan)return;
+if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
+var u=mgmtUl();if(!u||u.dataset.svxmgmt)return;u.dataset.svxmgmt='1';
+// Appended at the END: this menu has no trailing sign-out to sit above, and an added tool belongs
+// after the portal's own entries rather than jumping ahead of them.
+menuApply(u,plan,null)})}
 function appsMenu(){
 // Two independent surfaces share this menu: menu customization (menuConfig) and the sign-in panel
 // (appAccess). Either alone is a reason to touch the menu.
@@ -791,7 +816,8 @@ else{ul.appendChild(note(mdl.advisory.t,true))}
 })}
 var F=[{p:/^\/portal\/home/,m:homeStatus,a:function(){return !!_AF.appStatus}},
 {p:/^\//,m:appsMenu,a:function(){return !!_AF.appAccess||!!_AF.menuConfig}},
-{p:/^\//,m:accountMenu,a:function(){return !!_AF.menuConfig}}];
+{p:/^\//,m:accountMenu,a:function(){return !!_AF.menuConfig}},
+{p:/^\//,m:managementMenu,a:function(){return !!_AF.menuConfig}}];
 function run(){for(var i=0;i<F.length;i++){try{var f=F[i];if(f.p.test(location.pathname)&&(!f.a||f.a()))f.m()}catch(e){}}}
 var raf=0;function sched(){if(raf)return;raf=requestAnimationFrame(function(){raf=0;run()})}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run);else run();
