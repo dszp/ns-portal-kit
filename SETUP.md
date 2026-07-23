@@ -245,6 +245,14 @@ rather than among the apps:
                           "title": "Opens your mail client" } ] } }
 ```
 
+**6. Show it to office managers and their users, but not to resellers** — the support desk belongs to the
+customer, not to the partner who administers them:
+
+```json
+{ "account": { "add": { "scopes": { "Reseller": [], "Super User": [] },
+                        "*": [ { "label": "Email Support", "url": "mailto:support@example.com" } ] } } }
+```
+
 Both menus take the same `hide` / `add` shapes and the same targeting rules, so anything below applies to
 either.
 
@@ -260,12 +268,26 @@ need one:
 | change everywhere **except** some | `{"*": ["A"], "acme.example": []}` |
 | change **only** some | `{"*": [], "acme.example": ["A"]}` |
 
-The same works on the app axis (`{"app": {"ringotel": [...], "none": []}}`), and both can be combined.
-**Precedence, most specific first: `domains` → `app` → `"*"`.** A matching `domains` entry wins outright —
-it is *not* merged with the app list — because otherwise "turn it off just here" would be inexpressible.
+The same works on the **app** axis (`{"app": {"ringotel": [...], "none": []}}`) and the **scope** axis
+(`{"scopes": {"Reseller": [...]}}`), and they can be combined.
+**Precedence, most specific first: `domains` → `scopes` → `app` → `"*"`.** A matching `domains` entry wins
+outright — it is *not* merged with the app list — because otherwise "turn it off just here" would be
+inexpressible. A `"*"` **inside** an axis is a default, so an exact match on any axis still beats it.
 
 App keys are `ringotel` (an app organization is active for the domain), `none` (none is), and `*` (either).
 A misspelled app or menu name is a **startup error**, not a silently-never-matching rule.
+
+**Scope keys** are NetSapiens user scopes — `Super User`, `Reseller`, `Office Manager`, `Site Manager`,
+`Advanced User`, `Basic User`, `Simple User`, `Call Center Agent`, `Call Center Supervisor` — plus `*`.
+Spelling is forgiving (`Office Manager`, `office_manager` and `officeManager` are the same key); a scope
+this deployment doesn't know is a startup error.
+
+> **The `scopes` axis matches one scope exactly — it does not nest**, unlike the feature levels below,
+> where `office_manager` means "Office Manager *and everyone above*". That difference is the point: it is
+> what lets you write "office managers and their users, but not resellers", which no feature level can say.
+
+While a user is being **masqueraded**, the scope that matches is the *masqueraded* user's — an
+administrator viewing a session sees the menu that user sees.
 
 `add` entries take `label`, a `url`, and an optional `title`. Added links open in a new tab.
 

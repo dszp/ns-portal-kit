@@ -1040,7 +1040,12 @@ export default {
         // a principal's own domain, which they can read by definition.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
         const refresh = refreshRequested(url, auth, env, policies);
-        return json(await orgStatusForDomain(domain, env, caches.default, { refresh }), 200, cors);
+        // hPIE is a per-user sign-in detail: it only means anything once a user has been resolved to the
+        // password path, which this org-level route never does. /me/app-access emits it exactly there.
+        // Strip it here so "emitted only where it is actionable" holds on BOTH routes rather than one --
+        // the projection stays a dumb org fact, and the decision about what to disclose stays at the edge.
+        const { hPIE: _hPIE, ...orgBody } = await orgStatusForDomain(domain, env, caches.default, { refresh });
+        return json(orgBody, 200, cors);
       }
 
       if (url.pathname === '/rapp/users') {
@@ -1181,7 +1186,7 @@ export default {
           // Pass the same vars as the integrated path: without them {ext}/{name} would silently resolve
           // empty on exactly the deployments this branch exists to serve.
           const { ext: e0, domain: d0, record: r0 } = await resolveSelfNsUser(client, auth.principal);
-          return json({ menus: resolveMenus(env, { domain: d0, app: 'none', vars: menuVars(r0, e0, d0) }) }, 200, cors);
+          return json({ menus: resolveMenus(env, { domain: d0, app: 'none', scope: auth.principal.scope, vars: menuVars(r0, e0, d0) }) }, 200, cors);
         }
 
         // Identity from `~` ONLY (resolveSelfNsUser). The org/status/eligibility/decision logic — incl.
@@ -1195,7 +1200,9 @@ export default {
         // fleet's config never reaches a client.
         let menus: Record<string, MenuPlan> | undefined;
         if (wantMenus) {
-          menus = resolveMenus(env, { domain, app: proj.present ? 'ringotel' : 'none', vars: menuVars(record, ext, domain) });
+          // `principal.scope` is the EFFECTIVE scope — the masked user's while masquerading — so an
+          // operator viewing a masked session sees the menu that user sees, which is the point of masking.
+          menus = resolveMenus(env, { domain, app: proj.present ? 'ringotel' : 'none', scope: auth.principal.scope, vars: menuVars(record, ext, domain) });
         }
 
         // The sign-in fields (mode/username/appDomain/downloads) belong to me.appAccess — a menus-only

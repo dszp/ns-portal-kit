@@ -189,6 +189,80 @@ const M = (o: unknown) => ({ PORTAL_MENUS: JSON.stringify(o) });
   ok(noVars.url === 'https://s.example/?e=', 'an absent value resolves empty, never a literal {email}');
 }
 
+// ── The SCOPE axis: exact match, no nesting ────────────────────────────────
+// The motivating case is inexpressible with feature levels, where `office_manager` means "OM and everyone
+// above" — including the resellers you are trying to exclude.
+{
+  const hideForScope = (env: Record<string, string>, scope: string | undefined) =>
+    resolveMenus(env, { domain: ACME, app: 'none', scope }).apps.hide;
+
+  const allExcept = M({ apps: { hide: { scopes: { Reseller: [] }, '*': ['X'] } } });
+  ok(hideForScope(allExcept, 'Office Manager')[0] === 'X', 'scope axis: an unlisted scope gets the default');
+  ok(hideForScope(allExcept, 'Reseller').length === 0, 'scope axis: the named scope is exempted — the motivating case');
+  ok(hideForScope(allExcept, 'Super User')[0] === 'X', 'scope axis does NOT nest: Super User is not covered by a Reseller rung');
+
+  const onlyThese = M({ apps: { hide: { scopes: { 'Office Manager': ['X'], '*': [] } } } });
+  ok(hideForScope(onlyThese, 'Office Manager')[0] === 'X', 'only-these: the named scope gets it');
+  ok(hideForScope(onlyThese, 'Basic User').length === 0, 'only-these: every other scope is untouched');
+
+  // Key spelling: word-form, level-style and the Super User synonyms are all one key.
+  const spellings = M({ apps: { hide: { scopes: { office_manager: ['X'] } } } });
+  ok(hideForScope(spellings, 'Office Manager')[0] === 'X', 'a level-style key matches the NS word-form scope');
+  const su = M({ apps: { hide: { scopes: { 'Super User': ['X'] } } } });
+  ok(hideForScope(su, 'superuser')[0] === 'X' && hideForScope(su, 'super-user')[0] === 'X',
+    'the interchangeable Super User spellings collapse to one key');
+
+  // No scope on the context ⇒ nothing matches; the rule falls through rather than guessing.
+  ok(hideForScope(allExcept, undefined)[0] === 'X', 'an absent scope falls through to the default, never a random rung');
+
+  ok(threw(() => hideForScope(M({ apps: { hide: { scopes: { 'Office Mgr': ['X'] } } } }), 'Reseller')),
+    "a typo'd scope key is a config error, not a silent never-match");
+  ok((menuConfigError(M({ apps: { hide: { scopes: { Resellr: ['X'] } } } })) ?? '').includes('unknown scope'),
+    '...and it is caught at startup, for every deployment, before anyone signs in');
+  ok(threw(() => hideForScope(M({ apps: { hide: { scopes: ['X'] } } }), 'Reseller')), 'scopes must be an object');
+  ok(hideForScope(M({ apps: { hide: { Scopes: { Reseller: ['X'] } } } }), 'Reseller')[0] === 'X',
+    '"Scopes" is the nested scope form, like "App"/"Domains"');
+}
+
+// ── Precedence across all three axes ───────────────────────────────────────
+{
+  const ctx = (domain: string, app: string, scope: string) => ({ domain, app, scope });
+  const combo = M({
+    apps: { hide: { domains: { [ACME]: ['DOM'] }, scopes: { Reseller: ['SCOPE'] }, app: { ringotel: ['APP'] }, '*': ['DEF'] } },
+  });
+  const h = (d: string, a: string, s: string) => resolveMenus(combo, ctx(d, a, s)).apps.hide[0];
+  ok(h(ACME, 'ringotel', 'Reseller') === 'DOM', 'domain beats scope and app');
+  ok(h(OTHER, 'ringotel', 'Reseller') === 'SCOPE', 'scope beats app');
+  ok(h(OTHER, 'ringotel', 'Basic User') === 'APP', 'app still beats the default');
+  ok(h(OTHER, 'none', 'Basic User') === 'DEF', 'default is the last rung');
+
+  // An in-axis "*" is a DEFAULT, so an exact match on a LESS specific axis still wins over it.
+  const starVsExact = M({ apps: { hide: { scopes: { '*': ['SCOPE-STAR'] }, app: { ringotel: ['APP'] } } } });
+  ok(resolveMenus(starVsExact, ctx(ACME, 'ringotel', 'Reseller')).apps.hide[0] === 'APP',
+    'an app-state match beats a scope "*" — a star never outranks a rule that names you');
+  ok(resolveMenus(starVsExact, ctx(ACME, 'none', 'Reseller')).apps.hide[0] === 'SCOPE-STAR',
+    '...and the scope "*" applies when no exact rung matches');
+}
+
+// ── The scope axis is INERT unless a config uses it ────────────────────────
+// It must be possible to add this to a live deployment and have every existing rule resolve identically.
+{
+  const legacyShapes: Array<[string, unknown]> = [
+    ['bare array', { apps: { hide: ['X'] } }],
+    ['flat domain map', { apps: { hide: { '*': ['X'], [OTHER]: [] } } }],
+    ['app axis', { apps: { hide: { app: { ringotel: ['X'], '*': ['Y'] } } } }],
+    ['domains + app + default', { apps: { hide: { domains: { [OTHER]: ['D'] }, app: { ringotel: ['A'] }, '*': ['X'] } } }],
+  ];
+  for (const [name, cfg] of legacyShapes) {
+    const env = M(cfg);
+    for (const app of ['ringotel', 'none']) {
+      const without = JSON.stringify(resolveMenus(env, { domain: ACME, app }).apps);
+      const withScope = JSON.stringify(resolveMenus(env, { domain: ACME, app, scope: 'Reseller' }).apps);
+      ok(without === withScope, `${name} (app=${app}) resolves identically with and without a scope`);
+    }
+  }
+}
+
 // ── resolveTargeted is exported for reuse and behaves standalone ───────────
 {
   const got = resolveTargeted<string>(['A'], { domain: ACME, app: 'none' }, 'p', (v, p) => {

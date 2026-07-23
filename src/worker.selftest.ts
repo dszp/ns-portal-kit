@@ -323,6 +323,12 @@ const ok = (c: boolean, m: string) => {
 
   const ru = await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
   const rub = await ru.json();
+  {
+    // hPIE is a per-user sign-in detail; this org-level route never resolves a user, so it must not
+    // ship it. /me/app-access emits it exactly where it is actionable.
+    const orgBody = await (await roCall(`/rapp/org?domain=${domain}`)).json();
+    ok(!('hPIE' in orgBody), '[ringotel/org] hPIE is NOT disclosed on the org route');
+  }
   ok(ru.status === 200 && rub.active === true && rub.users['100'] && rub.users['100'].activated === true && rub.users['100'].presence === 'active' && rub.users['100'].label === 'Online', '[ringotel/users] active → per-ext status map (presence from state)');
   const ruNone = await roCall(`/rapp/users?domain=readable.example&refresh=ringotel`);
   const ruNoneB = await ruNone.json();

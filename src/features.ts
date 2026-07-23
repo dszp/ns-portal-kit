@@ -36,6 +36,17 @@ export const LEVEL_SCOPES: Record<string, string[]> = {
 };
 export const CC_LEVELS = new Set(['call_center_agent', 'call_center_supervisor']);
 
+/** Every NS scope this deployment knows by name — the union of the sets above plus `Simple User`, which
+ *  has no level of its own (reach it via `all`). Levels NEST; this list does not. It exists so a config
+ *  axis that targets ONE scope exactly (`src/menus.ts` → `scopes`) can reject a typo instead of writing a
+ *  rule that silently never matches. Keep it in sync with LEVEL_SCOPES — `features.selftest.ts` asserts
+ *  every level's scopes appear here, so adding a level without adding its scope fails the tests. */
+export const KNOWN_SCOPES: string[] = [
+  'Super User', 'Reseller', 'Office Manager', 'Site Manager',
+  'Advanced User', 'Basic User', 'Simple User',
+  'Call Center Agent', 'Call Center Supervisor',
+];
+
 /** Push the rule(s) for one named level onto `rules`; returns true iff it's a call-center level.
  *  Throws on `off` (only valid as the whole gate) or an unknown level. */
 function pushLevel(rules: PolicyRule[], level: string, superadmins: string[]): boolean {

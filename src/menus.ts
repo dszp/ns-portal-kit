@@ -4,9 +4,9 @@
  *
  * The whole targeting model is one rule — **a default plus specific overrides** — which is why there is
  * no separate include/exclude syntax. `{"*": [x]}` changes everywhere; adding `{"acme": []}` makes it
- * "everywhere except acme"; `{"*": [], "acme": [x]}` makes it "only acme". The same holds on the app axis.
+ * "everywhere except acme"; `{"*": [], "acme": [x]}` makes it "only acme". The same holds on every axis.
  *
- * Precedence, most specific wins:  domain  →  app state  →  "*"
+ * Precedence, most specific wins:  domain  →  user scope  →  app state  →  "*"
  *
  * A domain key, when present, WINS OUTRIGHT — it is not merged with the app-state list. Merging would
  * make "turn it off here" inexpressible, which is the likeliest reason to reach for an override at all.
@@ -17,6 +17,7 @@
 
 /** Loud, distinct error for bad menu config (⇒ a 500 upstream, like AppAccessConfigError). */
 import { parseHideList } from './appAccess.js';
+import { KNOWN_SCOPES } from './features.js';
 
 export class MenuConfigError extends Error {}
 
@@ -62,9 +63,23 @@ export type AppState = string;
 export interface TargetCtx {
   domain: string;
   app: AppState;
+  /**
+   * This user's EFFECTIVE NS scope (the masked user's when masquerading, like every other authz decision
+   * here), for the `scopes` axis. Absent ⇒ no scope rung can match; the rule falls through as if unlisted.
+   */
+  scope?: string;
   /** This user's own facts, for `{var}` substitution in add entries. Absent ⇒ variables resolve empty. */
   vars?: Record<string, string>;
 }
+
+/**
+ * Canonical form for scope matching: case- and separator-insensitive, so `Office Manager`,
+ * `office_manager` and `officeManager` are one key. It also collapses the interchangeable Super User
+ * spellings a NetSapiens core may emit ("Super User" / "superuser" / "super-user"), the same unification
+ * the policy engine does — a rule written with one spelling must match a token carrying another.
+ */
+const normScope = (s: string): string => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+const KNOWN_SCOPE_KEYS = new Set(KNOWN_SCOPES.map(normScope));
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const norm = (s: string): string => s.trim().toLowerCase();
@@ -156,10 +171,19 @@ function rung<T>(v: unknown, path: string, item: (v: unknown, p: string) => T): 
  * Resolve a TARGETED LIST for one user. Accepted forms:
  *   ["A","B"]                                  — applies everywhere
  *   {"*": [...], "acme.example": [...]}        — by domain, with a default
- *   {"app": {...}, "domains": {...}, "*": [...]} — by app state and/or domain, with a default
+ *   {"app": {...}, "domains": {...}, "scopes": {...}, "*": [...]} — by any axis, with a default
  *
- * `app`/`domains` are reserved keys: their presence selects the nested form. A PBX domain literally named
- * `app` or `domains` is therefore only addressable via the explicit `domains` map.
+ * `app`/`domains`/`scopes` are reserved keys: their presence selects the nested form. A PBX domain
+ * literally named `app`, `domains` or `scopes` is therefore only addressable via the explicit `domains`
+ * map.
+ *
+ * **The `scopes` axis matches ONE scope exactly — it does not nest.** This is the opposite of the feature
+ * levels in `features.ts`, where `office_manager` deliberately means "Office Manager and everyone above".
+ * Nesting is what makes "office managers but NOT resellers" inexpressible there, and expressing exactly
+ * that is why this axis exists: `{"scopes": {"Reseller": []}, "*": [x]}`.
+ *
+ * Selection order: an EXACT match on the most specific axis wins (domain → scope → app); if no axis
+ * matches exactly, an in-axis `"*"` does (same order); then the top-level `"*"`; then nothing.
  */
 export function resolveTargeted<T>(
   raw: unknown,
@@ -192,14 +216,39 @@ export function resolveTargeted<T>(
   // meant `{"App": {...}}` was silently read as a domain literally named "app" — a never-matching rule.
   const appKey = keyOf('app');
   const domainsKey = keyOf('domains');
+  const scopesKey = keyOf('scopes');
 
-  if (appKey !== undefined || domainsKey !== undefined) {
+  if (appKey !== undefined || domainsKey !== undefined || scopesKey !== undefined) {
     let chosen: T[] | undefined;
+    // An in-axis "*", from the most specific axis that carries one. Held back until every axis has had a
+    // chance at an EXACT match, so `{"scopes":{"*":[a]},"app":{"ringotel":[b]}}` gives an app-active user
+    // `b` — a star is a default, and a default must never beat a rule that actually names you.
+    let axisDefault: T[] | undefined;
     if (domainsKey !== undefined) {
       const dmap = raw[domainsKey];
       if (!isObj(dmap)) throw new MenuConfigError(`${path}.domains must be an object`);
       const v = validated(dmap, `${path}.domains`);
       chosen = pickCI(v, dom);
+    }
+    if (scopesKey !== undefined) {
+      const smap = raw[scopesKey];
+      if (!isObj(smap)) throw new MenuConfigError(`${path}.scopes must be an object`);
+      for (const k of Object.keys(smap)) {
+        // `normScope` strips punctuation, so the wildcard has to be recognized BEFORE normalizing —
+        // otherwise "*" normalizes to the empty string and reads as an unknown scope.
+        const kk = normScope(k);
+        // Loud on a typo, exactly like the app axis: `{"Office Mgr": []}` that silently never matches is
+        // a menu that is wrong for someone with nothing anywhere to say why.
+        if (k.trim() !== '*' && !KNOWN_SCOPE_KEYS.has(kk)) {
+          throw new MenuConfigError(`${path}.scopes has an unknown scope "${k}" (known: ${KNOWN_SCOPES.join(', ')})`);
+        }
+      }
+      const v = validated(smap, `${path}.scopes`);
+      const mine = ctx.scope ? normScope(ctx.scope) : '';
+      if (chosen === undefined && mine) {
+        for (const k of Object.keys(v)) if (normScope(k) === mine) { chosen = v[k]; break; }
+      }
+      if (axisDefault === undefined) axisDefault = pickCI(v, '*');
     }
     if (appKey !== undefined) {
       const amap = raw[appKey];
@@ -211,11 +260,12 @@ export function resolveTargeted<T>(
         if (!known) throw new MenuConfigError(`${path}.app has an unknown app "${k}" (known: ${[...APP_NAMES, ...APP_RESERVED].join(', ')})`);
       }
       const v = validated(amap, `${path}.app`);
-      if (chosen === undefined) chosen = pickCI(v, norm(ctx.app)) ?? pickCI(v, '*');
+      if (chosen === undefined) chosen = pickCI(v, norm(ctx.app));
+      if (axisDefault === undefined) axisDefault = pickCI(v, '*');
     }
     const defKey = keyOf('*');
     const def = defKey !== undefined ? rung(raw[defKey], `${path}["*"]`, item) : undefined;
-    return chosen ?? def ?? [];
+    return chosen ?? axisDefault ?? def ?? [];
   }
 
   // Flat form: a domain map, with an optional "*" default. Every entry is validated (see above).
@@ -246,7 +296,7 @@ function rawMenus(env: MenuEnv): Record<string, { hide?: unknown; add?: unknown 
 }
 
 /**
- * The resolved plan for every supported menu, for ONE user's domain + app state.
+ * The resolved plan for every supported menu, for ONE user's domain + scope + app state.
  *
  * `PORTAL_APPS_HIDE` remains supported as the apps-menu hide list (unchanged parsing). Setting BOTH it and
  * `PORTAL_MENUS.apps.hide` is a config ERROR rather than a precedence rule: two places to look for one
@@ -289,6 +339,8 @@ function legacyHide(env: MenuEnv, ctx: TargetCtx): string[] {
 /**
  * Null when the menu config is valid (or absent); a loud, actionable message otherwise. Probed against a
  * fictional domain and each app state, so a bad rung is caught even when today's traffic never reaches it.
+ * Scope rungs need no probe sweep — every rung of every axis is validated eagerly on any resolution, and
+ * an unknown scope KEY is rejected whether or not it matches the caller.
  */
 export function menuConfigError(env: MenuEnv): string | null {
   try {
