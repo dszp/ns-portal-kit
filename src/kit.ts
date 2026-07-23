@@ -729,9 +729,15 @@ function acctUl(){
 var scopes=[document.querySelector('ul.user-toolbar'),document];
 for(var s=0;s<scopes.length;s++){var root=scopes[s];if(!root)continue;
 // Log Out is the one entry present in every variant of this menu, so it is the primary anchor.
-var ls=root.querySelectorAll('ul.dropdown-menu');
-for(var i=0;i<ls.length;i++){if(ls[i].id!=='app-menu-list'&&hasSignOut(ls[i]))return ls[i]}
-// Fallback if a deployment relabels it: the dropdown holding this user's own profile link.
+// Prefer a menu carrying BOTH signals — a sign-out entry AND this user's own profile link. Either
+// alone can appear on some other dropdown; together they identify the account menu. Sign-out alone is
+// the fallback (some variants show no profile link), and the profile link alone is the last resort.
+var ls=root.querySelectorAll('ul.dropdown-menu'),soOnly=null;
+for(var i=0;i<ls.length;i++){var u=ls[i];
+if(u.id==='app-menu-list'||!hasSignOut(u))continue;
+if(u.querySelector('a[href*="/portal/users/edit/profile/"]'))return u;
+if(!soOnly)soOnly=u}
+if(soOnly)return soOnly;
 var a=root.querySelector('ul.dropdown-menu a[href*="/portal/users/edit/profile/"]');
 var ul=a&&a.closest('ul.dropdown-menu');if(ul)return ul}
 return null}

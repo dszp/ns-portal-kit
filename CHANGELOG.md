@@ -20,7 +20,37 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
-## [Unreleased]
+## [0.2.15] — 2026-07-22
+
+### Added
+
+- **Menu rules can target a user's role.** Alongside "which domain" and "which app is active", a menu rule
+  may now name the NetSapiens **user scopes** it applies to — so a support link can reach office managers
+  and their users while leaving administrators' menus untouched, or a stock entry can be hidden only from
+  the people it confuses. It reads like every other axis (`{"scopes": {"Reseller": []}, "*": [...]}`) and
+  slots into the same precedence, most specific first: domain, then scope, then app state, then the
+  default.
+
+  Unlike the feature levels, a scope here means **exactly** that scope and does not include the ones above
+  it — which is what makes "office managers but not resellers" expressible at all. A scope this deployment
+  does not know is a startup error rather than a rule that silently never matches, and existing menu
+  configurations resolve exactly as before: the axis does nothing until a rule names it. While a user is
+  masqueraded, the masqueraded user's scope is the one that matches, so an administrator sees the menu that
+  user sees. See [SETUP.md](./SETUP.md#customizing-portal-menus-portal_menus).
+
+### Changed
+
+- **The organization-status route no longer returns the credentials-email flag.** That flag only means
+  something once a specific user has been resolved to the app-password path, which an organization-level
+  route never does — the user-facing route emits it exactly where it is actionable. Nothing consumed it
+  here. This makes "returned only where it is actionable" true on both routes rather than one.
+
+### Fixed
+
+- **The account menu is identified more reliably.** A menu carrying *both* a sign-out entry and the
+  signed-in user's own profile link is now preferred over one carrying only a sign-out entry, since either
+  signal alone can appear on an unrelated dropdown. Sign-out alone remains the fallback, and the profile
+  link alone the last resort, so variants that show neither together still work.
 
 ## [0.2.14] — 2026-07-22
 
@@ -486,7 +516,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.14...HEAD
+[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.15...HEAD
+[0.2.15]: https://github.com/dszp/ns-portal-kit/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.14
 [0.2.13]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.13
 [0.2.12]: https://github.com/dszp/ns-portal-kit/releases/tag/v0.2.12

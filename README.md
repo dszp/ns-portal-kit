@@ -40,7 +40,9 @@ button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
   *user-visible* sign-in message for the person they are editing, so they can talk them through it or see
   why that user is not set up yet. *Portal backend mode only.*
 - **Menu customization** — add and hide entries in the portal's Apps menu and the user's own account
-  dropdown, optionally **conditional on whether an app is actually active** for that domain. Added links
+  dropdown, targeted by domain, by the signed-in user's **role**, and by whether an app is actually active
+  for that domain — so a support link can reach office managers and their users without cluttering an
+  administrator's menu. Added links
   are static (label + `https://` or `mailto:`) and can interpolate the signed-in user's own details plus
   the page they are on, which makes a "get help" link arrive already identified. *Portal backend mode
   only.* See [SETUP.md](./SETUP.md#customizing-portal-menus-portal_menus).

@@ -1,6 +1,6 @@
 /** Offline test for the feature-gating level vocabulary + gate resolution. pnpm test:features */
 import { isAllowed, toPrincipal, can, type Principal } from '@dszp/netsapiens-lib';
-import { resolveGate, FeaturesConfigError, resolveFeaturePolicies, featuresConfigError, FEATURE_REGISTRY } from './features.js';
+import { resolveGate, FeaturesConfigError, resolveFeaturePolicies, featuresConfigError, FEATURE_REGISTRY, LEVEL_SCOPES, KNOWN_SCOPES } from './features.js';
 
 const P = (scope: string, id = 'u@d.example', maskChain?: string): Principal =>
   toPrincipal({ user: 'u', domain: 'd.example', sub: id, scope, ...(maskChain ? { maskChain } : {}) } as any);
@@ -126,6 +126,17 @@ const selfPolicies = resolveFeaturePolicies({});
 ok(FEATURE_REGISTRY.some((f) => f.key === 'me.appAccess'), 'registry has me.appAccess');
 ok(can(P('Basic User'), 'me.appAccess', selfPolicies), 'me.appAccess default admits a Basic User');
 ok(can(P('Reseller'), 'me.appAccess', selfPolicies), 'me.appAccess default admits a Reseller');
+
+// ── KNOWN_SCOPES is the scope vocabulary the menu `scopes` axis validates against ─────────────
+// A level whose scope is missing here would make a legitimate menu rule read as a typo, so the two lists
+// have to move together.
+{
+  const canon = (s: string) => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const known = new Set(KNOWN_SCOPES.map(canon));
+  const missing = Object.values(LEVEL_SCOPES).flat().filter((s) => !known.has(canon(s)));
+  ok(missing.length === 0, `every LEVEL_SCOPES scope appears in KNOWN_SCOPES${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`);
+  ok(known.has(canon('Simple User')), 'KNOWN_SCOPES also carries Simple User, which has no level of its own');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
