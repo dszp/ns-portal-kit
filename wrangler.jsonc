@@ -34,6 +34,34 @@
     // REQUIRED: your NetSapiens API host (no scheme). Base URL becomes https://{NS_SERVER}/ns-api/v2.
     "NS_SERVER": "api.example.com",
 
+    // Cache-key namespace for THIS deployment. A single deployment can leave this alone.
+    //
+    // Set a DISTINCT value per environment as soon as you run more than one Worker on the same zone (say
+    // production plus a staging copy). Cloudflare's `caches.default` is shared zone-wide, not per-Worker,
+    // so identical values mean the two share one set of cached app-provider entries: production
+    // invalidates a cached organization after a write, staging's next read immediately repopulates that
+    // same key, and production then serves staging's data until the TTL lapses.
+    //
+    // Two traps worth knowing: `vars` are NOT inherited into `env.*` blocks, so a value here does not
+    // reach them and each block needs its own; and do not try to derive it from the request hostname,
+    // because `scheduled()` has no request and the cron would then use a different key than the fetch
+    // path -- two caches that never see each other's writes.
+    "CACHE_SCOPE": "default",
+
+    // ── OPTIONAL: NetSapiens event subscriptions (src/nsEvents.ts) ────────────────────────────────
+    // Leave unset and nothing changes: the receiver route is absent and the scheduled reconcile no-ops.
+    // Setting all four below arms it. See SETUP.md for the full description.
+    //   "NS_EVENTS": "auto",                 // "auto" (default) | "on" | "off"
+    //   "NS_EVENTS_DOMAINS": "acme.example.com",  // CSV, or "*" for everything the write rail allows
+    //   "NS_EVENTS_BASE_URL": "https://portal.example.com",  // THIS deployment's public origin.
+    //        Must differ per deployment: subscription ownership is decided by post-url prefix, so two
+    //        deployments sharing an origin would fight over one subscription set.
+    // Secrets (never here) — `wrangler secret put <NAME>`:
+    //   NS_EVENTS_PATH_SECRET  master key for the per-domain callback token
+    //   NS_API_KEY             the background service identity, used when an event has no caller.
+    //        NOT the same as NS_API_TOKEN, and there is no fallback between them. Prefer a dedicated
+    //        least-privilege key restricted by allowed-models / domain / ip-address.
+
     // REQUIRED for delegated/portal auth: the Manager Portal host that issues your ns_t.
     // There is deliberately no default — a default issuer would mean accepting tokens minted by a
     // portal you don't control. Comma-separate if one backend is fronted by several portal hostnames
@@ -91,7 +119,7 @@
   //   "prod": {
   //     "name": "ns-portal-kit-prod",
   //     "routes": [{ "pattern": "portal.example.com", "custom_domain": true }],
-  //     "vars": { "NS_SERVER": "api.example.com", "NS_PORTAL_ISS": "manage.example.com", "PORTAL_MODE": "1" }
+  //     "vars": { "NS_SERVER": "api.example.com", "NS_PORTAL_ISS": "manage.example.com", "PORTAL_MODE": "1", "CACHE_SCOPE": "prod" }
   //   }
   // }
 }

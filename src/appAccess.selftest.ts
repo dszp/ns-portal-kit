@@ -1,5 +1,5 @@
 /** Offline test for app-access config parsing + the sign-in mode matrix. pnpm test:appaccess */
-import { ssoEnabled, autoActivates, parseDownloads, parseHideList, AppAccessConfigError, resolveAppAccess, appAccessConfigError, type AppAccessInput } from './appAccess.js';
+import { ssoEnabled, autoActivates, parseDownloads, parseHideList, AppAccessConfigError, resolveAppAccess, appAccessConfigError, appStatusView, type AppAccessInput } from './appAccess.js';
 
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => { c ? pass++ : fail++; console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); };
@@ -123,5 +123,17 @@ ok(appAccessConfigError({}) === null, 'no config at all ⇒ valid (null)');
 ok(appAccessConfigError({ PORTAL_APP_DOWNLOADS: '[{"label":"Get it","url":"https://e.example/app"}]', PORTAL_APPS_HIDE: 'A,B' }) === null, 'well-formed config ⇒ valid (null)');
 ok(typeof appAccessConfigError({ PORTAL_APP_DOWNLOADS: 'not json' }) === 'string', 'bad PORTAL_APP_DOWNLOADS ⇒ a loud message, not a throw');
 ok(typeof appAccessConfigError({ PORTAL_APPS_HIDE: '{"a":"b"}' }) === 'string', 'bad PORTAL_APPS_HIDE ⇒ a loud message, not a throw');
+
+// ── the connection name reaches the client ────────────────────────────────────
+{
+  const single = appStatusView({ activated: true, presence: 'active', label: 'Online', state: 1, devices: 1, lastSeen: 0, health: { flags: [], severity: 'ok' } });
+  ok(single.connection === undefined, 'view: no connection line on a single-connection domain');
+
+  const multi = appStatusView({ activated: true, presence: 'active', label: 'Online', state: 1, devices: 1, lastSeen: 0, health: { flags: [], severity: 'ok' }, connection: 'Warehouse' });
+  ok(multi.connection === 'Warehouse', 'view: the connection NAME is shown when the domain has several');
+
+  const clash = appStatusView({ activated: true, presence: 'active', label: 'Online', state: 1, devices: 1, lastSeen: 0, health: { flags: [], severity: 'ok' }, connection: 'Main', connectionConflict: true });
+  ok(clash.warning === 'connection-conflict', 'view: a conflicting extension warns instead of quietly showing one connection');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);

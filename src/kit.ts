@@ -61,6 +61,13 @@ export const FEATURE_KEYS = [
   { flag: 'activate', key: 'ringotel.activate' },
   { flag: 'resetPassword', key: 'ringotel.resetPassword' },
   { flag: 'profileAppAccess', key: 'ringotel.profileAppAccess' },
+  // Drives the users-list freshness control. That list stays cached ~10 minutes on purpose (it is a bulk
+  // view; making it always-fresh would put a getUsers on every page view of a large domain), so the
+  // honest answer is to SHOW how old it is and give whoever may force a re-read a way to do it.
+  // `?refresh=ringotel` has existed all along with NO UI, which meant the only way to clear a stale read
+  // was to know the query parameter. Same key the route enforces — the flag only decides whether the
+  // control is drawn, never whether the refresh is permitted.
+  { flag: 'refresh', key: 'ringotel.refresh' },
 ] as const;
 
 /** All policy keys a principal is tested against for the bundle (in registry order). */
@@ -395,18 +402,49 @@ function colOn(){try{return localStorage.getItem(UK)!=='0'}catch(e){return true}
 function colSet(v){try{localStorage.setItem(UK,v?'1':'0')}catch(e){}colApply()}
 function colApply(){var on=colOn(),e=document.querySelectorAll('.svx-appcol');for(var i=0;i<e.length;i++)e[i].classList.toggle('hide',!on);var c=document.querySelector('.svx-appopt');if(c)c.checked=on}
 function svdot(c){var s=document.createElement('span');s.style.cssText='display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:middle;margin-left:5px;background:'+c;return s}
-function colFill(){var t=document.querySelectorAll('td.svx-appcol');for(var i=0;i<t.length;i++){var td=t[i],s=_uD[td.getAttribute('data-ext')],st='',ti='';if(s&&s.activated){st=s.presence||'offline';ti=s.label||'';if(s.devices)ti+=' · '+s.devices+' device'+(s.devices===1?'':'s');if(st==='offline'&&s.lastSeen){try{ti+=' · last seen '+new Date(s.lastSeen).toLocaleDateString()}catch(e){}}}var _h=s&&s.health&&s.health.flags&&s.health.flags.length?s.health:null;if(_h){ti=(ti?ti+' · ':'')+_h.flags.join(', ');if(_h.severity==='broken')st=st?st+' broken':'broken'}if(td.getAttribute('data-st')!==st){td.setAttribute('data-st',st);td.textContent='';if(st){var _b=st.indexOf('broken')!==-1;var _p=st.split(' ')[0];td.appendChild(document.createTextNode(_b?'⚠️':'📱'));td.appendChild(svdot(_b?'#d93025':_p==='active'?'#3ba55d':_p==='pbx'?'#e8930c':'#9aa0a6'))}}if(td.title!==ti)td.title=ti}}
+function colFill(){var t=document.querySelectorAll('td.svx-appcol');for(var i=0;i<t.length;i++){var td=t[i],s=_uD[td.getAttribute('data-ext')],st='',ti='';if(s&&s.activated){st=s.presence||'offline';ti=s.label||'';if(s.devices)ti+=' · '+s.devices+' device'+(s.devices===1?'':'s');if(st==='offline'&&s.lastSeen){try{ti+=' · last seen '+new Date(s.lastSeen).toLocaleDateString()}catch(e){}}}var _h=s&&s.health&&s.health.flags&&s.health.flags.length?s.health:null;if(_h){ti=(ti?ti+' · ':'')+_h.flags.join(', ');if(_h.severity==='broken')st=st?st+' broken':'broken'}if(s&&s.warning){ti=(ti?ti+' · ':'')+'connection conflict';st=st?st+' broken':'broken'}else if(s&&s.connection){ti=(ti?ti+' · ':'')+s.connection}if(td.getAttribute('data-st')!==st){td.setAttribute('data-st',st);td.textContent='';if(st){var _b=st.indexOf('broken')!==-1;var _p=st.split(' ')[0];td.appendChild(document.createTextNode(_b?'⚠️':'📱'));td.appendChild(svdot(_b?'#d93025':_p==='active'?'#3ba55d':_p==='pbx'?'#e8930c':'#9aa0a6'))}}if(td.title!==ti)td.title=ti}}
 function colMenu(){var o=document.querySelector('label.checkbox input[data-table="user"]'),m=o&&o.closest('label.checkbox').parentNode;if(!m||m.querySelector('.svx-appopt'))return;var l=document.createElement('label');l.className='checkbox';var c=document.createElement('input');c.type='checkbox';c.className='svx-appopt';c.checked=colOn();c.addEventListener('change',function(e){e.stopPropagation();colSet(c.checked)});l.appendChild(c);l.appendChild(document.createTextNode(' '+_KC.labelShort));m.appendChild(l)}
-function colBuild(){var hr=document.querySelector('thead tr');if(!hr)return;var th=hr.querySelector('th.svx-appcol');if(!th){th=document.createElement('th');th.className='svapp-header svapp svx-appcol';th.textContent=_KC.labelShort;th.style.textAlign='center';var a=hr.querySelector('th.department-header')||hr.querySelector('th.department')||hr.lastElementChild;hr.insertBefore(th,a)}var j=[].indexOf.call(hr.children,th);var cbs=document.querySelectorAll('input.userChkBox[data-extension]');for(var i=0;i<cbs.length;i++){var tr=cbs[i].closest('tr');if(!tr||tr.querySelector('td.svx-appcol'))continue;var td=document.createElement('td');td.className='svapp svx-appcol';td.style.whiteSpace='nowrap';td.style.textAlign='center';td.setAttribute('data-ext',cbs[i].getAttribute('data-extension'));tr.insertBefore(td,tr.children[j]||null)}colMenu();colApply();colFill()}
+function colBuild(){var hr=document.querySelector('thead tr');if(!hr)return;var th=hr.querySelector('th.svx-appcol');if(!th){th=document.createElement('th');th.className='svapp-header svapp svx-appcol';th.textContent=_KC.labelShort;th.style.textAlign='center';var a=hr.querySelector('th.department-header')||hr.querySelector('th.department')||hr.lastElementChild;hr.insertBefore(th,a)}var j=[].indexOf.call(hr.children,th);var cbs=document.querySelectorAll('input.userChkBox[data-extension]');for(var i=0;i<cbs.length;i++){var tr=cbs[i].closest('tr');if(!tr||tr.querySelector('td.svx-appcol'))continue;var td=document.createElement('td');td.className='svapp svx-appcol';td.style.whiteSpace='nowrap';td.style.textAlign='center';td.setAttribute('data-ext',cbs[i].getAttribute('data-extension'));tr.insertBefore(td,tr.children[j]||null)}colFresh(th);colMenu();colApply();colFill()}
 function colRemove(){var e=document.querySelectorAll('.svx-appcol,.svx-appopt');for(var i=0;i<e.length;i++){var n=e[i];if(n.classList.contains('svx-appopt')){var lb=n.closest('label');if(lb)lb.remove()}else n.remove()}}
-var _uD={},_uAct=false,_uDom=null,_uOb=0,_uRaf=0,_uBusy=false;
+var _uD={},_uAct=false,_uDom=null,_uOb=0,_uRaf=0,_uBusy=false,_uAge=null,_uT=0;
+// Human age of the cached read. A silent wrong answer is worse than a visibly old one -- this column is
+// deliberately served from a ~10-minute cache, so it says so rather than presenting stale activation
+// state as current.
+function ageTxt(s){if(s==null)return '';if(s<45)return 'just now';var m=Math.round(s/60);if(m<60)return m+'m ago';var h=Math.floor(m/60);return h+'h '+(m%60)+'m ago'}
+// Server-reported age PLUS the time since we received it, so each RENDER shows the true age rather than
+// whatever it was when the data arrived. It does not tick on its own -- colFresh runs from colBuild,
+// which runs from the MutationObserver -- so on a page nobody touches the tooltip holds its last value.
+function uAgeNow(){return _uAge==null?null:_uAge+Math.floor((Date.now()-_uT)/1000)}
+// The 'force' argument sends the NEUTRAL ?refresh=1 -- these bytes are read in devtools by admins of a
+// white-labeled deployment, so no vendor name goes in them (same reason the routes are /rapp/*). The
+// server decides whether that caller may actually force a re-dig and coalesces it; a refused one simply
+// reads the cache, so the worst a client can do by asking is get the same answer back.
+function uFetch(d,force){
+_uAct=false;_uD={};_uAge=null;_uBusy=true;
+jget('/rapp/users?domain='+encodeURIComponent(d)+(force?'&refresh=1':'')).then(function(r){
+_uAct=!!(r&&r.active);_uD=(r&&r.users)||{};_uAge=(r&&typeof r.age==='number')?r.age:null;_uT=Date.now();_uBusy=false;uSched()
+}).catch(function(){_uAct=false;_uD={};_uAge=null;_uBusy=false;uSched()})}
+// The age + refresh affordance on the column header. Re-applied on every render (colBuild runs from a
+// MutationObserver), so the label tracks the data instead of the moment the header was created.
+function colFresh(th){
+var a=uAgeNow();
+th.title=_KC.label+(a==null?'':' \u2014 data as of '+ageTxt(a));
+var r=th.querySelector('a.svx-rfr');
+if(!_AF.refresh){if(r)r.remove();return}
+if(!r){r=document.createElement('a');r.className='svx-rfr';r.href='javascript:void(0)';r.textContent='\u27f3';
+r.style.cssText='margin-left:6px;text-decoration:none;font-weight:normal;opacity:.6';
+r.addEventListener('click',function(e){e.preventDefault();if(_uBusy||!_uDom)return;r.style.opacity='.25';uFetch(_uDom,true)});
+th.appendChild(r)}
+r.style.opacity=_uBusy?'.25':'.6';
+r.title='Refresh '+_KC.label+' data'+(a==null?'':' (currently '+ageTxt(a)+')');
+}
 function uSched(){if(_uRaf)return;_uRaf=requestAnimationFrame(function(){_uRaf=0;try{usersCol()}catch(e){}})}
 function usersCol(){
 if(!/^\/portal\/users\/?($|index)/.test(location.pathname))return;
 if(!_AF.userStatus){colRemove();return}
 if(!_uOb){_uOb=1;new MutationObserver(uSched).observe(document.body,{childList:true,subtree:true})}
 var d=dom();if(!d){colRemove();return}
-if(_uDom!==d){_uDom=d;_uAct=false;_uD={};_uBusy=true;jget('/rapp/users?domain='+encodeURIComponent(d)).then(function(r){_uAct=!!(r&&r.active);_uD=(r&&r.users)||{};_uBusy=false;uSched()}).catch(function(){_uAct=false;_uD={};_uBusy=false})}
+if(_uDom!==d){_uDom=d;uFetch(d,false)}
 if(_uBusy)return;
 if(_uAct)colBuild();else colRemove();
 }
@@ -482,7 +520,38 @@ var _rtMap=null,_rtBusy=false;
 function rtTable(){return document.querySelector('table.fixed-table-header')}
 function rtHeader(){var t=rtTable();if(!t)return;var hrs=t.querySelectorAll(':scope > thead > tr');for(var i=0;i<hrs.length;i++){var hr=hrs[i];if(hr.querySelector('th.svx-rtcol'))continue;var after=hr.children[1];if(!after)continue;var th=document.createElement('th');th.className='svx-rtcol';th.textContent=_KC.labelShort;th.style.textAlign='center';hr.insertBefore(th,after)}}
 function rtFill(){var t=rtTable();if(!t||!_rtMap)return;var rows=t.querySelectorAll(':scope > tbody > tr');for(var i=0;i<rows.length;i++){var tr=rows[i];if(tr.querySelector('td.svx-rtcol'))continue;var dc=tr.children[1];if(!dc)continue;var la=tr.children[0]&&tr.children[0].querySelector('a');var d=la?(la.textContent||'').trim().toLowerCase():'';var td=document.createElement('td');td.className='svx-rtcol';td.style.textAlign='center';td.style.whiteSpace='nowrap';var e=(d&&Object.prototype.hasOwnProperty.call(_rtMap,d))?_rtMap[d]:null,el;if(e){if(_KC.appBase){el=document.createElement('a');el.href=_KC.appBase+'/account/en-US/#/orgs/'+encodeURIComponent(e.orgId)+'/dashboard';el.target='_blank';el.rel='noopener noreferrer';el.style.textDecoration='none'}else{el=document.createElement('span')}el.style.fontSize='16px';if(e.appDomain)el.title='App Domain: '+e.appDomain;el.textContent='☁'}else{el=document.createElement('span');el.textContent='–';el.style.color='#9aa0a6'}td.appendChild(el);tr.insertBefore(td,dc)}}
-function domCol(){if(_rtMap){rtHeader();rtFill();return}if(_rtBusy)return;_rtBusy=true;jget('/rapp/orgs').then(function(r){_rtMap=(r&&r.enabled)||{}}).catch(function(){_rtMap={}}).then(function(){_rtBusy=false;rtHeader();rtFill();var t=rtTable(),tb=t&&t.querySelector(':scope > tbody');if(tb&&!tb._svxRt){tb._svxRt=1;new MutationObserver(function(){rtFill()}).observe(tb,{childList:true})}})}
+// rtFill SKIPS any row that already carries a cell, so a forced re-read must drop the old cells or the
+// new map lands in memory and nothing on screen changes. Cells only -- the header stays, so the column
+// never briefly loses its th and misaligns the row above.
+function rtClear(){var e=document.querySelectorAll('td.svx-rtcol');for(var i=0;i<e.length;i++)e[i].remove()}
+// force=true re-reads the org list with the server-side directory re-dig (?refresh=1) instead of serving the
+// per-page-load memo, and repaints. On a FORCED read that fails we keep the map we already had: blanking a
+// good column to '–' would report every domain as not enabled, which is worse than showing it a minute old.
+function domCol(force){if(_rtMap&&!force){rtHeader();rtFill();return}if(_rtBusy)return;_rtBusy=true;jget('/rapp/orgs'+(force?'?refresh=1':'')).then(function(r){_rtMap=(r&&r.enabled)||{}}).catch(function(){if(!_rtMap)_rtMap={}}).then(function(){_rtBusy=false;if(force)rtClear();rtHeader();rtFill();var t=rtTable(),tb=t&&t.querySelector(':scope > tbody');if(tb&&!tb._svxRt){tb._svxRt=1;new MutationObserver(function(){rtFill()}).observe(tb,{childList:true})}})}
+// The portal's OWN table-reload button (#pageRefresh, present on both the domains and users lists) reloads
+// the NS table in place. Piggyback a forced re-read of our data on it, because otherwise the only refresh
+// control lives INSIDE the app column -- which is not drawn for a domain that has no org yet, i.e. exactly
+// the domain someone is refreshing after enabling one.
+//
+// Delegated in the CAPTURE phase off document so it survives the portal re-creating the button during its
+// own redraw, and needs no ordering against page load. It never interferes with the NS refresh this button
+// exists for: no preventDefault, no stopPropagation, and its own failure is swallowed.
+function pgRefresh(){
+if(pgRefresh._on)return;pgRefresh._on=1;
+document.addEventListener('click',function(e){
+var t=e.target;if(!t||!t.closest||!t.closest('#pageRefresh'))return;
+// Forcing a fleet-wide re-dig is gated on the same key the route enforces. A caller without it would be
+// refused server-side, so asking is pointless -- their click stays an ordinary NS table reload.
+if(!_AF.refresh)return;
+try{
+if(/^\/portal\/domains\/?($|index)/.test(location.pathname)){if(resList())domCol(true)}
+// The SAME call the column's own refresh control makes -- one intent, one code path, so the two controls
+// cannot drift. uFetch runs even when the domain resolves to no org, which is what lets the column APPEAR
+// here rather than only refreshing one that is already drawn.
+else if(/^\/portal\/users\/?($|index)/.test(location.pathname)){if(_AF.userStatus&&_uDom)uFetch(_uDom,true)}
+}catch(x){}
+},true);
+}
 function _kscope(){try{var t=tok();if(!t)return '';var p=t.split('.')[1];if(!p)return '';var j=JSON.parse(decodeURIComponent(escape(atob(p.replace(/-/g,'+').replace(/_/g,'/')))));return ''+(j.user_scope||j.scope||'')}catch(e){return ''}}
 function _isRes(){var s=_kscope().toLowerCase();return s==='reseller'||s==='super user'||s==='superuser'||s==='super-user'}
 // Pending-change flag: set when WE trigger an activate/deactivate (Save or force); consumed once on the
@@ -501,7 +570,7 @@ function el(){return new Date().getTime()-t0}
 function fin(r){if(fired)return;fired=true;try{cb(r)}catch(e){}}
 function nap(){return el()<3000?300:1000}
 setTimeout(function(){fin(null)},10500);
-(function tick(){if(fired)return;jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)+'&fresh=1').then(function(r2){if(fired)return;var now=!!(r2&&r2.status&&r2.status.activated);if(now===want||el()>=10000){fin(r2)}else{setTimeout(tick,nap())}}).catch(function(){if(fired)return;if(el()>=10000){fin(null)}else{setTimeout(tick,nap())}})})()
+(function tick(){if(fired)return;jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)+'&fresh=1&poll=1').then(function(r2){if(fired)return;var now=!!(r2&&r2.status&&r2.status.activated);if(now===want||el()>=10000){fin(r2)}else{setTimeout(tick,nap())}}).catch(function(){if(fired)return;if(el()>=10000){fin(null)}else{setTimeout(tick,nap())}})})()
 }
 function profExt(){try{
 // The profile page's OWN extension is authoritative for WHOSE profile this is — derive it from the URL
@@ -596,6 +665,14 @@ fb.style.cssText='display:block;margin-top:8px;background:#f5f5f5;color:#333;bor
 fb.addEventListener('click',function(){if(!confirm('Force-activate '+_KC.label+' for this user, overriding the exclusion?'))return;fb.disabled=true;fb.textContent='Activating…';jpost('/rapp/activate',{domain:d,ext:ext,activate:true,force:true}).then(function(){pollUntil(d,ext,true,function(r2){if(r2&&r2.status&&r2.status.activated){rebuildAct(panel,d,ext,email,{active:r2.active,status:r2.status,eligibility:r&&r.eligibility})}else{fb.textContent='Activated — reload to refresh'}})}).catch(function(e){fb.disabled=false;fb.textContent='Force-activate App';alert('Force-activate failed: '+(e&&e.message?e.message:e))})});
 cc.appendChild(fb);
 }
+// Which app connection this record sits on -- an operator looking at a user who cannot sign in needs
+// this before anything else makes sense. A conflict (records on two DIFFERENT connections) reads as a
+// problem, same red as the disabled-control messaging above; a plain connection name is neutral info.
+if(r&&r.status&&(r.status.warning||r.status.connection)){
+var cn=document.createElement('div');cn.style.cssText='font-size:12px;margin-top:6px;color:'+(r.status.warning?'#c0392b':'#6b747c');
+cn.textContent=r.status.warning?'Connection conflict — this extension has records on more than one connection.':'Connection: '+r.status.connection;
+cc.appendChild(cn);
+}
 fs.appendChild(cl);fs.appendChild(cc);
 // User-visible app sign-in message — the SAME projection + verbiage the user sees (r.appAccess from
 // /rapp/user, rendered via the shared aaModel), so the operator sees a masqueraded copy. Gated on
@@ -640,8 +717,14 @@ if(_actSched||document.getElementById('_svx_act'))return;
 var panel=document.querySelector('.profile-panel-main');if(!panel)return;
 var d=dom();if(!d)return;var ext=profExt();if(!ext)return;
 _actSched=true;var email=profEmail();
-// Phase 1: cached read → instant display (actSection then does a ~1s live poll to catch a just-saved change).
-jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)).then(function(r){_actSched=false;actSection(panel,d,ext,email,r)}).catch(function(){_actSched=false});
+// FRESH on load, not cached. The cached org-user list is ~10 minutes old and is invalidated only by
+// OUR OWN writes -- so a plain reload, or any change made elsewhere (in the Ringotel admin, or by the
+// SSO worker provisioning a user on first login), showed the pre-change state here for up to the TTL.
+// Bounded cost: one getUsers per profile view, which is precisely the page where someone is mid-change.
+// The bulk users LIST deliberately stays cached; it gets a visible age + refresh control instead.
+// poll=1 is NOT set, so the eligibility + app-access reads still happen -- see the two flags in
+// worker.ts's /rapp/user route.
+jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)+'&fresh=1').then(function(r){_actSched=false;actSection(panel,d,ext,email,r)}).catch(function(){_actSched=false});
 }
 var F=[
 {p:/^\//,m:banner},
@@ -653,6 +736,9 @@ var F=[
 {p:/^\/portal\/users\/?($|index)/,m:usersCol},
 {p:/^\/portal\/(users|answerrules|phones)/,m:usredit,a:cfAud},
 {p:/^\/portal\/domains\/?($|index)/,m:domCol,a:resList},
+// Installed on both list pages, once (self-guarded). No activation gate here -- the handler decides per click, so a
+// policy flag read at install time can't go stale against the page it fires on.
+{p:/^\/portal\/(domains|users)\/?($|index)/,m:pgRefresh},
 {p:/^\/portal\//,m:profileActivation,a:function(){return !!_AF.profileStatus}}
 ];
 function run(){for(var i=0;i<F.length;i++){try{var f=F[i];if(f.p.test(location.pathname)&&(!f.a||f.a()))f.m()}catch(e){}}}

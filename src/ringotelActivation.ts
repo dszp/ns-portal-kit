@@ -20,9 +20,12 @@
  * eligibility, auth, and cache invalidation.
  */
 import type { User } from '@dszp/ringotel-lib';
+// Device orchestration is SHARED with ringotel-ns-sso via the library — two hand-maintained copies of
+// "reuse or rotate the SIP credential" is exactly the drift that produced SSO bricks before.
+import { ensureNsDevice, generateSipPassword, SIP_PW_FIELD } from '@dszp/netsapiens-lib';
 
-/** The NS device field carrying the auto-generated SIP registration password (v2). */
-export const SIP_PW_FIELD = 'device-sip-registration-password';
+/** Re-exported from the library so existing importers here keep working. */
+export { SIP_PW_FIELD, generateSipPassword };
 
 type Rec = Record<string, unknown>;
 
@@ -44,6 +47,8 @@ export interface DeviceWriter {
   getDevice(domain: string, user: string, device: string): Promise<Rec>;
   createDevice(domain: string, user: string, device: string, extra?: Rec): Promise<Rec>;
   deleteDevice(domain: string, user: string, device: string): Promise<Rec>;
+  /** Used only to rotate the SIP password in place — see `ensureDevice`'s `rotateExisting`. */
+  updateDevice(domain: string, user: string, device: string, changes: Rec): Promise<Rec>;
 }
 
 /** Subset of RingotelWriteClient the orchestration needs (return types loose at the mock seam). */
@@ -80,6 +85,11 @@ export interface ActivationOpts {
    * read failure, never `''`.
    */
   email?: string;
+  /**
+   * Rotate the SIP password when the `<ext><suffix>` device ALREADY existed. See `ensureDevice`.
+   * The worker decides (config); the default at this layer is off so nothing rotates implicitly.
+   */
+  rotateExistingDevice?: boolean;
 }
 
 export interface ActivationResult {
@@ -98,28 +108,49 @@ export function isDomainWritable(domain: string, writeDomains: string[] | '*'): 
  * omit the password, so a per-device GET fetches it); if missing, create it (synchronous:'yes' returns
  * the generated password inline).
  */
+/**
+ * Ensure the NS softphone device exists and return its SIP password — a thin delegation to the library's
+ * `ensureNsDevice`, keeping this module's positional signature so existing callers and selftests are
+ * unaffected.
+ *
+ * `rotateExisting` replaces the password of a device that ALREADY existed. See the library for the full
+ * reasoning; the short version is that reusing the stored password leaves any other endpoint holding it
+ * able to register as the same AOR, and the two then fight over the registration. Rotate only where a
+ * human (or a first-time provision) has just declared this extension to be the app's — never on a
+ * per-login path, where concurrent runs would churn the credential.
+ */
 export async function ensureDevice(
   nsWrite: DeviceWriter,
   domain: string,
   ext: string,
   deviceName: string,
-): Promise<{ password: string; created: boolean }> {
-  const devices = await nsWrite.getDevices(domain, ext);
-  const existing = devices.find((d) => String(d.device ?? '') === deviceName);
-  if (existing) {
-    const dev = await nsWrite.getDevice(domain, ext, deviceName);
-    return { password: String(dev[SIP_PW_FIELD] ?? existing[SIP_PW_FIELD] ?? ''), created: false };
-  }
-  const created = await nsWrite.createDevice(domain, ext, deviceName);
-  return { password: String(created[SIP_PW_FIELD] ?? ''), created: true };
+  opts: { rotateExisting?: boolean; mayCreate?: boolean } = {},
+): Promise<{ password: string; created: boolean; rotated?: boolean; rotateError?: string }> {
+  return ensureNsDevice(nsWrite, {
+    domain,
+    user: ext,
+    device: deviceName,
+    ...(opts.rotateExisting !== undefined ? { rotateExisting: opts.rotateExisting } : {}),
+    ...(opts.mayCreate !== undefined ? { mayCreate: opts.mayCreate } : {}),
+  });
 }
 
 /** Every Ringotel user at this base extension within the NS-connected branch. Duplicate detection is by
  *  EXTENSION number. STRICT on branchid: the fresh list is ORG-wide (spans branches), so a record whose
  *  branchid is absent or different must never be treated as a same-branch duplicate — it could be another
- *  NS domain's user, and this list feeds delete decisions. */
+ *  NS domain's user, and this list feeds delete decisions.
+ *
+ *  Trims BOTH sides. `nsOffboard.ts`'s sweep planner already trims the Ringotel `extension` it reads when
+ *  deciding an extension is orphaned (`String(u.extension ?? '').trim()`); this compared it untrimmed,
+ *  so an operator-entered Ringotel record whose extension carried whitespace was planned as an orphan
+ *  every sweep but never matched here — `deactivateAppOnly` returned `absent`, forever, silently. Trimming
+ *  only ever makes the match MORE permissive (it can find a record it previously missed; it can never stop
+ *  matching a record that matched before, since two exactly-equal strings are still equal after trimming),
+ *  so this is strictly safer for every caller of `resolveCanonical` (activate / deactivate / resetPassword
+ *  / syncIdentity / repairDeviceForEvent). */
 function usersForExt(users: User[], branchid: string, ext: string): User[] {
-  return users.filter((u) => String(u.branchid ?? '') === branchid && String(u.extension ?? '') === ext);
+  const wanted = ext.trim();
+  return users.filter((u) => String(u.branchid ?? '') === branchid && String(u.extension ?? '').trim() === wanted);
 }
 
 /**
@@ -141,9 +172,19 @@ function usersForExt(users: User[], branchid: string, ext: string): User[] {
  * (device ensure / activate / deactivate / reset), and only THEN dedup, so the extension is never left
  * with zero active records between a delete and a (re)activation (the brick window an SSO login could
  * land in).
+ *
+ * Exported because it is the selection rule the whole module turns on: every write picks its record
+ * through this function, and a rule observable only through `activate`'s mock call log grows tests
+ * that assert on the mock rather than on the rule.
  */
-function resolveCanonical(opts: ActivationOpts): User | undefined {
-  const matches = usersForExt(opts.users, opts.branchid, opts.ext);
+export function resolveCanonical(opts: Pick<ActivationOpts, 'users' | 'branchid' | 'ext' | 'suffix'>): User | undefined {
+  // An ATTACHED SECONDARY (`userid` set, pointing at its primary) is a different person's-eye view of
+  // one app login on another connection — never a candidate to provision, activate or deactivate. It
+  // sits at the SAME extension as its primary, so on a multi-connection domain it is indistinguishable
+  // from a duplicate by extension alone, and being created later it would win the newest-first
+  // tiebreak. Filtering here rather than in `usersForExt` is deliberate: `deactivateAppOnly` uses that
+  // helper to reach EVERY active record at an extension, and must keep doing so.
+  const matches = usersForExt(opts.users, opts.branchid, opts.ext).filter((u) => u.userid == null);
   if (matches.length <= 1) return matches[0];
   const wantSip = opts.ext + opts.suffix; // the SIP AOR the real provisioned user carries, e.g. "1043r"
   const sip = matches.filter((u) => String(u.username ?? '') === wantSip || String(u.authname ?? '') === wantSip);
@@ -187,7 +228,10 @@ export async function activate(opts: ActivationOpts): Promise<ActivationResult> 
   // Resolve (no deletes) BEFORE creating the device, so an ambiguity refusal never orphans a device.
   const existing = resolveCanonical(opts);
   const deviceName = opts.ext + opts.suffix;
-  const { password } = await ensureDevice(opts.nsWrite, opts.domain, opts.ext, deviceName);
+  const { password } = await ensureDevice(opts.nsWrite, opts.domain, opts.ext, deviceName, {
+    // Only here: activation is the deliberate "this extension is the app's now" moment.
+    rotateExisting: opts.rotateExistingDevice === true,
+  });
   const username = deviceName; // Ringotel SIP username/authname == the NS device AOR, e.g. "100r"
   const email = opts.email ?? '';
   let result: ActivationResult;
@@ -282,4 +326,208 @@ export async function resetPassword(opts: ActivationOpts): Promise<ActivationRes
   // Only now — after the canonical's password is reset — best-effort clean up any siblings.
   await dedupSiblings(opts, existing);
   return { action: 'reset', rtUserId: id };
+}
+
+/** What a background identity sync did. `changed` names the fields actually written. */
+export interface SyncIdentityResult {
+  action: 'synced' | 'no-change' | 'absent';
+  rtUserId?: string;
+  changed: string[];
+}
+
+/**
+ * Read the Ringotel-side email. **It lives at `info.email`, NOT at the top level** — `getUsers` returns no
+ * top-level `email`, so reading `user.email` yields `undefined` for every user, which is indistinguishable
+ * from "nobody has an address". A comparison written the obvious way therefore sees a difference on every
+ * event and writes forever, turning at-least-once delivery into an amplifier.
+ *
+ * ⚠️ **`info.email` is `string | string[]`** (live-verified 2026-08-06). Every `info` field holds a plain
+ * string at one value and becomes an ARRAY the moment the user adds a second one in the app — the desktop
+ * client offers extra Email and Phone rows, so this is a normal thing for a user to do, not an edge case.
+ *
+ * The `typeof === 'string'` fallback below is therefore NOT safe as written: given an array it returns '',
+ * `syncIdentity` concludes the address differs, and writes the NS address back as a flat string —
+ * collapsing the array and destroying the second address the user entered. TODO: normalize instead, e.g.
+ * take element 0 for the comparison and preserve the remainder on write. Left as-is pending that fix so
+ * the behaviour is recorded rather than silently half-changed.
+ */
+function rtEmailOf(u: User): string {
+  const info = (u as Rec)['info'];
+  const nested = info && typeof info === 'object' ? (info as Rec)['email'] : undefined;
+  const val = nested ?? (u as Rec)['email'];
+  return typeof val === 'string' ? val.trim() : '';
+}
+
+const rtNameOf = (u: User): string => {
+  const v = (u as Rec)['name'];
+  return typeof v === 'string' ? v.trim() : '';
+};
+
+/**
+ * Push the current NetSapiens identity (display name + email) onto the EXISTING canonical Ringotel user —
+ * the background, event-driven sync. Compare-then-write, so a replayed event is a no-op.
+ *
+ * ⚠️ **INVARIANT — this may only ever call `updateUser`.** It must NOT activate, deactivate, create, or
+ * `dedupSiblings`, and there is a selftest asserting exactly that. The reason is concurrency: this runs from
+ * a NetSapiens webhook in this Worker, while the SSO worker's heal path runs from a login in a *different*
+ * Worker, with no shared lock. `activate`/`deactivate`/`resetPassword` all dedup siblings, and their safety
+ * depends on the strict order "write the canonical first, delete siblings second" (the SSO-brick window). Two
+ * concurrent dedups can delete a record the other just activated. Restricting this to a pure identity update
+ * makes the two writers safe to overlap: they converge on the same NS-sourced values and neither one changes
+ * activation state or membership.
+ *
+ * Consequently a missing Ringotel user is `'absent'`, not a provisioning trigger — creating a directory entry
+ * (a billable seat) is a deliberate, human- or login-initiated act, never a side effect of an NS field edit.
+ */
+export async function syncIdentity(opts: ActivationOpts): Promise<SyncIdentityResult> {
+  const existing = resolveCanonical(opts); // may throw 409 on a genuine tie — the caller logs and drops
+  if (!existing) return { action: 'absent', changed: [] };
+
+  const id = String(existing.id);
+  const changes: Rec = {};
+  const changed: string[] = [];
+
+  // `name` guards on truthy: NS always has a display name, so blank means "we didn't get one", not "removed".
+  //
+  // ⚠️ **This deliberately overwrites a name the user chose in the app.** Ringotel lets a user rename
+  // themselves from the client (it writes top-level `name`; the SIP identity is untouched, and the new
+  // name propagates to their other devices at next login). Because we compare against NetSapiens, that
+  // self-chosen name is reverted the next time ANY subscriber event fires for them — which may be hours
+  // or days later, triggered by something unrelated. From the user's side it looks arbitrary.
+  //
+  // DECIDED 2026-08-06: keep NetSapiens authoritative. The directory should agree with the PBX, and a
+  // per-user override has nowhere durable to live (see below). Documented rather than fixed so the
+  // behaviour is a choice, not a surprise. To allow personalized display names instead, drop `name`
+  // from this compare set — do NOT try to detect "the user changed it", which is unknowable here.
+  if (opts.name && opts.name.trim() !== rtNameOf(existing)) {
+    changes.name = opts.name;
+    changed.push('name');
+  }
+  // `email` honours the three-state contract: undefined = don't know, touch nothing; '' = a real removal.
+  // Both sides normalize undefined/absent to '' so "no address either side" is correctly a no-op.
+  if (opts.email !== undefined && opts.email.trim() !== rtEmailOf(existing)) {
+    changes.email = opts.email;
+    changed.push('email');
+  }
+
+  if (changed.length === 0) return { action: 'no-change', rtUserId: id, changed };
+  await opts.rtWrite.updateUser(id, opts.orgid, changes);
+  return { action: 'synced', rtUserId: id, changed };
+}
+
+/** What the narrow offboarding action did. `rtUserIds` names every record it deactivated. */
+export interface DeactivateAppOnlyResult {
+  action: 'deactivated' | 'no-change' | 'absent';
+  rtUserIds: string[];
+}
+
+/**
+ * Deactivate the app record(s) for an extension and **nothing else** — the offboarding action.
+ *
+ * ⚠️ **INVARIANT — this may only ever call `deactivateUser`.** No NS device delete, no create, no
+ * password touch, no identity write, no `dedupSiblings`. A selftest asserts it, mirroring `syncIdentity`'s.
+ *
+ * **Why no device delete, when `deactivate()` does one.** If the NetSapiens user is genuinely gone its
+ * devices went with it, so the delete buys nothing. If the 404 that triggered this was *spurious* — a
+ * renamed extension, a scope-narrowed credential — the narrow action means we deactivated a recoverable
+ * record instead of destroying a live user's SIP credential. Deactivation is reversible (SSO heal or the
+ * portal reactivates); device destruction is not. That asymmetry is the whole argument.
+ *
+ * **Why every active record, not just the canonical.** Leaving a billed sibling active defeats the entire
+ * purpose — a seat charged for a user who no longer exists. It also removes `resolveCanonical`'s
+ * 409-on-ambiguity failure mode from this path: we are not *choosing* a record, so a tie is not a
+ * decision that has to be refused.
+ *
+ * Concurrency-safe against the SSO worker's heal path for the same reason `syncIdentity` is: no
+ * membership changes, and no other writer can be activating an extension whose NS user does not exist.
+ */
+export async function deactivateAppOnly(opts: ActivationOpts): Promise<DeactivateAppOnlyResult> {
+  const matches = usersForExt(opts.users, opts.branchid, opts.ext);
+  if (matches.length === 0) return { action: 'absent', rtUserIds: [] };
+
+  const active = matches.filter((u) => Number(u.status) === 1 && u.id != null);
+  // Replay-safe: an already-deactivated extension is a no-op, so at-least-once delivery costs nothing.
+  if (active.length === 0) return { action: 'no-change', rtUserIds: [] };
+
+  const rtUserIds: string[] = [];
+  for (const u of active) {
+    await opts.rtWrite.deactivateUser(String(u.id), opts.orgid);
+    rtUserIds.push(String(u.id));
+  }
+  return { action: 'deactivated', rtUserIds };
+}
+
+/** What a device self-heal found or did. `changed` holds `'device-created'`, `'device-missing'` (report
+ *  mode only — device absent, or present with an unreadable password; the two can't be told apart there),
+ *  `'device-password-blank'` (heal mode only — device confirmed present, password unreadable), or
+ *  `'sip-identity'` — the drift observed, in report mode, or corrected, in heal mode. */
+export interface RepairDeviceResult {
+  action: 'ok' | 'repaired' | 'would-repair' | 'absent' | 'inactive';
+  changed: string[];
+}
+
+/**
+ * Re-assert the NS softphone device behind an ACTIVE app user, on a user-change event.
+ *
+ * Deliberately **not** folded into `syncIdentity`: that function's `updateUser`-only invariant is what
+ * makes it safe to overlap with the SSO worker's heal path, and creating a device is not an identity
+ * update.
+ *
+ * ⚠️ **Never rotates.** `rotateExisting: false`, always. `ensureNsDevice`'s own documentation is explicit
+ * that rotating on a per-request path churns the credential and races a re-registration — and an event
+ * path is per-request.
+ *
+ * Gated on `status === 1` for the same reason `syncIdentity` treats a missing record as `'absent'`:
+ * provisioning is a deliberate, human- or login-initiated act, never a side effect of an NS field edit.
+ * Creating an NS device for a non-app user *is* provisioning.
+ *
+ * The stored Ringotel password is never pushed speculatively — the API does not return it, so it cannot
+ * be compared, and writing it every time would turn every event into a write.
+ */
+export async function repairDeviceForEvent(
+  opts: ActivationOpts & { mode: 'report' | 'heal' },
+): Promise<RepairDeviceResult> {
+  const existing = resolveCanonical(opts); // may throw 409 on a genuine tie — the caller logs and drops
+  if (!existing) return { action: 'absent', changed: [] };
+  if (Number(existing.status) !== 1) return { action: 'inactive', changed: [] };
+
+  const deviceName = opts.ext + opts.suffix;
+  const heal = opts.mode === 'heal';
+  const dev = await ensureDevice(opts.nsWrite, opts.domain, opts.ext, deviceName, {
+    mayCreate: heal,
+    rotateExisting: false,
+  });
+
+  // `{password:'', created:false}` is NOT unambiguously "device is missing" — `ensureNsDevice` returns
+  // that identical shape for an EXISTING device whose stored SIP password reads back blank (see its
+  // `existing` branch, `rotateExisting:false`), which is reachable in HEAL mode too.
+  //
+  // In REPORT mode `mayCreate` is always false, so `created:false` alone can't tell "absent" from
+  // "present with a blank password" apart — but "would create a device" is the right operator signal
+  // either way, so it stays tagged 'device-missing' (unchanged from before).
+  //
+  // In HEAL mode `mayCreate` is true, so `created:false` can ONLY mean the device already existed — a
+  // genuinely missing one would have been created. A blank password there is a present-but-unreadable
+  // credential, not a missing device, so it gets its own honest tag. Behaviour is unaffected: only a
+  // freshly CREATED device's password is ever pushed (below), so this never changes what gets written.
+  const deviceMissing = !heal && !dev.created && dev.password === '';
+  const devicePasswordBlank = heal && !dev.created && dev.password === '';
+  const sipMismatch =
+    String(existing.username ?? '') !== deviceName || String(existing.authname ?? '') !== deviceName;
+
+  const changed: string[] = [];
+  if (dev.created) changed.push('device-created');
+  if (deviceMissing) changed.push('device-missing');
+  if (devicePasswordBlank) changed.push('device-password-blank');
+  if (sipMismatch) changed.push('sip-identity');
+
+  if (changed.length === 0) return { action: 'ok', changed: [] };
+  if (!heal) return { action: 'would-repair', changed };
+
+  const updates: Rec = { username: deviceName, authname: deviceName };
+  // Only a freshly created device has a password worth pushing, and only if NS actually returned one —
+  // writing a blank would strip the Ringotel user's credential.
+  if (dev.created && dev.password) updates.password = dev.password;
+  await opts.rtWrite.updateUser(String(existing.id), opts.orgid, updates);
+  return { action: 'repaired', changed };
 }

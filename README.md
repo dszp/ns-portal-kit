@@ -51,6 +51,12 @@ button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
 
 ## Quick start
 
+**Deploying with a coding agent? That's the recommended path** — point it at
+[AGENTS.md](./AGENTS.md) ("read AGENTS.md and deploy this for me; ask me the questions it says to ask").
+It turns the setup reference into an ordered procedure, asks you the decisions that are yours to make, and
+won't quietly enable a write feature or leave a stored token exposed. The manual route is below and stays
+fully supported.
+
 Scaffold it with Cloudflare's own CLI:
 
 ```bash
@@ -113,7 +119,7 @@ domain browser and the viewer SPA. The token's NetSapiens scope is the real boun
 > Cloudflare Access check (it fails closed, so a direct-route or `*.workers.dev` hit is refused even
 > with a valid token configured), and/or `ALLOWED_DOMAINS` to bound it at the app layer.
 
-**Portal backend mode** (`PORTAL_MODE=1`) — no stored credential at all. It has no UI: it's the **backend half
+**Portal backend mode** (`PORTAL_MODE=1`) — no stored credential for user traffic. It has no UI: it's the **backend half
 of a Manager Portal add-on**. You inject JavaScript into your portal; that JS reads the logged-in
 user's `ns_t` (which the portal already issued), sends it here, and this Worker forwards it to
 NetSapiens verbatim — so every read runs **as that user**, with their scope enforced by the platform
@@ -174,6 +180,9 @@ like `fetch` called as `this.x(...)` throws "Illegal invocation" in workerd but 
 
 ## Docs
 
+- **[AGENTS.md](./AGENTS.md)** — deploying this, written for a coding agent: the order of operations, the
+  decisions that belong to you rather than to it, and what it must not do on your behalf. Point an agent at
+  this file if you're delegating the deployment.
 - **[SETUP.md](./SETUP.md)** — every setting, what it means, and what a valid value looks like. Start
   here if a field on the deploy form isn't obvious.
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — how it fits together, the `ns_t` design, the NetSapiens

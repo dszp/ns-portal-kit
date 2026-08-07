@@ -2,6 +2,23 @@
 
 Every setting, what it means, and what a valid value looks like.
 
+> ### 🤖 Recommended: let a coding agent drive this
+>
+> If you use Claude Code, Codex, Cursor, Copilot or similar, **point it at [AGENTS.md](./AGENTS.md)** and
+> have it deploy this for you. That file is this reference turned into an **ordered procedure**: it decides
+> nothing on your behalf, asks you the handful of questions that actually need your answer (which mode,
+> which domains, whether writes are on, who sees what), and refuses the mistakes that cost money or expose
+> data. Something like:
+>
+> ```
+> Read AGENTS.md in this repo and deploy this project for me. Ask me the questions it says to ask.
+> ```
+>
+> It is faster and safer than working through the settings by hand, because the ordering is the part that
+> bites: a secret pasted into the wrong place, or a stored token deployed with nothing in front of it.
+> **This file stays the reference** — AGENTS.md links into it rather than repeating it, so you are never
+> reading two versions of the same fact. Prefer to do it yourself? Everything is here; carry on below.
+
 **Start here:** most of the list below is optional. A working deployment needs **three** things, and the
 rest only matter if you want the feature they turn on.
 
@@ -17,7 +34,7 @@ This decides which settings you need. Everything else follows from it.
 | Who authenticates | a token you store | the calling user's own `ns_t` |
 | Set | `NS_API_TOKEN` | `PORTAL_MODE=1` |
 | Reads run as | that token — its NetSapiens scope is the boundary | that user — NetSapiens enforces their scope |
-| Stored NetSapiens credential | **yes** | **none** |
+| Stored NetSapiens credential | **yes** | **none**, unless you enable [event subscriptions](#netsapiens-event-subscriptions) |
 | Needs injected JavaScript | no | **yes — but it's Worker-served now** |
 | Ready to use today | **yes** | **yes** — point your portal at the Worker's primary (or compose it into a script you already inject) |
 
@@ -39,8 +56,11 @@ simplest you point your Manager Portal's injected-script slot at the Worker's pr
 features appear, no hand-written script needed. That's not the only way in, though: you can also **compose**
 the primary into a script you already inject, or **add your own gated scripts** (`PORTAL_SECONDARIES` —
 external or served privately from R2). See [section 4](#4-portal-backend-mode-what-it-actually-is) for all
-three ways to wire it. **Portal backend mode holds no NetSapiens credential at all.** Each request carries the caller's `ns_t`, which
+three ways to wire it. **Portal backend mode holds no NetSapiens credential for user traffic.** Each request carries the caller's `ns_t`, which
 is passed through to NetSapiens as-is; the platform validates it and enforces that user's own scope.
+(The single exception is [event subscriptions](#netsapiens-event-subscriptions), which are off unless
+configured: an event arrives with no caller, so that path — and only that path — uses a stored service
+credential.)
 There's no SPA — it's a backend for JS **you** inject into the Manager Portal. **[How that actually
 works, with a diagram →](#4-portal-backend-mode-what-it-actually-is)**
 
@@ -105,6 +125,21 @@ app-layer bound *on top of* the token's own scope, not a replacement for it.
 
 `ALLOWED_ORIGINS` is the origin the injected JS runs on — normally your Manager Portal.
 
+### Running more than one Worker on one zone
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `CACHE_SCOPE` | `default` | Namespace for every cache entry this deployment writes. **One Worker: leave it alone.** More than one on the same zone: give each a distinct value. |
+
+Cloudflare's `caches.default` is shared **zone-wide**, not per Worker, so two deployments with the same
+scope read and write one set of cached app-provider and device entries — each serving the other's data, and
+each suppressing the other's forced refresh. `GET /health` reports the value in use, which is the cheapest
+way to check: compare the `scope` field across your deployments and make sure they differ. One deployment
+missing the setting degrades safely to its own namespace; *two* missing it quietly share one again.
+
+⚠️ `env` blocks do **not** inherit top-level `vars`, so each environment needs its own `CACHE_SCOPE`
+alongside its own `NS_SERVER` and the rest.
+
 ### Branding
 
 Branding is configuration, never code, so a fork ships unbranded and yours never enters the source.
@@ -132,6 +167,23 @@ routes return 404, and the deployment behaves exactly as if the integration didn
 A Ringotel branch's `address` must equal the NetSapiens domain **exactly** — that's what binds them. If
 yours match (they normally do), you need no overrides.
 
+**More than one branch may share a domain.** An organization can serve one NetSapiens domain from
+several branches — per site, per white-label app, or a pilot beside production. That is supported: the
+user list spans every bound branch and each row names the branch it belongs to, so you can see at a
+glance where someone lives.
+
+Two rules follow, and both fail safe:
+
+- **Two *different organizations* claiming one domain is refused everywhere.** Several branches under
+  one organization is a topology; two organizations is a misconfiguration, and nothing can tell which
+  one's users belong to that domain.
+- **An extension with records on more than one branch is reported, never resolved.** The portal shows a
+  conflict and refuses writes to that extension until a human fixes it, rather than picking a record
+  and possibly changing the wrong seat.
+
+Activating a user who has **no** record yet is also refused on such a domain, because nothing here
+knows which branch a new user belongs to. Create the user on the intended branch first.
+
 ### App activation (writes)
 
 Lets authorized roles activate/deactivate a user's app and reset its password **from the NetSapiens user
@@ -146,6 +198,7 @@ through sign-in or see why they can't yet) — all default level `office_manager
 |---|---|---|
 | **`RINGOTEL_WRITE_DOMAINS`** | `acme.12345.service` (CSV), or `*` | **Safety rail. Empty ⇒ ALL writes refused (fail-closed).** Only listed domains may be mutated; `*` = every in-scope domain. Set it deliberately. |
 | `RINGOTEL_ACTIVATION_SUFFIX` | `r` | NetSapiens softphone device suffix (`ext` → `<ext><suffix>`). Default `r`. |
+| `RINGOTEL_ROTATE_SIP_ON_ACTIVATE` | `0` to disable | **Default ON.** When activating a user whose `<ext><suffix>` device *already existed*, replace its SIP password instead of reusing the stored one. See the note below. |
 | `RINGOTEL_EXCLUDE_NAMES` | `SHARED,FAX` | Name-contains matchers to soft-exclude. Default `SHARED,SHARED VOICEMAIL,FAX`. |
 | `RINGOTEL_EXCLUDE_EXTS` | `900,8*` | Extension patterns to soft-exclude (trailing `*` = prefix). Default empty. |
 | `RINGOTEL_EXCLUDE_EXTS_BY_DOMAIN` | `{"acme.x":{"remove":["900"]}}` | JSON per-domain add/remove of the exclude-exts. |
@@ -163,12 +216,124 @@ the account from the user's own portal login and mails nothing, so on an SSO-bou
 sign in. Soft and HARD exclusions are unaffected either way — only the address requirement is waived, and
 only where nothing would have been mailed.
 
+**Activation rotates the SIP password of a device it did not create.** Reusing the stored password
+leaves *any other endpoint still holding it* with valid credentials for the same address-of-record. Both
+then register, the most recent wins, and they trade the registration back and forth — intermittent call
+failures with nothing obviously wrong in either system. Rotating at activation invalidates the stranger.
+
+A device this activation *creates* is not rotated (it is already exclusive), and per-login paths never
+rotate — doing so on every sign-in would churn the credential and could race a re-registration. Rotation
+is best-effort: if it fails (including on a NetSapiens release without the device `PUT`) activation still
+succeeds using the existing password. Set `RINGOTEL_ROTATE_SIP_ON_ACTIVATE=0` for the old reuse behaviour.
+
 **Soft exclusions are creation-only.** They decide whether an account may be *created*; they never block a
 user who already has a working one from being shown how to sign in.
 
 > The eligibility decision itself lives in `@dszp/netsapiens-lib` (`evaluateEligibility`) so that every
 > consumer of that library — this portal backend and any SSO integration you run beside it — reaches the
 > same verdict from the same inputs. Only the configuration above is read here.
+
+### NetSapiens event subscriptions
+
+**The problem this solves:** without it, a user's name and email reach the app directory only as a *side
+effect* of an explicit action — an activation, a password reset, an SSO sign-in. Edit a user directly in
+NetSapiens and the directory keeps the old values indefinitely. Clear someone's email address and the
+directory keeps the stale one, which can later receive an app password for an extension that has since
+been reassigned.
+
+NetSapiens can instead **push** subscriber changes to this Worker. It registers a subscription per domain,
+receives the events, and syncs identity to the app directory. A scheduled job keeps those subscriptions
+correct and reports their delivery health.
+
+**It is inert until configured.** Leave these unset and there is no route, no scheduled work, and no
+behaviour change — the feature arms only when the origin, the secret, the service credential and the
+domain list are all present.
+
+| Variable | Example | What it does |
+|---|---|---|
+| `NS_EVENTS` | `auto` \| `on` \| `off` | `auto` (default) = on once Ringotel and the settings below are present. `on` makes missing settings a loud startup error. `off` goes inert — and, on the next reconcile, also removes this deployment's own subscriptions, provided the callback origin and service credentials are still configured. See below. |
+| **`NS_EVENTS_BASE_URL`** | `https://portal.example.com` | **This deployment's public origin.** Must differ per deployment — subscription ownership is decided by URL prefix, so two deployments sharing an origin will fight over one subscription set. Origin only: a path breaks every callback. |
+| **`NS_EVENTS_DOMAINS`** | `acme.example.com` (CSV), or `*` | Which domains to subscribe to. `*` means every domain the **write rail** permits; it can never exceed `RINGOTEL_WRITE_DOMAINS`. Unset ⇒ inert. Dropping a domain — or emptying the list entirely — removes its subscription(s) on the next reconcile, provided the callback origin and service credentials are still configured. See below. |
+| `NS_EVENTS_MODELS` | `subscriber` | Which event models to subscribe to. Default `subscriber`. An unknown model is a startup error. |
+| `NS_EVENTS_TARGET_LIFETIME` | `31536000` | Seconds of subscription lifetime to request. Default 365 days. |
+| `NS_EVENTS_RENEW_HORIZON` | `604800` | Renew when less than this remains. Default 7 days. |
+| `NS_EVENTS_GEO_SUPPORT` | `yes` \| `no` | Geo-redundant delivery. Default `yes` — **send it explicitly**, because NetSapiens behaves as `no` when the field is omitted despite documenting `yes`. |
+| `NS_EVENTS_MAX_EVENTS` | `40` | Cap on events processed per delivery. Truncation is logged, never silent. |
+| `NS_EVENTS_ALLOW_IPS` | *(empty)* | Optional source-IP allowlist. **Off by default and expected to stay off** — see below. |
+| `NS_EVENTS_DIAG_RAW` | `1` | Log the *shape* of an inbound payload (key names, sizes — never values) to diagnose an unfamiliar delivery. |
+| `NS_EVENTS_OFFBOARD` | `off` \| `deactivate` | A user deleted in NetSapiens has their app record deactivated — confirmed only by a 404 on re-read, never by the event payload. Fires immediately from the change event, and again on the hourly sweep, which also cleans up records orphaned before this feature shipped. Default `off`. |
+| `NS_EVENTS_DEVICE_REPAIR` | `off` \| `report` \| `heal` | Self-heal an active app user whose softphone device has gone missing. `report` logs the drift without writing; `heal` recreates the device and re-pushes its credentials. Default `off`. Costs extra requests per event — see below. |
+| `NS_EVENTS_SWEEP_MAX` | `200` | Cap on how many records the hourly sweep will touch in one run. Overflow is logged, never silent. Default `200`. |
+
+**Secrets** — `wrangler secret put <NAME>`:
+
+| Secret | What it does |
+|---|---|
+| **`NS_EVENTS_PATH_SECRET`** | Master key for the per-domain callback token. High entropy; generate it, don't invent it. |
+| **`NS_API_KEY`** *(or `NS_ADMIN_USER` + `NS_ADMIN_PASS`)* | The **service identity** — the credential used when an event arrives with no caller. Admin credentials win if both are set, and need `NS_OAUTH_CLIENT_ID` / `NS_OAUTH_CLIENT_SECRET`. |
+
+⚠️ **`NS_API_KEY` is not `NS_API_TOKEN`.** The latter is the standalone-mode *read* token; this one
+performs privileged writes on behalf of nobody. There is deliberately no fallback between them. Make it a
+**dedicated least-privilege key** — NetSapiens can restrict a key by `allowed-models`, domain, and IP.
+
+Six things worth understanding before you enable it:
+
+- **A pushed event is a trigger, not data.** The receiver extracts only *which user changed*, then re-reads
+  that user from the API and syncs from the response. So a field missing from a payload can never be
+  mistaken for a field that was cleared, and a replayed delivery is a no-op.
+- **The callback URL is a capability, not a password.** Its path token is derived per domain, so one leaked
+  URL exposes one tenant rather than all of them. But NetSapiens stores that URL, returns it when you list
+  subscriptions, and logs it — treat it accordingly. ⚠️ Rotating `NS_EVENTS_PATH_SECRET` is **not
+  seamless**: every existing callback is refused from the moment it changes until the next reconcile
+  re-points it, and deliveries in that window are lost. Trigger a reconcile immediately after rotating.
+- **Your other subscriptions are never touched.** Only subscriptions whose URL starts with your own
+  `NS_EVENTS_BASE_URL` are managed; anything else on the same domain is reported and left alone.
+- **Going inert cleans up after itself.** Drop a domain from `NS_EVENTS_DOMAINS` while others remain and
+  the next reconcile deletes its subscription for you, as before. Now emptying the list **entirely**, or
+  setting `NS_EVENTS=off`, does the same thing at the next reconcile: it runs a delete-only pass that
+  removes every subscription this deployment owns, then plans nothing else — **provided the callback
+  origin (`NS_EVENTS_BASE_URL`) and the service credentials are still configured.** Remove those first and
+  nothing is left able to clean up.
+
+  **Retiring the feature.** Empty `NS_EVENTS_DOMAINS` (or set `NS_EVENTS=off`) → let one reconcile run →
+  verify the subscriptions are gone → *then* remove the secrets. Removing the credentials first leaves
+  nothing able to clean up, and deleting the Worker outright always strands its subscriptions. Changing
+  `NS_EVENTS_BASE_URL` likewise orphans subscriptions created under the previous origin, because the URL
+  prefix is what marks them as ours — rotate an origin with the same delete-first discipline.
+- **An IP allowlist is the wrong gate here**, which is why it is off by default. Delivery is geo-redundant
+  across NetSapiens nodes and fails over between them, so the source address is not stable — and it
+  arrives over IPv6. Making it predictable means disabling redundancy. The path token is the real gate.
+- **`NS_EVENTS_DEVICE_REPAIR` adds requests per event.** With it enabled (`report` or `heal`), every
+  processed event does extra work on top of its normal user lookup, and `heal` adds a write on top of
+  that when it actually repairs something. A full batch at the default `NS_EVENTS_MAX_EVENTS` (40) with
+  repair on can land in the low hundreds of subrequests for a single delivery — comfortably inside a
+  paid Workers plan's per-invocation limit, but potentially over a free plan's. Keep that in mind when
+  sizing `NS_EVENTS_MAX_EVENTS` on a free plan.
+
+**Requirements:** a NetSapiens release exposing the flat `/subscriptions` endpoints (the domain-scoped
+variants are v45+ and absent on v44), and a scheduled trigger — add
+`"triggers": { "crons": ["17 * * * *"] }` to each environment that should reconcile. Hourly is deliberate:
+the job validates and repairs, it does not keep anything alive.
+
+### Directory pre-population (writes)
+
+Creates **inactive** app-directory entries for NetSapiens users who have none, so the directory reflects
+your organization before anyone is activated. Gated by `ringotel.prepop` (default `reseller`), bounded by
+`RINGOTEL_WRITE_DOMAINS`, and exposed as two routes: a **preview** that lists what it would create along
+with every skip and its reason, and an **apply** that performs it. Apply re-plans server-side — the caller
+names a *domain*, never the individual users.
+
+| Variable | Example | What it does |
+|---|---|---|
+| `RINGOTEL_PREPOP_INCLUDE_SOFT` | `1` | Also create entries for **soft-excluded** users (`SHARED`, `VOICEMAIL`, excluded extension patterns). Off by default: those extensions are not people, and a directory full of entries nobody should activate is noise. |
+
+Users with **no email address** *are* included — a missing address blocks activation, not a directory
+entry, and such a user can still be activated later via SSO. Hard-excluded users (service codes,
+non-numeric extensions) never are.
+
+**A placeholder deliberately carries no SIP identity** — no username, authname, or password. A record that
+owns `<ext><suffix>` is exactly what collides when an extension is later reassigned; activation fills those
+fields in afterwards.
 
 ### App sign-in details
 
@@ -436,9 +601,11 @@ The parts worth understanding:
   portal CSP `script-src` allows the Worker origin.
 - **The `ns_t` is the logged-in user's own session token**, which the portal has already issued and
   stored in the browser. Your JS reads it and forwards it; it doesn't create or manage logins.
-- **The Worker stores no NetSapiens credential.** It forwards that same `ns_t` to NetSapiens verbatim,
+- **This path stores no NetSapiens credential.** It forwards that same `ns_t` to NetSapiens verbatim,
   so every read runs *as that user* and NetSapiens enforces their scope. Two users hitting the same
-  Worker see different data because the platform says so — not because we filtered it.
+  Worker see different data because the platform says so — not because we filtered it. (Event
+  subscriptions are the one path that does hold a credential, because nobody is calling; they are off
+  unless configured.)
 - **A token is checked before it's trusted.** Structure, expiry, audience and issuer are checked locally
   (free), then a cached `GET /jwt` confirms it's real and not logged out. Only a literal 200 counts.
 - **It's per-call.** Nothing is stored between requests except a short-lived cache of "was this token
@@ -560,6 +727,7 @@ call-center is exact and orthogonal.
 | `ringotel.activate` | Activate/deactivate the app for a user from the profile page (**write**) | `office_manager` |
 | `ringotel.resetPassword` | Reset a user's app password from the profile page (**write**) | `office_manager` |
 | `ringotel.profileAppAccess` | The user-visible app sign-in message on the user-profile page | `office_manager` |
+| `ringotel.prepop` | Preview/create inactive app-directory entries for a domain (**write**) | `reseller` |
 | `portal.self` | Receive the **self-service** bundle (own-account features) | `all` |
 | `me.appStatus` | App-status indicator on the user's **own** home page | `all` |
 | `me.devices` | The user's **own** device list/status | `off` |
@@ -780,15 +948,21 @@ that works will keep working.
 
 **`vars` in `wrangler.jsonc`** — non-secret, committed, visible in your repo:
 `NS_SERVER`, `NS_PORTAL_ISS`, `ALLOWED_DOMAINS`, `BLOCKED_DOMAINS`, `ALLOWED_ORIGINS`, `PORTAL_MODE`,
-`ACCESS_AUD`, `ACCESS_TEAM_DOMAIN`, `BRAND_ACCENT`, `RINGOTEL_PRESENCE`, `NS_DEVICE_DETAILS`,
+`CACHE_SCOPE`, `ACCESS_AUD`, `ACCESS_TEAM_DOMAIN`, `BRAND_ACCENT`, `RINGOTEL_PRESENCE`, `NS_DEVICE_DETAILS`,
 `RINGOTEL_BASE_URL`, `RINGOTEL_OVERRIDES`, `RINGOTEL_ACTIVATION_SUFFIX`, `RINGOTEL_EXCLUDE_*`,
 `RINGOTEL_RESELLER_OVERRIDE`, `RINGOTEL_SSO_SERVICE`, `SSO_AUTO_ACTIVATE`, `PORTAL_APPS_HIDE`, `PORTAL_MENUS`,
-`PORTAL_APP_DOWNLOADS`. **`RINGOTEL_WRITE_DOMAINS`** and any exclusion values that name a real
+`PORTAL_APP_DOWNLOADS`, `RINGOTEL_ROTATE_SIP_ON_ACTIVATE`, `RINGOTEL_PREPOP_INCLUDE_SOFT`, `NS_EVENTS`,
+`NS_EVENTS_BASE_URL`, `NS_EVENTS_MODELS`, `NS_EVENTS_TARGET_LIFETIME`, `NS_EVENTS_RENEW_HORIZON`,
+`NS_EVENTS_GEO_SUPPORT`, `NS_EVENTS_MAX_EVENTS`, `NS_EVENTS_DIAG_RAW`, `NS_EVENTS_OFFBOARD`,
+`NS_EVENTS_DEVICE_REPAIR`, `NS_EVENTS_SWEEP_MAX`. **`NS_EVENTS_DOMAINS`** names real
+domains, so treat it like the write rail below. **`RINGOTEL_WRITE_DOMAINS`** and any exclusion values that name a real
 domain or reseller are deployment-specific — prefer a **secret** (or a private, non-mirrored config) so a
 customer domain never lands in a committed file.
 
 **Secrets** — `wrangler secret put <NAME>`, never committed:
-`NS_API_TOKEN`, `RINGOTEL_API_KEY`, and — by convention rather than necessity — `BRAND_NAME` /
+`NS_API_TOKEN`, `RINGOTEL_API_KEY`, `NS_EVENTS_PATH_SECRET`, `NS_API_KEY` (or `NS_ADMIN_USER` /
+`NS_ADMIN_PASS` with `NS_OAUTH_CLIENT_ID` / `NS_OAUTH_CLIENT_SECRET`), and — by convention rather than
+necessity — `BRAND_NAME` /
 `RINGOTEL_LABEL` / `RINGOTEL_LABEL_SHORT`, so a white-label name stays out of a committed file.
 
 **Put each key in exactly one place.** A key in both `vars` and `.dev.vars` is shadowed by the

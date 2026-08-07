@@ -20,6 +20,183 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [0.2.21] — 2026-08-07
+
+### Added
+
+- **Support for a PBX domain served by several app connections in one organization.** Previously any
+  domain matching more than one connection was treated as an ambiguous binding: every app feature
+  returned 409, call-flow enrichment degraded to a note, and the domain was invisible to the orphan
+  sweep. Several connections under one organization is a supported topology — per site, per
+  white-label app, or a pilot beside production — and is now handled throughout.
+
+  Ambiguity is now about **organizations**: two or more organizations claiming one domain still
+  refuses everywhere, because there is no single source of truth for whose users those are.
+
+  App status reads search every bound connection, and each user reports the connection it sits on.
+  The orphan sweep and the user-change event handler act per connection. Password resets and
+  re-activations locate the record's own connection. Creating a user that does not exist yet — a first
+  activation, or bulk pre-population — still refuses on such a domain, because nothing yet says which
+  connection a new user belongs to; the message says so.
+
+  An extension holding records on **more than one** connection is reported as a conflict and never
+  resolved by picking one.
+
+### Fixed
+
+- **Attached secondary records are no longer mistaken for provisionable users.** A user attached to a
+  second connection shares one app login with a primary and carries a link to it. Such a record sits
+  at the same extension as its primary, so it could previously be selected as the record to activate,
+  reset or deactivate — and being newer, it would win. It is now excluded from that selection and from
+  the orphan sweep.
+
+- **The `*` event scope no longer skips multi-connection domains.** Scope was computed by counting
+  directory rows per domain, so a domain with a second connection was dropped and never swept — the
+  orphaned billed seats that the sweep exists to clean up accumulated precisely there.
+
+## [0.2.20] — 2026-07-31
+
+### Added
+
+- **Offboarding for NetSapiens event subscriptions** (`NS_EVENTS_OFFBOARD=deactivate`, off by default). A
+  user deleted in NetSapiens now has their app record deactivated — confirmed only by a 404 on re-read,
+  never by the event payload, since a deleted user leaves no record to re-read and the `subscriber` model
+  carries no removal flag. It fires immediately from the change event, and again on an hourly sweep that
+  also cleans up records orphaned before this feature shipped.
+- **Device self-heal on user change** (`NS_EVENTS_DEVICE_REPAIR=report|heal`, off by default). An active
+  app user whose softphone device has gone missing gets it recreated and its credentials re-pushed;
+  `report` logs the drift without writing anything, for watching before acting.
+- **`NS_EVENTS_SWEEP_MAX`** caps how many records the hourly sweep will touch in a single run (default
+  200). Overflow is logged, never silent.
+
+### Changed
+
+- **Turning subscriptions off now unsubscribes.** Previously the reconciler stopped *managing*
+  subscriptions the moment the feature went inert, while NetSapiens kept delivering to a now-dead route
+  until the subscription itself errored out. It now removes its own subscriptions when it goes inert —
+  emptying `NS_EVENTS_DOMAINS` or setting `NS_EVENTS=off` — provided the callback origin and service
+  credentials are still configured at that point. See SETUP for the retirement order.
+
+## [0.2.19] — 2026-07-28
+
+### Changed
+
+- **The Manager Portal's own table-refresh button now also refreshes the app column.** On the Domains and
+  Users lists, the refresh control in the panel header reloads the NetSapiens table in place; it now also
+  forces a fresh read of the app organization directory instead of serving the cached one. This matters
+  most for a domain that was *just* connected to the app service: the directory is cached for an hour, and
+  the only refresh control until now lived inside the app column itself — which isn't drawn for a domain
+  that has no organization yet, so from that page there was no way to ask for a fresh read at all. The
+  forced read is limited to callers holding the directory-refresh permission (resellers and super-users by
+  default); for everyone else the button behaves exactly as it did before.
+
+## [0.2.18] — 2026-07-27
+
+### Added
+
+- **NetSapiens event subscriptions — keep the app directory in sync when NetSapiens changes.** Until now,
+  a user's name and email only reached the app directory as a *side effect* of an explicit action
+  (activate, deactivate, password reset, or an SSO login). Edit a user directly in NetSapiens and the app
+  directory kept the old values indefinitely. This adds an inbound receiver plus a scheduled reconciler
+  that keeps the subscriptions themselves alive and reports their delivery health.
+
+  It is **inert until configured**: unset means no route, no scheduled work, and no behaviour change at
+  all. Set `NS_EVENTS_BASE_URL` (this deployment's public origin), the `NS_EVENTS_PATH_SECRET` secret, a
+  service credential, and `NS_EVENTS_DOMAINS`, and it arms itself.
+
+  Design notes worth knowing before you enable it:
+  - **A pushed event is treated as a trigger, never as data.** The receiver extracts only *which user
+    changed*, then re-reads that user from the API and syncs from the response. So a payload that omits a
+    field can never be mistaken for a field that was cleared, and replaying a delivery is a no-op.
+  - **The callback URL is a per-domain capability.** Its path token is derived as
+    `HMAC-SHA256(NS_EVENTS_PATH_SECRET, domain)`, so one leaked URL does not expose the others. Treat the
+    URL as a capability rather than a password: NetSapiens stores it, returns it when you list
+    subscriptions, and logs it. Rotating the secret re-points every subscription automatically.
+  - **Your other subscriptions are never touched.** Only subscriptions whose `post-url` starts with your
+    own `NS_EVENTS_BASE_URL` are managed; anything else on the same domain is reported and left alone.
+  - `NS_EVENTS_DOMAINS` accepts an explicit list or `*`, and can never exceed `RINGOTEL_WRITE_DOMAINS`.
+
+- **Directory pre-population — create inactive app entries for users who have none.** So the app directory
+  reflects your NetSapiens organization before anyone is activated, and a later activation updates an
+  existing entry instead of inventing one. A **preview** lists what would be created and, just as usefully,
+  every user it skipped and why; a separate **apply** performs it. Apply re-plans server-side, so the caller
+  names a *domain* and never the individual users. Gated by the new `ringotel.prepop` feature (default
+  `reseller`) and bounded by `RINGOTEL_WRITE_DOMAINS`.
+
+  Users with **no email address are included** — a missing address blocks activation, not a directory entry,
+  and such a user can still be activated later by signing in. Soft-excluded users (`SHARED`, `VOICEMAIL`,
+  excluded extension patterns) are skipped unless you set `RINGOTEL_PREPOP_INCLUDE_SOFT`; hard-excluded ones
+  never are. A created placeholder deliberately carries **no SIP identity** — a record owning
+  `<ext><suffix>` is exactly what collides when an extension is later reassigned.
+
+- **`AGENTS.md` — deploying this project, written for a coding agent.** If you delegate the deployment,
+  point the agent at that file. It is the order of operations rather than a settings reference: which mode
+  to pick and why the choice matters, how to obtain the code so your configuration does not become public,
+  the decisions it must ask you about instead of guessing (write access, domain visibility, who sees which
+  feature), the things it must not do on your behalf, and a verification sequence that ends by confirming a
+  user *without* a feature's role genuinely cannot see it. SETUP.md remains the reference; AGENTS.md links
+  into it rather than repeating it.
+
+### Fixed
+
+- **Stale app data: three separate causes, one symptom.** Users' app status, the activate/deactivate
+  control, and the sign-in instructions could all show information that was minutes to an hour out of
+  date, with nothing on screen to suggest it.
+
+  - **Cached entries were shared between deployments.** Cloudflare's `caches.default` is shared
+    **zone-wide**, not per Worker, so every deployment on the same zone read and wrote *one* set of cached
+    app-provider entries. A deployment that invalidated an organization's cached user list after a write
+    had that entry immediately repopulated by another deployment's read, and then served the other
+    deployment's data until the TTL lapsed. The forced-refresh lock was shared the same way, so one
+    deployment's refresh suppressed another's for a minute. Every cache key is now namespaced by the new
+    **`CACHE_SCOPE`** var. A single deployment needs no configuration; if you run more than one Worker on
+    one zone, give each `env.*` block its own value (`vars` are **not** inherited). The desk-phone
+    device cache had the identical defect and is namespaced too. `GET /health` now reports the value in
+    use, because one deployment missing the setting degrades safely to its own namespace but *two*
+    missing it would quietly share one again — comparing the field across your deployments is the
+    cheapest way to catch that.
+
+  - **Two organization settings could be an hour stale with no way to notice.** The SSO binding and the
+    "hide password in email" flag are part of a directory snapshot cached for an hour, because building it
+    costs a fleet-wide organization list *plus* a branch read per organization. But those two settings
+    change when an operator edits the organization in the app provider's own admin — which passes through
+    none of this Worker's write paths, so nothing could ever invalidate them. The result was users being
+    shown the wrong way to sign in, for up to an hour, silently. The expensive structural lookup still
+    caches for an hour; those two settings are now overlaid from a **60-second per-organization read**
+    costing one API call per view. Shortening the whole snapshot's lifetime would have multiplied the
+    expensive part to fix the cheap part. If the overlay read fails the previous value is used — a
+    freshness optimization must never turn a working request into a failed one.
+
+  - **The user-profile page showed cached status on load.** It re-read live only after a change *it* had
+    made, so a plain reload — or a change made anywhere else, including a user provisioned by an SSO login
+    — showed the previous state until the cache expired. It now reads live on load; the cost is one extra
+    request on the page where someone is most likely to be mid-change.
+
+### Changed
+
+- **Activating a user now replaces the SIP password of a softphone device it did not create.** Previously
+  the stored password was reused, which left *any other endpoint still holding it* with valid credentials
+  for the same address-of-record. Both would register, the most recent winning, and they would trade the
+  registration back and forth — intermittent call failures with nothing obviously wrong in either system.
+  Rotating at activation invalidates the stranger.
+
+  A device the activation itself creates is not rotated (it is already exclusive), and sign-in paths never
+  rotate — doing so on every login would churn the credential and could race a re-registration. The change
+  is an in-place update, so the device keeps its emergency caller id, provisioning link and transport
+  settings, and it is best-effort: if it fails, activation still succeeds using the existing password. Set
+  `RINGOTEL_ROTATE_SIP_ON_ACTIVATE=0` for the previous behaviour.
+
+- **The users list now shows how old its data is, and offers a refresh.** That list stays cached for ten
+  minutes deliberately — it is a bulk view, and making it always-live would add an app-provider request to
+  every page view of a large domain. So instead of presenting stale data as current, the column header
+  reports its age and, for operators whose role permits a forced refresh, offers a control to trigger one.
+  The capability existed already but had no interface, which meant the only way to clear a stale read was
+  to know an undocumented query parameter. A visibly old answer is better than a silently wrong one.
+
+  That parameter also gained a neutral spelling, `?refresh=1`, which is what the client now sends; the
+  previous spelling still works. It named the app provider, and the served browser bundle is deliberately
+  free of vendor names so a white-labeled deployment stays white-labeled in devtools.
+
 ## [0.2.17] — 2026-07-23
 
 ### Changed
@@ -557,7 +734,6 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
-[Unreleased]: https://github.com/dszp/ns-portal-kit/compare/v0.2.17...HEAD
 [0.2.17]: https://github.com/dszp/ns-portal-kit/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/dszp/ns-portal-kit/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/dszp/ns-portal-kit/compare/v0.2.14...v0.2.15

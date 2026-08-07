@@ -1,6 +1,7 @@
 /** Offline test for the Ringotel activation orchestration (device-ensure + create/update/deactivate/
  *  reset) with recording mock clients, plus the write-domain safety rail. pnpm test:ringotelwrite */
-import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter } from './ringotelActivation.js';
+import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter, syncIdentity, generateSipPassword, deactivateAppOnly, repairDeviceForEvent, resolveCanonical } from './ringotelActivation.js';
+import type { User } from '@dszp/ringotel-lib';
 
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => { c ? pass++ : fail++; console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); };
@@ -11,13 +12,21 @@ function mockDevices(seed: Record<string, string> = {}) {
   for (const [name, pw] of Object.entries(seed)) store.set(name, { device: name, [SIP_PW_FIELD]: pw });
   const calls: string[] = [];
   let pwSeq = 0;
+  let failUpdate = false;
   const dw: DeviceWriter = {
     async getDevices() { calls.push('getDevices'); return [...store.values()]; },
     async getDevice(_d, _u, device) { calls.push(`getDevice:${device}`); return store.get(device) ?? {}; },
     async createDevice(_d, _u, device) { calls.push(`createDevice:${device}`); const rec = { device, [SIP_PW_FIELD]: `GEN${++pwSeq}` }; store.set(device, rec); return rec; },
     async deleteDevice(_d, _u, device) { calls.push(`deleteDevice:${device}`); store.delete(device); return {}; },
+    async updateDevice(_d, _u, device, changes) {
+      calls.push(`updateDevice:${device}`);
+      if (failUpdate) throw new Error('device PUT unsupported on this release');
+      const rec = { ...(store.get(device) ?? { device }), ...changes };
+      store.set(device, rec);
+      return rec;
+    },
   };
-  return { dw, calls, store };
+  return { dw, calls, store, failUpdate: (v: boolean) => { failUpdate = v; } };
 }
 
 /** Mock Ringotel user writer; records the exact params of each mutation. */
@@ -352,6 +361,354 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
   ok(isDomainWritable('demo.example', ['demo.example']) === true, 'rail: allowlisted domain is writable');
   ok(isDomainWritable('acme.example', ['demo.example']) === false, 'rail: a non-allowlisted domain is refused');
   ok(isDomainWritable('DEMO.example', ['demo.example']) === true, 'rail: domain match is case-insensitive');
+
+
+  // ── syncIdentity: the background, event-driven identity push ──────────────────
+  {
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Old Name', info: { email: 'old@acme.example' } })];
+    const r = await syncIdentity({ ...base(), nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'synced' && r.rtUserId === 'U1', 'syncIdentity updates the canonical user');
+    ok(r.changed.sort().join(',') === 'email,name', 'both name and email were written');
+    ok(rt.calls.length === 1 && rt.calls[0].m === 'updateUser', 'exactly ONE call, and it is updateUser');
+    ok(rt.calls[0].args.name === 'Jane Doe' && rt.calls[0].args.email === 'jane@acme.example', 'the NS values are pushed');
+  }
+  {
+    // Replay safety: identical state ⇒ zero writes. Requires reading info.email, not user.email.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: 'jane@acme.example' } })];
+    const o = { ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any };
+    const r1 = await syncIdentity(o);
+    const r2 = await syncIdentity(o);
+    ok(r1.action === 'no-change' && r2.action === 'no-change', 'matching state is a no-change');
+    ok(rt.calls.length === 0, 'a replayed event produces ZERO Ringotel writes (the amplification guard)');
+  }
+  {
+    // The ROADMAP trap: email at info.email. If read from the top level it is always undefined ⇒ always writes.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: 'jane@acme.example' } })];
+    const r = await syncIdentity({ ...base(), email: 'jane@acme.example', nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'no-change', 'the Ringotel email is compared at info.email, not the (absent) top level');
+  }
+  {
+    // A genuinely-removed address must propagate; a FAILED read must not.
+    const rt = mockRt();
+    const users = () => [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: 'jane@acme.example' } })];
+    const cleared = await syncIdentity({ ...base(), email: '', nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users() as any });
+    ok(cleared.action === 'synced' && cleared.changed.join() === 'email' && rt.calls[0].args.email === '', "a genuinely-empty NS email propagates as '' (a real removal)");
+    const rt2 = mockRt();
+    const unknown = await syncIdentity({ ...base(), email: undefined, nsWrite: mockDevices().dw as any, rtWrite: rt2.rw as any, users: users() as any });
+    ok(unknown.action === 'no-change' && rt2.calls.length === 0, 'email:undefined (a failed NS read) touches nothing');
+  }
+  {
+    // Both sides absent ⇒ no write. Without normalizing undefined→'' this writes on every single event.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe' })];
+    const r = await syncIdentity({ ...base(), email: '', nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'no-change' && rt.calls.length === 0, 'no address on either side is a no-op, not a perpetual write');
+  }
+  {
+    const rt = mockRt();
+    const r = await syncIdentity({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: [] as any });
+    ok(r.action === 'absent' && rt.calls.length === 0, 'no Ringotel user ⇒ absent; a background sync NEVER provisions a billable seat');
+  }
+  {
+    // THE INVARIANT (Fable I4): only updateUser, ever. dedup/activate/deactivate here could brick an
+    // extension by racing the SSO worker's heal, which has no shared lock with this Worker.
+    const rt = mockRt();
+    const { dw, calls: dcalls } = mockDevices();
+    const users = [
+      rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Old', info: { email: 'a@x.example' } }),
+      rtUser({ id: 'U2', ext: '100', status: 0, name: 'Dup', info: { email: 'b@x.example' } }),
+    ];
+    const r = await syncIdentity({ ...base(), nsWrite: dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'synced' && r.rtUserId === 'U1', 'with a duplicate present it still targets the canonical');
+    const methods = rt.calls.map((c: any) => c.m);
+    ok(methods.every((m: string) => m === 'updateUser'), `INVARIANT: only updateUser was called (saw ${methods.join(',') || 'none'})`);
+    ok(!methods.includes('deleteUser'), 'INVARIANT: siblings are NEVER deduped by the background sync');
+    ok(!methods.includes('deactivateUser') && !methods.includes('createUser') && !methods.includes('resetUserPassword'), 'INVARIANT: no activation-state change and no creation');
+    ok(dcalls.length === 0, 'INVARIANT: syncIdentity touches NO NS device — not even a read');
+  }
+  {
+    // An inactive canonical still gets its identity synced — the directory entry should match NS.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 0, username: '100r', authname: '100r', name: 'Stale', info: { email: 'stale@x.example' } })];
+    const r = await syncIdentity({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'synced', 'an inactive user is still identity-synced (and stays inactive)');
+    ok(rt.calls.every((c: any) => c.m === 'updateUser'), 'and it is not reactivated');
+  }
+  {
+    // A genuine tie must refuse rather than guess — same rule as the interactive paths.
+    const users = [
+      rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' }),
+      rtUser({ id: 'U2', ext: '100', status: 1, username: '100r', authname: '100r' }),
+    ];
+    let status = 0;
+    try {
+      await syncIdentity({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: mockRt().rw as any, users: users as any });
+    } catch (e: any) {
+      status = e.status;
+    }
+    ok(status === 409, 'a genuine SIP-identity tie throws 409 instead of guessing');
+  }
+  {
+    // Only the differing field is written.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: 'stale@x.example' } })];
+    const r = await syncIdentity({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.changed.join() === 'email', 'a matching name is not rewritten — only the changed field is sent');
+    ok(!('name' in rt.calls[0].args), 'and the unchanged field is absent from the update body');
+  }
+
+
+  // ── SIP password rotation on activation ───────────────────────────────────────
+  // The failure this prevents: reusing a stored password leaves any OTHER endpoint holding it able to
+  // register as the same AOR. Two clients then fight over the registration — intermittent and very hard
+  // to diagnose. Rotating at activation invalidates the stranger.
+  {
+    const pw = generateSipPassword();
+    ok(pw.length === 20, 'generateSipPassword defaults to 20 chars');
+    ok(/^[A-Za-z0-9]+$/.test(pw), 'the password is alphanumeric only — no punctuation to mis-escape downstream');
+    ok(generateSipPassword() !== generateSipPassword(), 'consecutive passwords differ');
+    ok(generateSipPassword(40).length === 40, 'the length is configurable');
+    ok(new Set(Array.from({ length: 50 }, () => generateSipPassword())).size === 50, '50 generated passwords are all distinct');
+  }
+  {
+    // Existing device + rotation ON ⇒ PUT a new password, and Ringotel gets the NEW one.
+    const devs = mockDevices({ '100r': 'STALEPASSWORD' });
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 0, username: '100r', authname: '100r' })];
+    await activate({ ...base(), nsWrite: devs.dw as any, rtWrite: rt.rw as any, users: users as any, rotateExistingDevice: true });
+    ok(devs.calls.includes('updateDevice:100r'), 'an EXISTING device has its password rotated via updateDevice');
+    ok(!devs.calls.some((c) => c.startsWith('deleteDevice')), 'rotation is a PUT — the device is never deleted and recreated');
+    const pushed = rt.calls.find((c: any) => c.m === 'updateUser')?.args?.password;
+    ok(typeof pushed === 'string' && pushed !== 'STALEPASSWORD', 'the NEW password is what gets pushed to Ringotel');
+    ok(/^[A-Za-z0-9]{20}$/.test(String(pushed)), 'and it is a freshly generated one');
+  }
+  {
+    // No existing device ⇒ nothing to rotate; the created device is already exclusive.
+    const devs = mockDevices();
+    const rt = mockRt();
+    await activate({ ...base(), nsWrite: devs.dw as any, rtWrite: rt.rw as any, users: [] as any, rotateExistingDevice: true });
+    ok(devs.calls.includes('createDevice:100r'), 'a missing device is created');
+    ok(!devs.calls.includes('updateDevice:100r'), 'a NEWLY created device is not rotated — it already has an exclusive password');
+  }
+  {
+    // Default (flag absent) must behave exactly as before — this is an opt-in behaviour change.
+    const devs = mockDevices({ '100r': 'STALEPASSWORD' });
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 0, username: '100r', authname: '100r' })];
+    await activate({ ...base(), nsWrite: devs.dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(!devs.calls.includes('updateDevice:100r'), 'with the flag unset nothing rotates (backwards compatible)');
+    ok(rt.calls.find((c: any) => c.m === 'updateUser')?.args?.password === 'STALEPASSWORD', 'and the existing password is reused as before');
+  }
+  {
+    // Rotation is best-effort: a release without the device PUT must not block activation.
+    const devs = mockDevices({ '100r': 'STALEPASSWORD' });
+    devs.failUpdate(true);
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 0, username: '100r', authname: '100r' })];
+    const res = await activate({ ...base(), nsWrite: devs.dw as any, rtWrite: rt.rw as any, users: users as any, rotateExistingDevice: true });
+    ok(res.action === 'updated', 'a failed rotation does NOT fail the activation');
+    ok(rt.calls.find((c: any) => c.m === 'updateUser')?.args?.password === 'STALEPASSWORD', 'it falls back to the existing password so the app still works');
+  }
+  {
+    const devs = mockDevices({ '100r': 'STALEPASSWORD' });
+    const r = await ensureDevice(devs.dw, 'acme.example', '100', '100r', { rotateExisting: true });
+    ok(r.rotated === true && r.password !== 'STALEPASSWORD' && r.created === false, 'ensureDevice reports rotated:true with the new password');
+    const devs2 = mockDevices({ '100r': 'STALEPASSWORD' });
+    devs2.failUpdate(true);
+    const r2 = await ensureDevice(devs2.dw, 'acme.example', '100', '100r', { rotateExisting: true });
+    ok(r2.rotated === false && r2.password === 'STALEPASSWORD' && (r2.rotateError ?? '').includes('unsupported'), 'a rotation failure is reported, not thrown');
+  }
+  {
+    // resetPassword must NOT rotate the SIP credential — it resets the APP password. Rotating there too
+    // would be defensible, but it is a different decision and is deliberately not taken here.
+    const devs = mockDevices({ '100r': 'STALEPASSWORD' });
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
+    await resetPassword({ ...base(), nsWrite: devs.dw as any, rtWrite: rt.rw as any, users: users as any, rotateExistingDevice: true });
+    ok(!devs.calls.includes('updateDevice:100r'), 'resetPassword does not rotate the SIP password even when the flag is set');
+  }
+
+  // ── deactivateAppOnly: the narrow offboarding action ──────────────────────────
+  {
+    const { rw, calls } = mockRt();
+    const { dw, calls: dcalls } = mockDevices();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1 })];
+    const r = await deactivateAppOnly({ ...base(), nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'deactivated' && r.rtUserIds.length === 1 && r.rtUserIds[0] === 'U1', 'deactivateAppOnly deactivates the active record');
+    ok(calls.length === 1 && calls[0]!.m === 'deactivateUser', 'INVARIANT: deactivateAppOnly calls ONLY deactivateUser on the Ringotel side — no dedup, no identity write');
+    ok(dcalls.length === 0, 'INVARIANT: deactivateAppOnly touches NO NS device — not even a read, let alone a delete');
+  }
+  {
+    // The whole point of the orphan path: a billed sibling left active defeats it.
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1 }), rtUser({ id: 'U2', ext: '100', status: 1 })];
+    const r = await deactivateAppOnly({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'deactivated' && r.rtUserIds.length === 2, 'deactivateAppOnly deactivates EVERY active record at the extension, not just the canonical');
+    ok(calls.every((c) => c.m === 'deactivateUser'), 'deactivating siblings still only ever calls deactivateUser');
+  }
+  {
+    // Two records sharing the SIP identity make resolveCanonical throw 409. This path must not care:
+    // it is not choosing a record, so there is no tie to refuse.
+    const { rw } = mockRt();
+    const users = [
+      rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' }),
+      rtUser({ id: 'U2', ext: '100', status: 1, username: '100r', authname: '100r' }),
+    ];
+    const r = await deactivateAppOnly({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'deactivated' && r.rtUserIds.length === 2, 'deactivateAppOnly does NOT refuse an ambiguous SIP-identity tie — it deactivates all of them');
+  }
+  {
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 0 })];
+    const r = await deactivateAppOnly({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'no-change' && calls.length === 0, 'deactivateAppOnly is a no-op when nothing at the extension is active (replay-safe)');
+  }
+  {
+    const { rw, calls } = mockRt();
+    const r = await deactivateAppOnly({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: [] as any });
+    ok(r.action === 'absent' && calls.length === 0, 'deactivateAppOnly reports absent when the extension has no Ringotel record');
+  }
+  {
+    // STRICT on branchid, same reason usersForExt is: an org-wide list spans branches, and another NS
+    // domain's user at the same extension must never be deactivated by this domain's sweep.
+    const { rw, calls } = mockRt();
+    const users = [{ id: 'U9', extension: '100', branchid: 'OTHER', status: 1 }];
+    const r = await deactivateAppOnly({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'absent' && calls.length === 0, 'deactivateAppOnly ignores a same-extension record in a DIFFERENT branch');
+  }
+  {
+    // Also-fix #4: trim asymmetry. nsOffboard's sweep planner already trims the Ringotel `extension`
+    // it reads (`String(u.extension ?? '').trim()`) before deciding an extension is orphaned. If
+    // `usersForExt` compared untrimmed, a record whose stored extension carries whitespace would be
+    // planned as an orphan every sweep but never matched here — deactivateAppOnly would return `absent`
+    // forever, silently, with no indication why. `usersForExt` now trims both sides.
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: ' 100 ', status: 1 })]; // whitespace-carrying stored extension
+    const r = await deactivateAppOnly({ ...base(), ext: '100', nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'deactivated' && r.rtUserIds.length === 1 && r.rtUserIds[0] === 'U1', 'deactivateAppOnly matches a Ringotel record whose extension carries whitespace against a clean target extension');
+    ok(calls.some((c) => c.m === 'deactivateUser' && c.args.userid === 'U1'), 'the whitespace-carrying record is the one actually deactivated');
+  }
+  {
+    // Same trim, the other direction: a caller-supplied ext with incidental whitespace still matches a
+    // cleanly-stored Ringotel extension (defensive; the sweep planner and event payload both already
+    // supply clean values, but the comparison itself should not silently depend on that).
+    const { rw } = mockRt();
+    const users = [rtUser({ id: 'U2', ext: '100', status: 1 })];
+    const r = await deactivateAppOnly({ ...base(), ext: ' 100 ', nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'deactivated' && r.rtUserIds[0] === 'U2', 'deactivateAppOnly also trims a whitespace-carrying caller-supplied ext');
+  }
+
+  // ── repairDeviceForEvent: device self-heal on a user-change event ─────────────
+  {
+    const { dw, calls: dcalls } = mockDevices();           // device 100r MISSING
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
+    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'repaired' && r.changed.includes('device-created'), 'heal creates a missing NS device for an ACTIVE app user');
+    ok(dcalls.includes('createDevice:100r'), 'the device is actually created');
+    const up = calls.find((c) => c.m === 'updateUser');
+    ok(!!up && up.args.password === 'GEN1' && up.args.username === '100r', 'the new SIP password is pushed to Ringotel');
+    ok(!dcalls.some((c) => c.startsWith('updateDevice')), 'INVARIANT: repair NEVER rotates — no updateDevice on an event path');
+  }
+  {
+    const { dw, calls: dcalls } = mockDevices({ '100r': 'PW' });
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
+    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'ok' && r.changed.length === 0, 'a correct device + matching SIP identity is a no-op');
+    ok(calls.length === 0, 'no Ringotel write when nothing is wrong (an event must not cost a write)');
+    ok(!dcalls.some((c) => c.startsWith('updateDevice')), 'still no rotation on the happy path');
+  }
+  {
+    const { dw } = mockDevices({ '100r': 'PW' });
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: 'WRONG', authname: 'WRONG' })];
+    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'repaired' && r.changed.includes('sip-identity'), 'a mismatched Ringotel username/authname is corrected');
+    const up = calls.find((c) => c.m === 'updateUser')!;
+    ok(up.args.username === '100r' && up.args.authname === '100r', 'the corrected values are the device AOR');
+    ok(up.args.password === undefined, 'an existing device password is NOT pushed speculatively — it cannot be compared, so that would be a write on every event');
+  }
+  {
+    const { dw, calls: dcalls } = mockDevices();           // device MISSING
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
+    const r = await repairDeviceForEvent({ ...base(), mode: 'report', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'would-repair' && r.changed.includes('device-missing'), 'report mode names the drift');
+    ok(!dcalls.some((c) => c.startsWith('createDevice')), 'report mode NEVER creates a device');
+    ok(calls.length === 0, 'report mode performs no Ringotel write at all');
+  }
+  {
+    // Also-fix #3: an EXISTING device whose stored SIP password reads back blank must not be logged as
+    // "device is missing" in HEAL mode, where mayCreate:true proves the device already existed — a
+    // genuinely missing one would have been created. It gets a distinct, honest tag.
+    const { dw, calls: dcalls } = mockDevices({ '100r': '' }); // device EXISTS, stored password reads blank
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
+    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'repaired' && r.changed.includes('device-password-blank') && !r.changed.includes('device-missing'), 'heal mode tags a present-but-blank-password device distinctly from a genuinely missing one');
+    ok(!dcalls.some((c) => c.startsWith('createDevice')), 'the device is NOT re-created — it already existed');
+    const up = calls.find((c) => c.m === 'updateUser');
+    ok(!up || up.args.password === undefined, 'no password is pushed for a device that was not freshly created (the blank-push guard holds)');
+  }
+  {
+    // Same scenario in REPORT mode: `ensureNsDevice`'s shape is genuinely ambiguous there (mayCreate is
+    // always false, so "created:false" can't distinguish absent from present-but-blank) — stays tagged
+    // 'device-missing', which is now documented as ambiguous rather than claimed as certain.
+    const { dw } = mockDevices({ '100r': '' });
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
+    const r = await repairDeviceForEvent({ ...base(), mode: 'report', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'would-repair' && r.changed.includes('device-missing') && !r.changed.includes('device-password-blank'), 'report mode keeps the ambiguous case tagged device-missing');
+    ok(calls.length === 0, 'report mode performs no Ringotel write at all');
+  }
+  {
+    const { dw, calls: dcalls } = mockDevices();
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 0, username: '100r', authname: '100r' })];
+    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'inactive' && calls.length === 0 && dcalls.length === 0, 'an INACTIVE Ringotel user is never a provisioning trigger — no device work at all');
+  }
+  {
+    const { dw, calls: dcalls } = mockDevices();
+    const { rw, calls } = mockRt();
+    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: [] as any });
+    ok(r.action === 'absent' && calls.length === 0 && dcalls.length === 0, 'no Ringotel record ⇒ absent, and no NS device is provisioned');
+  }
+
+  // ── attached secondaries are never canonical ──────────────────────────────────
+  {
+    // A secondary carries `userid` pointing at its primary and sits at the SAME extension, so without
+    // the guard it reads as an ordinary duplicate — and being newer, it wins the newest-first tiebreak.
+    //
+    // ⚠️ The fixture is built so the guard is the ONLY thing that decides. Neither record carries the
+    // `<ext><suffix>` SIP identity, so the SIP tiebreak finds nothing; and neither is `status === 1`, so
+    // the active-first tiebreak is a draw. That leaves newest-first, where the secondary WOULD win.
+    // Giving the primary a SIP identity or an active status makes this assertion pass with the guard
+    // deleted — proving nothing about the guard, which is exactly what the first draft of this test did.
+    const primary = { id: 'P1', extension: '100', branchid: 'B1', status: 0, created: 1000 } as unknown as User;
+    const secondary = { id: 'S1', extension: '100', branchid: 'B1', status: 2, userid: 'P1', created: 9000 } as unknown as User;
+
+    const chosen = resolveCanonical({ users: [secondary, primary], branchid: 'B1', ext: '100', suffix: 'r' });
+    ok(chosen?.id === 'P1', 'resolveCanonical: an attached secondary is never canonical, even when newer');
+
+    // The production-shaped case: a real primary carrying the SIP identity, beside a secondary. This one
+    // is belt-and-braces — the SIP tiebreak alone would pick the primary — but it documents the intent
+    // for the shape that actually occurs in the wild.
+    const realPrimary = { id: 'P2', extension: '101', branchid: 'B1', status: 1, username: '101r', authname: '101r', created: 1000 } as unknown as User;
+    const realSecondary = { id: 'S2', extension: '101', branchid: 'B1', status: 2, userid: 'P2', created: 9000 } as unknown as User;
+    ok(resolveCanonical({ users: [realSecondary, realPrimary], branchid: 'B1', ext: '101', suffix: 'r' })?.id === 'P2',
+       'resolveCanonical: the real provisioned user wins beside a secondary (belt-and-braces — SIP identity also decides this one)');
+
+    // And with NO primary present, a lone secondary must not be adopted as one. This is the path where
+    // the guard is indispensable: `matches.length <= 1` returns BEFORE any tiebreak runs, so nothing
+    // else in the function would stop a lone secondary being provisioned over.
+    const none = resolveCanonical({ users: [secondary], branchid: 'B1', ext: '100', suffix: 'r' });
+    ok(none === undefined, 'resolveCanonical: a lone attached secondary resolves to nothing, not to itself');
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

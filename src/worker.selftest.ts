@@ -7,10 +7,11 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveFlow, type Snapshot } from '@dszp/netsapiens-lib';
-import { INDEX_REFRESH_LOCK_KEY } from './ringotel.js';
-import { emailForWrite } from './worker.js';
+import { resolveFlow, NsApiError, type Snapshot } from '@dszp/netsapiens-lib';
+import { indexRefreshLockKey, orgParamsKey, scopeOf } from './ringotel.js';
+import { authorisesDeactivation, emailForWrite, nsEventLimitDecision, nsEventsMissingRingotelKey, readNsUser, processNsEventUsers } from './worker.js';
 import type { Principal } from '@dszp/netsapiens-lib';
+import type { NsEventsConfig } from './nsEvents.js';
 
 // With no argument, run against the committed, fully-genericized fixture so `pnpm test:worker` just
 // works (and can sit in the CI `test` aggregate). Pass a path to point it at any other snapshot's JSON
@@ -51,7 +52,13 @@ const memCache = new MemoryCache();
 // directory-refresh coalescing lock (60s TTL in production; this stub's `match` has no expiry check, so
 // it never self-clears here). Delete just that key rather than the whole cache — a blanket clear would
 // also nuke the JWT-verdict cache and any org/user-status entries other assertions still rely on.
-const clearRefreshLock = () => memCache.store.delete(INDEX_REFRESH_LOCK_KEY);
+// The key is scoped per deployment now; none of the envs below set CACHE_SCOPE, so `scopeOf({})` is
+// exactly the scope the Worker computes here — and stays right if the default ever changes.
+const clearRefreshLock = () => memCache.store.delete(indexRefreshLockKey(scopeOf({})));
+// Likewise for the per-org settings overlay (ORG_PARAMS_TTL = 60s in production, never in this stub): a
+// scenario that CHANGES an org's params must evict it, or it keeps serving the PREVIOUS scenario's SSO
+// state. Called from every rtOrgs reassignment below, so no scenario can inherit another's org settings.
+const clearOrgParams = (orgid = 'RTORG') => memCache.store.delete(orgParamsKey(scopeOf({}), orgid));
 
 // --- stub global fetch: /jwt → 200 valid; NS v2 reads → fixture ---
 let jwtCalls = 0;
@@ -83,6 +90,11 @@ const nf = () => new Response('[]', { status: 404 });
     // fan-out doesn't cross-assign another org's branches (matches the portal.selftest stub).
     const result =
       method === 'getOrganizations' ? rtOrgs
+      // The per-org volatile-settings read behind the ssoService/hPIE overlay. Served from the SAME
+      // rtOrgs the directory is built from, so the stub can't manufacture an overlay that disagrees with
+      // the index by accident -- a disagreement in a test below is then deliberate, and is the bug this
+      // whole mechanism exists to fix.
+      : method === 'getOrganization' ? rtOrgs.find((o: any) => String(o.id) === String(params?.id))
       : method === 'getBranches' ? rtBranches.filter((b: any) => b.orgid === params?.orgid)
       : method === 'getUsers' ? rtUsers
       : method === 'createUser' ? { id: 'NEWRT', ...params }
@@ -253,7 +265,7 @@ const ok = (c: boolean, m: string) => {
   // Enabled: stub a Ringotel org whose branch.address == this domain, with a user per ###r device.
   const rtExts = [...new Set([...JSON.stringify(expected).matchAll(/\((\d+)r\)/g)].map((m) => m[1]!))];
   if (rtExts.length) {
-    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
     rtUsers = rtExts.map((e) => ({ id: `u${e}`, extension: e, branchid: 'RTBR', name: `RT ${e}`, devs: [{ id: `d${e}`, st: 0 }] }));
 
@@ -306,7 +318,7 @@ const ok = (c: boolean, m: string) => {
   }
 
   // ================= /rapp/org route (standalone mode; ?refresh bypasses cross-test cache) =================
-  rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+  clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
   rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
   const rEnvS = { ...sEnv, RINGOTEL_API_KEY: 'rt-key' };
@@ -346,7 +358,7 @@ const ok = (c: boolean, m: string) => {
   // deployment configured with a DIFFERENT suffix gets falsely flagged 'authname-drift'. Prove this against
   // the LIVE /rapp/users route (not usersStatusMap directly, which only proves the parameter itself
   // works, not that the wrapper threads it) with a non-default suffix and an authname that matches it.
-  rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+  clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
   rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, authname: '100x', trunkid: 'T1', trunkstate: 1, created: 1000, stime: 5000, devs: [{ id: 'd', st: 1 }] }];
 
@@ -371,7 +383,7 @@ const ok = (c: boolean, m: string) => {
   // ================= /me/status (self-service tier, 2026-07-18) =================
   // Org present + '100' activated (reuse the read-test stub, cache warm from the refresh above); nsUserRec
   // drives the `~` self-resolution (GET /domains/~/users/~ → this record → ext '100').
-  rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+  clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
   rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
   nsUserRec = { user: '100', domain, email: `u@${domain}` };
@@ -398,6 +410,26 @@ const ok = (c: boolean, m: string) => {
     const ru2 = await meCall(`/rapp/user?domain=${domain}&ext=100`, pEnv, mkTok({ user_scope: 'Reseller' }));
     const ru2b = await ru2.json();
     ok(ru2.status === 200 && ru2b.active === true && ru2b.ext === '100', '[ringotel/user] admin route intact (active=org-present) post-refactor');
+    // ── fresh vs poll: two flags that used to be one ────────────────────────────────
+    // `?fresh=1` had come to mean BOTH "read the Ringotel user list live" AND "skip the NS-side
+    // eligibility + app-access reads". That was harmless while only the post-write poll asked for fresh
+    // data, but the profile page now asks for it ON LOAD -- and on load those extras are exactly what
+    // renders the Force button and the sign-in panel. `?poll=1` now carries the "and give me less"
+    // half on its own.
+    const admTok = mkTok({ user_scope: 'Reseller' });
+    const rFresh = await (await meCall(`/rapp/user?domain=${domain}&ext=100&fresh=1`, pEnv, admTok)).json();
+    ok(rFresh.eligibility !== null && rFresh.eligibility !== undefined,
+      '[ringotel/user] ?fresh=1 alone STILL computes eligibility — a fresh read must not silently cost the profile its extras');
+    const rPoll = await (await meCall(`/rapp/user?domain=${domain}&ext=100&fresh=1&poll=1`, pEnv, admTok)).json();
+    ok(rPoll.eligibility === null && rPoll.appAccess === undefined,
+      '[ringotel/user] ?poll=1 skips eligibility + appAccess, so the repeat poll stays cheap');
+    ok(rPoll.active === true && rPoll.ext === '100',
+      '[ringotel/user] the poll still returns the status it exists to fetch');
+    // An older cached client that only knows `fresh=1` therefore pays for reads it discards, rather than
+    // losing controls it needs. That is the right way round to be wrong during a rollout.
+    ok(rFresh.age === 0, '[ringotel/user] a fresh read reports age 0 (the data is current, and says so)');
+    const rCached = await (await meCall(`/rapp/user?domain=${domain}&ext=100`, pEnv, admTok)).json();
+    ok(typeof rCached.age === 'number', '[ringotel/user] a cached read reports how old its data is');
   }
 
   // ================= /me/app-access (Task 5, self-service sign-in details) =================
@@ -411,7 +443,7 @@ const ok = (c: boolean, m: string) => {
     ok(postRes.status === 405, '[me/app-access] rejects POST (not in WRITE_PATHS)');
 
     // Password mode: no SSO configured, org active, own ext '100' activated with a SIP username.
-    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
     rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, username: '100r', devs: [{ id: 'd', st: 1 }] }];
     nsUserRec = { user: '100', domain, email: `u@${domain}`, 'account-status': 'standard', 'user-scope': 'Basic User', 'login-username': `100@${domain}` };
@@ -435,7 +467,7 @@ const ok = (c: boolean, m: string) => {
     // second `refresh=ringotel` call in the same run would silently serve the stale directory cached by
     // an earlier test; evict just the refresh lock so this scenario's org data actually lands.
     clearRefreshLock();
-    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org', params: { sso: '9/netsapiens_sso' } }];
+    clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org', params: { sso: '9/netsapiens_sso' } }];
     await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
     const ssoEnv = { ...pEnv, RINGOTEL_SSO_SERVICE: 'netsapiens_sso' };
     const r3 = await meCall('/me/app-access', ssoEnv);
@@ -516,7 +548,7 @@ const ok = (c: boolean, m: string) => {
     // Org inactive (no Ringotel org bound for this domain) ⇒ unavailable; the hide list still resolves
     // (a domain may run another white-label app and still want stock entries hidden).
     clearRefreshLock();
-    rtOrgs = [];
+    clearOrgParams(); rtOrgs = [];
     rtBranches = [];
     await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
     const r4 = await meCall('/me/app-access', { ...pEnv, PORTAL_APPS_HIDE: 'SNAPmobile Web' });
@@ -577,7 +609,7 @@ const ok = (c: boolean, m: string) => {
     // the refresh lock too — the "no org" scenario just cached an empty directory, and a later forced
     // refresh would otherwise coalesce onto that stale (org-less) entry.
     clearRefreshLock();
-    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
     rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
     nsUserRec = { user: '100', domain, email: `u@${domain}` };
@@ -600,7 +632,7 @@ const ok = (c: boolean, m: string) => {
   // ================= write routes: activate / deactivate / reset (delegated) =================
   // Live-mutation is delegated-only + rail-gated. Reseller token (has ringotel.activate via the
   // office_manager default). The stub org binds this domain; nsUserRec drives eligibility.
-  rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+  clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
   nsUserRec = { user: '100', srv_code: '', email: `u@${domain}`, 'first-name': 'Test', 'last-name': 'User' };
   nsDevices = [];
@@ -708,6 +740,19 @@ const ok = (c: boolean, m: string) => {
     const uu = rtRpc.find((c) => c.method === 'updateUser');
     ok(uu?.params.name === 'Test' && uu?.params.email === `u@${domain}`, '[write] deactivate also syncs NS name + email into the directory entry');
   }
+  // Deactivate an extension with NO app record at all, single-connection: today's behaviour is a 200
+  // no-op (RT has nothing to touch; the best-effort NS device delete swallows its own 404) — NOT a 404.
+  // Pinned deliberately: `resolveWriteConnection` is called with `mayCreate: true` unconditionally for
+  // BOTH activate and deactivate, specifically so this stays unchanged. Threading the activate/deactivate
+  // flag through would make the single-connection path require an existing record too, silently turning
+  // this into a 404 on every live domain — a real behaviour change that needs the owner's sign-off, not
+  // a refactor's side effect.
+  {
+    rtUsers = [];
+    const r = await wcall('/rapp/activate', { domain, ext: '999999', activate: false });
+    ok(r.status === 200 && (await r.json()).action === 'deactivated',
+       '[single] deactivate on an extension with NO app record still 200s { action:deactivated } (mayCreate stays true)');
+  }
   // Reset requires an existing RT user.
   {
     rtUsers = [];
@@ -716,12 +761,168 @@ const ok = (c: boolean, m: string) => {
     const r = await wcall('/rapp/resetPassword', { domain, ext: '100' });
     ok(r.status === 200 && (await r.json()).action === 'reset', '[write] reset (existing RT user) → 200 { action:reset }');
   }
+
+  {
+    // Single connection, resetting an extension with NO app record: status AND message must be exactly
+    // what they were before this feature. A body change is observable to any client parsing it.
+    const r = await wcall('/rapp/resetPassword', { domain, ext: '404404' });
+    ok(r.status === 404, '[single] reset on an unknown extension still 404s');
+    ok((await r.json() as { error?: string }).error === 'No app user to reset for this extension',
+       '[single] ...with the pre-existing message, unchanged by multi-connection support');
+  }
+
+  // ── write paths on a multi-connection domain ──────────────────────────────────
+  {
+    // Earlier scenarios above already forced directory refreshes, arming the coalescing lock — without
+    // clearing it here resolveForWrite would silently serve the stale single-branch directory instead
+    // of the two-connection one this scenario sets up.
+    clearRefreshLock();
+    const savedBranches = rtBranches, savedUsers = rtUsers;
+    // ONE org, TWO connections bound to the same domain. `name` becomes `branchName` in the index.
+    rtBranches = [
+      { id: 'RTBR', orgid: 'RTORG', name: 'Main', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+      { id: 'RTBR2', orgid: 'RTORG', name: 'Warehouse', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+    ];
+    // The only app record sits on the SECOND connection.
+    rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR2', status: 1, state: 1, username: '100r', authname: '100r', devs: [{ id: 'd', st: 1 }] }];
+
+    // Reset targets an EXISTING record → must find it on the second connection and succeed.
+    const reset = await wcall('/rapp/resetPassword', { domain, ext: '100' });
+    ok(reset.status === 200, '[multi] resetPassword finds an existing record on the second connection');
+
+    // Activating an extension with NO record would CREATE one → no basis to choose → refuse.
+    const create = await wcall('/rapp/activate', { domain, ext: '777' });
+    ok(create.status === 409, '[multi] activating a NEW user on a multi-connection domain refuses (Half B decides where)');
+    ok(/connection/i.test(await create.text()), '[multi] the refusal names connections, not a broken binding');
+
+    // Activating an EXISTING record is fine — its connection is knowable.
+    const reactivate = await wcall('/rapp/activate', { domain, ext: '100' });
+    ok(reactivate.status === 200, '[multi] re-activating an existing record works on a multi-connection domain');
+
+    // An extension present on BOTH connections is a conflict, refused rather than guessed.
+    rtUsers = [
+      { id: 'ua', extension: '100', branchid: 'RTBR', status: 1, state: 1, username: '100r', authname: '100r', devs: [] },
+      { id: 'ub', extension: '100', branchid: 'RTBR2', status: 1, state: 1, username: '100r', authname: '100r', devs: [] },
+    ];
+    const clash = await wcall('/rapp/resetPassword', { domain, ext: '100' });
+    ok(clash.status === 409, '[multi] an extension on TWO connections refuses the write rather than picking one');
+
+    // Bulk pre-population creates many records at once — on a multi-connection domain there is no basis
+    // to choose one for any of them, so buildPrepopPlan refuses before it ever reads NS users. Nothing
+    // else in the suite pins this route's status/message; a regression here (e.g. the refusal silently
+    // becoming a 403, or losing its "default connection" wording) would pass every other check.
+    const prepop = await wcall('/rapp/prepop/apply', { domain });
+    ok(prepop.status === 409, '[multi] bulk prepop refuses on a multi-connection domain (409)');
+    ok(
+      (await prepop.json() as { error?: string }).error === 'This domain has more than one app connection — bulk pre-population needs a default connection',
+      '[multi] ...with the message about a missing default connection',
+    );
+
+    rtBranches = savedBranches; rtUsers = savedUsers;
+  }
+
   // Indicator (read) GET /rapp/user → single-user status.
   {
     rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
     const r = await wcall('/rapp/user?ext=100', null, wEnv, resellerTok, 'GET');
     const b = await r.json();
     ok(r.status === 200 && b.active === true && b.status && b.status.activated === true, '[write] GET /rapp/user → single-user status indicator');
+  }
+
+  // ── the connection name survives to the client, delegated mode (Task 12) ──────────
+  // `/rapp/status` in the brief is this route (`/rapp/users`) under its current name. `dcall`'s fixed
+  // env carries no RINGOTEL_API_KEY, so it can't reach this route — reuse `wcall` instead, which is the
+  // existing delegated (bearer-token) helper that already exercises Ringotel reads/writes just above,
+  // with `domain` and `resellerTok` from the same enclosing scope.
+  {
+    clearRefreshLock();
+    const savedBranches = rtBranches, savedUsers = rtUsers;
+    rtBranches = [
+      { id: 'RTBR', orgid: 'RTORG', name: 'Main', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+      { id: 'RTBR2', orgid: 'RTORG', name: 'Warehouse', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+    ];
+    rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR2', status: 1, state: 1, devs: [] }];
+
+    const r = await wcall(`/rapp/users?domain=${domain}&refresh=ringotel`, null, wEnv, resellerTok, 'GET');
+    const b = await r.json() as { users?: Record<string, { connection?: string }> };
+    ok(r.status === 200 && b.users?.['100']?.connection === 'Warehouse', '[multi] the connection name survives to the client');
+
+    rtBranches = savedBranches; rtUsers = savedUsers;
+  }
+
+  // ── on a conflict, the row carries `warning`, end-to-end through the live route (Task 12 fix round) ──
+  // The Worker merges appStatusView onto every /rapp/users row (withConnectionView). This proves that
+  // merge actually runs on the live HTTP path — not just in the appAccess/ringotel unit tests — and that
+  // a conflicting extension's row is NOT indistinguishable from a clean one that merely happens to sit on
+  // "Main": the client must see `warning`, the operator-actionable signal, not a bare connection name it
+  // would otherwise render as if it were trustworthy.
+  {
+    clearRefreshLock();
+    const savedBranches = rtBranches, savedUsers = rtUsers;
+    rtBranches = [
+      { id: 'RTBR', orgid: 'RTORG', name: 'Main', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+      { id: 'RTBR2', orgid: 'RTORG', name: 'Warehouse', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+    ];
+    // Extension '100' has a record on BOTH connections — the conflict case.
+    rtUsers = [
+      { id: 'ua', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [] },
+      { id: 'ub', extension: '100', branchid: 'RTBR2', status: 1, state: 1, devs: [] },
+    ];
+
+    const r = await wcall(`/rapp/users?domain=${domain}&refresh=ringotel`, null, wEnv, resellerTok, 'GET');
+    const b = await r.json() as { users?: Record<string, { connection?: string; warning?: string }> };
+    ok(r.status === 200 && b.users?.['100']?.warning === 'connection-conflict', '[multi] a conflicting extension carries `warning` on the live route');
+
+    rtBranches = savedBranches; rtUsers = savedUsers;
+  }
+
+  // ── withConnectionView on /rapp/user, BOTH branches (Task 12 fix-wave, whole-branch review) ──────
+  // `/rapp/user` is the route behind the ADMIN profile App Status panel — kit.selftest.ts pins the
+  // CLIENT reading status.connection/status.warning off this route's body, but nothing before this
+  // pinned the SERVER actually emitting them here. Two independent call sites merge the view onto the
+  // record: computeUserStatus (the default/cached path) and the `?fresh=1` branch — cover both, since
+  // either could silently drop the merge without the other suites noticing.
+  {
+    clearRefreshLock();
+    const savedBranches = rtBranches, savedUsers = rtUsers;
+    rtBranches = [
+      { id: 'RTBR', orgid: 'RTORG', name: 'Main', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+      { id: 'RTBR2', orgid: 'RTORG', name: 'Warehouse', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } },
+    ];
+    // Extension '100' sits ONLY on the second connection.
+    rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR2', status: 1, state: 1, devs: [] }];
+    // Prime the directory + org-users cache with this scenario: computeUserStatus's cached path
+    // hardcodes `refresh: false`, so it can only ever see what a prior refreshed read already cached.
+    await wcall(`/rapp/users?domain=${domain}&refresh=ringotel`, null, wEnv, resellerTok, 'GET');
+
+    const cached = await wcall(`/rapp/user?domain=${domain}&ext=100`, null, wEnv, resellerTok, 'GET');
+    const cb = await cached.json() as { status?: { connection?: string } };
+    ok(cached.status === 200 && cb.status?.connection === 'Warehouse',
+       '[multi] /rapp/user (cached path) carries status.connection for a record on the second connection');
+
+    const fresh = await wcall(`/rapp/user?domain=${domain}&ext=100&fresh=1`, null, wEnv, resellerTok, 'GET');
+    const fb = await fresh.json() as { status?: { connection?: string } };
+    ok(fresh.status === 200 && fb.status?.connection === 'Warehouse',
+       '[multi] /rapp/user?fresh=1 (the separately-wired fresh path) also carries status.connection');
+
+    // Extension '100' now sits on BOTH connections — the conflict case.
+    rtUsers = [
+      { id: 'ua', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [] },
+      { id: 'ub', extension: '100', branchid: 'RTBR2', status: 1, state: 1, devs: [] },
+    ];
+    await wcall(`/rapp/users?domain=${domain}&refresh=ringotel`, null, wEnv, resellerTok, 'GET');
+
+    const cachedConflict = await wcall(`/rapp/user?domain=${domain}&ext=100`, null, wEnv, resellerTok, 'GET');
+    const ccb = await cachedConflict.json() as { status?: { warning?: string } };
+    ok(cachedConflict.status === 200 && ccb.status?.warning === 'connection-conflict',
+       '[multi] /rapp/user (cached path) carries status.warning for a conflicting extension');
+
+    const freshConflict = await wcall(`/rapp/user?domain=${domain}&ext=100&fresh=1`, null, wEnv, resellerTok, 'GET');
+    const fcb = await freshConflict.json() as { status?: { warning?: string } };
+    ok(freshConflict.status === 200 && fcb.status?.warning === 'connection-conflict',
+       '[multi] /rapp/user?fresh=1 also carries status.warning for a conflicting extension');
+
+    rtBranches = savedBranches; rtUsers = savedUsers;
   }
 
   // ================= domain allowlist =================
@@ -759,7 +960,7 @@ const ok = (c: boolean, m: string) => {
   // first (same pattern as the suffix-threading guard above), THEN hit /rapp/user un-refreshed so
   // it exercises the exact cached path the profile endpoint uses in production.
   const ringotelUserCall = async ({ ext, devices }: { ext: string; devices: unknown }) => {
-    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
     rtUsers = [{ id: `u${ext}`, extension: ext, branchid: 'RTBR', status: 1, state: 1, authname: `${ext}r`, trunkid: 'T1', trunkstate: 1, created: 1000, stime: 5000, devs: [{ id: 'd', st: 1 }] }];
     nsUserRec = { user: ext, domain, email: `u@${domain}` };
@@ -797,6 +998,84 @@ const ok = (c: boolean, m: string) => {
     '[ringotel/user] device read failure → no flag (absence of evidence is not evidence)',
   );
 
+  // ── processNsEventUsers: each of the three handlers acts on the connection the record sits on ──
+  // Task 10 regression guard. locateConnection is unit-tested in isolation (nsEvents.selftest.ts), but
+  // nothing proved the three call sites here actually USE its result rather than, say, a reused variable
+  // or the domain's first bound connection — exactly the bug class that would slip through on a path that
+  // deactivates a real seat. Called DIRECTLY rather than through worker.fetch: handleNsEvent hands this
+  // batch to ctx.waitUntil, which is fire-and-forget in production and a no-op stub in this harness, so
+  // going through the HTTP path would give no deterministic way to await it.
+  {
+    clearOrgParams();
+    // The directory-refresh lock coalesces forced refreshes within a short window (see its doc comment
+    // in ringotel.ts) — many earlier scenarios above already forced one, so without clearing it here
+    // resolveForWrite would silently serve a STALE single-branch directory instead of the two-connection
+    // one this test sets up next.
+    clearRefreshLock();
+    // A domain with TWO bound connections — the topology this task exists for. B1 first, B2 second: if a
+    // call site fell back to "the first connection" the record on B2 would never be found.
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [
+      { id: 'B1', orgid: 'RTORG', address: domain },
+      { id: 'B2', orgid: 'RTORG', address: domain },
+    ];
+    const ext = '777';
+    // The record lives on B2 ONLY. No username/authname set, so repairDeviceForEvent's SIP-identity check
+    // has something to report even in 'report' mode (no NS device write required).
+    rtUsers = [{ id: 'RTU777', extension: ext, branchid: 'B2', status: 1, name: 'Stale Name' }];
+    nsDevicesFail = false;
+    nsDevices = [];
+    const baseCfg: Omit<NsEventsConfig, 'offboard' | 'deviceRepair'> = {
+      intent: 'on', armed: true, domains: [domain], writeRail: [domain],
+      baseUrl: 'https://w.dev', pathSecret: 'x', models: ['subscriber'],
+      renewHorizonSeconds: 100, targetLifetimeSeconds: 200, allowIps: [], geoSupport: 'yes',
+      maxEvents: 40, diagRaw: false, sweepMax: 200, identity: { kind: 'api', token: 'evt-token' },
+    };
+    const evtEnv = { NS_SERVER: 'mock.local', RINGOTEL_API_KEY: 'rt-key' };
+
+    // 1) Offboarding: a confirmed 404 on the re-read must deactivate the B2 record, not the first
+    // bound connection.
+    nsUserRec = null;
+    rtRpc = [];
+    await processNsEventUsers(evtEnv as any, { ...baseCfg, offboard: 'deactivate', deviceRepair: 'off' }, [{ domain, ext }]);
+    const deact = rtRpc.find((c) => c.method === 'deactivateUser');
+    ok(deact?.params.id === 'RTU777', '[ns-event] offboarding deactivates the record on the connection it actually sits on (B2), not the first bound connection');
+
+    // 2) Identity sync + 3) device repair: the re-read succeeds with a name differing from the Ringotel
+    // record's stored name (forces syncIdentity to write) — both must act on the same B2 record.
+    nsUserRec = { user: ext, email: `u@${domain}`, 'first-name': 'New', 'last-name': 'Name' };
+    rtRpc = [];
+    const origLog = console.log;
+    const lines: string[] = [];
+    console.log = (...a: unknown[]) => {
+      lines.push(String(a[0]));
+      origLog(...a);
+    };
+    try {
+      await processNsEventUsers(evtEnv as any, { ...baseCfg, offboard: 'deactivate', deviceRepair: 'report' }, [{ domain, ext }]);
+    } finally {
+      console.log = origLog;
+    }
+    const upd = rtRpc.find((c) => c.method === 'updateUser');
+    ok(
+      upd?.params.id === 'RTU777' && upd?.params.name === 'New Name',
+      '[ns-event] identity sync updates the record on the connection it actually sits on (B2), not the first bound connection',
+    );
+    const deviceLine = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((l) => l && l.msg === 'ns-event device' && l.ext === ext);
+    ok(
+      Array.isArray(deviceLine?.changed) && deviceLine.changed.includes('sip-identity'),
+      '[ns-event] device repair finds and reports on the record on the connection it actually sits on (B2), not the first bound connection',
+    );
+  }
+
   // ── emailForWrite: the three-state email contract, incl. the masquerade fail-closed rule ──
   // A blank is a REMOVAL to be propagated only when we actually know it is one. Two ways not to know:
   // the read failed, or the session is masked (email is auth-adjacent and may be redacted, not absent).
@@ -805,12 +1084,111 @@ const ok = (c: boolean, m: string) => {
     const masked = { scope: 'Basic User', operator: { id: 'op@example.com' } } as unknown as Principal;
     const withEmail = { email: 'user@example.com' };
     ok(emailForWrite(null, '100', plain) === undefined, '[emailForWrite] failed read → undefined (never a removal)');
-    ok(emailForWrite({}, '100', plain) === '', '[emailForWrite] read ok + no address → \'\' (propagate the removal)');
+    // NetSapiens returns the key with an empty value for a user with no address (verified live), so THAT
+    // is what "read ok + no address" looks like — not a record with the field missing.
+    ok(emailForWrite({ email: '' }, '100', plain) === '', '[emailForWrite] read ok + blank address → \'\' (propagate the removal)');
+    ok(emailForWrite({ 'email-address': '' }, '100', plain) === '', '[emailForWrite] a blank ALTERNATE spelling also propagates');
     ok(emailForWrite(withEmail, '100', plain) === 'user@example.com', '[emailForWrite] read ok + address → the address');
-    ok(emailForWrite({}, '100', masked) === undefined, '[emailForWrite] MASKED + blank → undefined (a redacted field is not a removal)');
+    ok(emailForWrite({ email: '' }, '100', masked) === undefined, '[emailForWrite] MASKED + blank → undefined (a redacted field is not a removal)');
     ok(emailForWrite(withEmail, '100', masked) === 'user@example.com', '[emailForWrite] MASKED + address → still trusted (it can only have come from the record)');
     ok(emailForWrite(null, '100', undefined) === undefined, '[emailForWrite] no principal + failed read → undefined');
-    ok(emailForWrite({}, '100', undefined) === '', '[emailForWrite] no principal (service mode) + blank → \'\'');
+    ok(emailForWrite({ email: '' }, '100', undefined) === '', '[emailForWrite] no principal (service mode) + blank → \'\'');
+    // The unattended-path hole: a projected/permission-limited read can succeed with the field ABSENT.
+    // That must read as "unknown", or every event would push a blank address to every user it covered.
+    ok(emailForWrite({}, '100', plain) === undefined, '[emailForWrite] no email FIELD at all → undefined (a narrowed read is not a removal)');
+    ok(emailForWrite({}, '100', undefined) === undefined, '[emailForWrite] no email FIELD, no principal (the event path) → undefined');
+    ok(emailForWrite({ 'name-first-name': 'A' }, '100', undefined) === undefined, '[emailForWrite] a record with other fields but no email field is still unknown');
+  }
+
+  // ── readNsUser: 404 vs transient failure ─────────────────────────────────────
+  // The rule the entire offboarding feature rests on. A 404 authorises deactivating a user's app
+  // access; a 500, a timeout, or a redirect must NEVER be mistaken for one.
+  {
+    const stub = { get: async () => ({ 'name-first-name': 'Jane' }) };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'ok' && (r as any).rec['name-first-name'] === 'Jane', '[readNsUser] a 200 with a record is ok, and carries it');
+  }
+  {
+    // A real NsApiError, not a duck-typed plain Error — readNsUser now checks `instanceof NsApiError`
+    // (Also-fix #5) rather than casting `.status` off whatever was thrown, so the mock must be the real
+    // shape or this test would silently stop discriminating.
+    const err = new NsApiError('GET → 404', 404, '/domains/acme.example/users/100', undefined);
+    const stub = { get: async () => { throw err; } };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'gone', '[readNsUser] a 404 is `gone` — the ONLY outcome that may authorise a deactivation');
+  }
+  {
+    const err = new NsApiError('GET → 500', 500, '/domains/acme.example/users/100', undefined);
+    const stub = { get: async () => { throw err; } };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'failed' && (r as any).status === 500, '[readNsUser] a 500 is `failed`, NOT gone — a transient error must never offboard a live user');
+  }
+  {
+    const stub = { get: async () => { throw new Error('network timeout'); } };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'failed' && (r as any).status === undefined, '[readNsUser] a throw with no status is `failed` with no status');
+  }
+  {
+    const err = new NsApiError('GET → 403', 403, '/domains/acme.example/users/100', undefined);
+    const stub = { get: async () => { throw err; } };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'failed', '[readNsUser] a 403 (scope lost) is `failed` — a narrowed credential must not read as a fleet of deletions');
+  }
+  {
+    // A plain object shaped like an NsApiError (has `.status`) but is NOT one — e.g. a bug elsewhere
+    // throwing a bare object, or a differently-typed error that happens to carry a `status` field for
+    // an unrelated reason — must NOT be trusted to authorise anything. This is the exact discrimination
+    // `instanceof NsApiError` buys over the old untyped cast.
+    const fake = Object.assign(new Error('duck-typed 404'), { status: 404 });
+    const stub = { get: async () => { throw fake; } };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'failed' && (r as any).status === undefined, '[readNsUser] a non-NsApiError with a duck-typed .status is `failed` with NO status — it must never be trusted as a 404');
+  }
+  {
+    const stub = { get: async () => null };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'failed', '[readNsUser] a 200 carrying nothing is `failed` — NS answered, so this is a shape surprise, not evidence of deletion');
+  }
+  {
+    const stub = { get: async () => 'not-an-object' };
+    const r = await readNsUser(stub as any, 'acme.example', '100');
+    ok(r.kind === 'failed', '[readNsUser] a 200 carrying a non-object is `failed`');
+  }
+  {
+    let seen = '';
+    const stub = { get: async (p: string) => { seen = p; return {}; } };
+    await readNsUser(stub as any, 'acme example', '10/0');
+    ok(seen === '/domains/acme%20example/users/10%2F0', '[readNsUser] domain and extension are percent-encoded into the path');
+  }
+
+  // ── authorisesDeactivation: the rule the sweep now shares with the event tier (fix-wave F1) ──────
+  {
+    ok(authorisesDeactivation({ kind: 'gone' }) === true, '[authorisesDeactivation] gone (confirmed 404) → true, the ONLY case that authorises a deactivation');
+    ok(authorisesDeactivation({ kind: 'ok', rec: { x: 1 } }) === false, '[authorisesDeactivation] ok (the candidate still exists) → false — the list that produced it was wrong');
+    ok(authorisesDeactivation({ kind: 'failed' }) === false, '[authorisesDeactivation] failed, no status → false — an unresolved read must never be mistaken for a deletion');
+    ok(authorisesDeactivation({ kind: 'failed', status: 500 }) === false, '[authorisesDeactivation] failed, with status → still false');
+  }
+
+  // ── nsEventLimitDecision: the receiver's rate-limit / verification decision (fix-wave F4) ────────
+  {
+    ok(nsEventLimitDecision(true, false) === 'proceed', '[nsEventLimitDecision] verified, under budget → proceed');
+    ok(nsEventLimitDecision(true, true) === 'accept-drop', '[nsEventLimitDecision] verified (genuine NS delivery), over budget → accept-drop (200), never a delivery error');
+    ok(nsEventLimitDecision(false, true) === 'reject-429', '[nsEventLimitDecision] unverified AND over budget → reject-429 (attacker-controlled traffic, safe to throttle loudly)');
+    ok(nsEventLimitDecision(false, false) === 'reject-404', '[nsEventLimitDecision] unverified, under budget → reject-404, byte-identical to the not-armed 404');
+  }
+
+  // ── nsEventsMissingRingotelKey: the F3-revert diagnosability fix (2026-07-31) ─────────────────────
+  // `NS_EVENTS=on` legally arms with no Ringotel key (a design decision, restored — see nsEvents.ts), but
+  // every handler wired in today writes through Ringotel, so an armed batch with no key is about to fail
+  // on every user. This predicate gates BOTH the once-per-invocation loud log and the per-event failure
+  // line's `cause` field in processNsEventUsers; a wrong answer here means either flooding the log with
+  // a false alarm or leaving the operator back with no actionable cause — the exact symptom this replaces.
+  {
+    ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: undefined }, 3) === true, '[nsEventsMissingRingotelKey] armed batch, no key at all → true');
+    ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: '' }, 3) === true, '[nsEventsMissingRingotelKey] armed batch, empty-string key → true');
+    ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: '   ' }, 3) === true, '[nsEventsMissingRingotelKey] armed batch, whitespace-only key → true (matches the trim() the config parser itself uses)');
+    ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: 'rt_live_abc' }, 3) === false, '[nsEventsMissingRingotelKey] armed batch, real key present → false');
+    ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: undefined }, 0) === false, '[nsEventsMissingRingotelKey] no key, but an EMPTY batch → false, nothing is about to fail so nothing to warn about');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

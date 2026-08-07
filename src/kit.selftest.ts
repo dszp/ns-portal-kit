@@ -245,6 +245,23 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(true, '[kit] bundle with health markers still parses');
   }
 
+  // ── the connection name / conflict warning reach the Users-column tooltip (Task 12 fix round) ──
+  {
+    const src = buildKitBundle(featurePolicyKeys(), {});
+    ok(src.indexOf('s.connection') !== -1, '[kit] colFill reads the connection field');
+    ok(src.indexOf('s.warning') !== -1, '[kit] colFill reads the warning field');
+    // Pin the EXACT construct, not just substring presence: a conflict must be checked in the SAME
+    // if/else-if as the connection name, warning branch FIRST — otherwise a later edit could show both,
+    // or show the name and silently drop the warning. Also pins that a conflict is marked 'broken', the
+    // same red the pre-existing health.severity==='broken' path already uses (one visual language for
+    // "something is wrong here"), and that it does NOT reuse the health tooltip's ' · ' join blindly
+    // without also being reachable when s.activated is false (no leading `&&s.activated` gate).
+    const WARN_THEN_NAME = "if(s&&s.warning){ti=(ti?ti+' · ':'')+'connection conflict';st=st?st+' broken':'broken'}else if(s&&s.connection){ti=(ti?ti+' · ':'')+s.connection}";
+    ok(src.includes(WARN_THEN_NAME), '[kit] colFill checks warning BEFORE connection, in one if/else-if (conflict outranks the name)');
+    new Script(src);
+    ok(true, '[kit] bundle with connection/warning markers still parses');
+  }
+
   // ── Apps-menu rendering in the self bundle (Task 6, 2026-07-21) ─────────────────────
   {
     const b = buildSelfBundle(['me.appAccess', 'portal.self'], {} as any);
@@ -367,6 +384,69 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(b.includes('amdl.advisory'), '[admin] advisory modes render (admin sees why a user can\'t sign in)');
     let abOk = true; try { new Function(b); } catch (e) { abOk = false; }
     ok(abOk, '[admin] bundle with the sign-in block parses');
+  }
+
+  // ── connection name / conflict on the profile App Status panel (Task 12 fix round) ─────────────
+  {
+    const b = buildKitBundle(['ringotel.profileStatus', 'ringotel.profileAppAccess'], { RINGOTEL_LABEL: 'App' });
+    ok(b.includes('r.status.connection') && b.includes('r.status.warning'), '[admin] App Status panel reads r.status.connection/warning (already on r.status via /rapp/user, no new fetch)');
+    ok(b.includes('Connection conflict'), '[admin] a conflict gets its own explanatory line, not just the bare word');
+    ok(b.includes("'Connection: '+r.status.connection"), '[admin] a clean single connection is named plainly');
+    ok(/r\.status\.warning\?[^:]*:'Connection: '\+r\.status\.connection/.test(b), '[admin] the conflict line wins the ternary — never both a name and a warning shown at once');
+    let pnOk = true; try { new Function(b); } catch (e) { pnOk = false; }
+    ok(pnOk, '[admin] bundle with the profile connection line parses');
+  }
+
+  // ── Ringotel cache freshness (2026-07-27) ───────────────────────────────────────
+  {
+    const b = buildKitBundle(featurePolicyKeys(), { RINGOTEL_LABEL: 'App' });
+
+    // The profile view reads FRESH on load. A change made anywhere else -- in the Ringotel admin, or by
+    // the SSO worker provisioning a user on first login -- otherwise showed the pre-change state here
+    // until the ~10-minute org-users cache expired, because our own writes are the only thing that
+    // invalidates it.
+    ok(/rapp\/user\?domain='\+encodeURIComponent\(d\)\+'&ext='\+encodeURIComponent\(ext\)\+'&fresh=1'\)\.then\(function\(r\)\{_actSched=false/.test(b),
+      '[fresh] the profile section requests fresh=1 ON LOAD, not only after a write it made');
+    // ...and does NOT say poll=1, which is what preserves the eligibility + app-access reads that render
+    // the Force button and the sign-in panel. Collapsing these two into one flag is the trap.
+    ok(!/&fresh=1&poll=1'\)\.then\(function\(r\)\{_actSched=false/.test(b),
+      '[fresh] the profile LOAD is not marked as a poll (so it keeps eligibility + appAccess)');
+    ok(b.includes("'&fresh=1&poll=1'"), '[fresh] the post-write repeat poll IS marked poll=1, so it stays cheap');
+
+    // The bulk users list stays cached on purpose: always-fresh would put a getUsers on every page view
+    // of a large domain. It shows its age instead.
+    ok(/jget\('\/rapp\/users\?domain='\+encodeURIComponent\(d\)\+\(force\?'&refresh=1':''\)\)/.test(b),
+      '[fresh] the users-list route is NOT fetched fresh by default — only when the operator forces it');
+    // These bytes reach a browser. The refresh capability is spelled NEUTRALLY on the wire for the same
+    // reason the routes are /rapp/* and the org flag is hPIE — a white-labeled deployment's admins read
+    // this in devtools, and the served bundle carried no vendor name at all before this feature.
+    ok(!/ringotel/i.test(b), '[fresh] the served bundle still contains NO vendor name anywhere');
+    ok(b.includes('function ageTxt(') && b.includes('function uAgeNow('), '[fresh] the users column renders a human age for its cached data');
+    ok(b.includes('if(!_AF.refresh)'), '[fresh] the refresh control is gated on the same key the route enforces');
+    ok(b.includes('colFresh(th)'), '[fresh] the age/refresh affordance is applied on every column render, not just on creation');
+
+    // A bundle for a caller WITHOUT ringotel.refresh still contains the code (the body is one shared
+    // asset) but flags it off -- the server is the gate, the flag only decides whether to draw it.
+    const noRefresh = buildKitBundle(featurePolicyKeys().filter((k) => k !== 'ringotel.refresh'), {});
+    ok(noRefresh.includes('refresh:false'), '[fresh] a caller without ringotel.refresh gets _AF.refresh=false');
+    ok(b.includes('refresh:true'), '[fresh] a caller with ringotel.refresh gets _AF.refresh=true');
+
+    // The portal's own table-reload button doubles as our refresh. This is the ONLY refresh path that
+    // reaches a domain with no org yet, because the column-header control is drawn inside a column that
+    // such a domain does not have.
+    ok(b.includes("closest('#pageRefresh')"), '[pgrefresh] the portal’s own table-reload button is hooked');
+    ok(/document\.addEventListener\('click',function\(e\)\{[\s\S]{0,200}?closest\('#pageRefresh'\)/.test(b) && /\},true\);/.test(b),
+      '[pgrefresh] hooked by delegation in the CAPTURE phase, so the button being re-created cannot orphan it');
+    ok(/jget\('\/rapp\/orgs'\+\(force\?'\?refresh=1':''\)\)/.test(b),
+      '[pgrefresh] a forced domains-list read asks the server to re-dig the directory');
+    ok(b.includes('uFetch(_uDom,true)'),
+      '[pgrefresh] the users page reuses the column control’s own forced fetch — one intent, one code path');
+    ok(b.includes('function rtClear('), '[pgrefresh] a forced read drops the stale cells, so new data actually repaints');
+    ok(/\.catch\(function\(\)\{if\(!_rtMap\)_rtMap=\{\}\}\)/.test(b),
+      '[pgrefresh] a failed FORCED read keeps the last good map instead of blanking every domain to –');
+
+    let fOk = true; try { new Function(b); } catch (e) { fOk = false; }
+    ok(fOk, '[fresh] bundle with the freshness control parses');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -188,3 +188,24 @@ export function resolveAppAccess(input: AppAccessInput, env: AppAccessEnv): { mo
   if (!input.activated) return { mode: 'not-set-up' };
   return { mode: 'password', ...(input.sipUsername ? { username: input.sipUsername } : {}) };
 }
+
+/** What the client renders for one user's app row, beyond the existing status fields. */
+export interface AppStatusView {
+  /** Connection name to display. Absent on a single-connection domain, where it is noise. */
+  connection?: string;
+  /** Set when the extension has records on more than one connection — the client shows a warning
+   *  instead of a connection name it cannot vouch for. */
+  warning?: 'connection-conflict';
+}
+
+/**
+ * PURE: derive the connection-related view fields from a user's app status.
+ *
+ * A conflict outranks the name: showing "Main" for an extension that also has a record on another
+ * connection tells the operator something that is true but misleading, and the useful signal is that
+ * there are two.
+ */
+export function appStatusView(s: { connection?: string; connectionConflict?: boolean }): AppStatusView {
+  if (s.connectionConflict) return { ...(s.connection ? { connection: s.connection } : {}), warning: 'connection-conflict' };
+  return { ...(s.connection ? { connection: s.connection } : {}) };
+}

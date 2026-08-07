@@ -25,3 +25,7 @@ worker-configuration.d.ts
 
 # superpowers SDD scratch (briefs, reports, review diffs, progress ledger) — local only
 .superpowers/
+
+# Live-probe scratch scripts — contain real domains/emails/extensions. NEVER commit; the
+# public mirror is generated from `git archive HEAD`, so an accidental add would publish them.
+.probe-*.ts

@@ -149,6 +149,47 @@ rail** — empty ⇒ all writes refused (fail-closed), `*` ⇒ every in-scope do
 duplicate extension** (keeps the real provisioned record, best-effort deletes the rest) so a stale app record
 can't hijack a login.
 
+Two adjacent write surfaces share that orchestration. **Activation rotates the SIP password of a device it
+did not create** (`RINGOTEL_ROTATE_SIP_ON_ACTIVATE`, default on): reusing the stored one would leave any
+other endpoint still holding it able to register as the same address-of-record, and the two would trade the
+registration back and forth. Rotation is an in-place `PUT` — deleting and recreating the device would
+discard its emergency caller id, provisioning link and transport settings — and it is best-effort, so a
+release lacking that endpoint still activates. **Directory pre-population** (`ringotelPrepop.ts`,
+`ringotel.prepop`) creates *inactive* directory entries for users who have none, planning and applying as
+separate steps so a domain-wide change can be previewed. Its placeholders carry no `username`/`authname`,
+because a record owning the `<ext><suffix>` SIP identity is precisely what collides when an extension is
+later reassigned.
+
+## NetSapiens event subscriptions — the inbound half
+
+`nsEvents.ts` receives NetSapiens change events and `worker.ts`'s `scheduled()` keeps the subscriptions
+themselves correct. Two properties carry the design.
+
+**The payload is a trigger, not truth.** The receiver extracts only *which user changed*, then re-reads
+that user from the API and syncs from the response. A pushed value is never consumed. That keeps the
+three-state identity contract intact (a field absent from a payload cannot be mistaken for a field that was
+cleared), makes a replayed delivery a no-op, and — not incidentally — means the event payload's field
+spellings are not a correctness dependency. They differ from the record we read: the event is v1
+`snake_case` (`email_address`, `firstname`, `subscriber_group`) while the v2 user record is hyphenated.
+
+**The receiver is unauthenticated by nature, so it is gated by configuration alone.** The feature-policy
+helpers cannot help here — with no principal, the read-side gate *returns* rather than throws, i.e. it fails
+open. Instead: a per-domain path token derived as `HMAC-SHA256(secret, domain)`, so one leaked callback URL
+exposes one tenant; a strict domain grammar applied *before* the value reaches any API path (NetSapiens
+treats `~` as a self-reference wildcard, and percent-encoding is no defence since `encodeURIComponent`
+leaves `~` untouched); an explicit domain allowlist that can never exceed `RINGOTEL_WRITE_DOMAINS`; and an
+always-on in-isolate rate limiter ahead of verification. Anything unverifiable is dropped, never applied.
+
+The sync writer is deliberately narrow: it may only **update identity** on an existing app record. It never
+activates, deactivates, creates, or de-duplicates — because an SSO integration running beside this Worker
+is a concurrent writer with no shared lock, and two writers both re-resolving and deleting duplicates can
+delete the record the other just activated. Provisioning stays a deliberate act, never a side effect of a
+field edit.
+
+Reconciliation is a pure planner over the API's own listing — there is no local registry, so a failed read
+**aborts the run** rather than degrading into "nothing exists" and mass-creating. Subscriptions whose URL
+is not ours are reported and never modified: other integrations legitimately subscribe to the same domains.
+
 ## Branding is deploy config
 
 `@dszp/netsapiens-lib` ships vendor-neutral themes only — a brand baked into a shared library would

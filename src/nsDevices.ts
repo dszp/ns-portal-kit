@@ -24,10 +24,13 @@
  */
 
 import { asArray, type NsClient, type FlowGraph, type Rec } from '@dszp/netsapiens-lib';
+import { scopeOf } from './ringotel.js';
 
 export interface NsDeviceEnv {
   /** Truthy ("1"/"true"/…) enables NS device-detail enrichment (model + registration presence). */
   NS_DEVICE_DETAILS?: string;
+  /** Cache-key namespace for this deployment — see `scopeOf` / `RingotelEnv.CACHE_SCOPE` in ringotel.ts. */
+  CACHE_SCOPE?: string;
 }
 
 export function nsDeviceDetailsEnabled(env: NsDeviceEnv): boolean {
@@ -96,7 +99,13 @@ export function annotateDevices(graph: FlowGraph, byAor: Map<string, Phone>): nu
 }
 
 // ── Cache API (safe projection only) ─────────────────────────────────────────
-const domainPhonesKey = (domain: string) => `https://nsdevice-cache.internal/${domain}/phones`;
+// Scoped per deployment for exactly the reason the Ringotel keys are (see ringotel.ts `CACHE_SCOPE`):
+// `caches.default` is ZONE-shared, so an unscoped key is ONE entry read and written by every deployment
+// on the zone. The consequence is milder here than for the Ringotel keys — there is no write path whose
+// invalidation another env can undo, so the worst case is dia's copy of a domain's phones being served
+// to portal for up to PHONES_TTL — but it is the same bug, and leaving a known instance of it next to
+// the fixed one is how it comes back.
+const domainPhonesKey = (scope: string, domain: string) => `https://nsdevice-cache.internal/${scope}/${domain}/phones`;
 const PHONES_TTL = 300; // 5m — registration state drifts
 
 async function cacheGet<T>(cache: Cache, key: string): Promise<T | undefined> {
@@ -113,8 +122,8 @@ async function cachePut(cache: Cache, key: string, value: unknown, ttl: number):
 }
 
 /** All MAC'd phones in the domain, projected to the safe `Phone` shape and Cache-API-cached. */
-async function getDomainPhones(client: NsClient, cache: Cache, domain: string, refresh: boolean): Promise<Phone[]> {
-  const key = domainPhonesKey(domain);
+async function getDomainPhones(client: NsClient, cache: Cache, scope: string, domain: string, refresh: boolean): Promise<Phone[]> {
+  const key = domainPhonesKey(scope, domain);
   if (!refresh) {
     const hit = await cacheGet<Phone[]>(cache, key);
     if (hit) return hit;
@@ -132,9 +141,9 @@ async function getDomainPhones(client: NsClient, cache: Cache, domain: string, r
  * domain call (cached) → index MAC'd phones by ext → annotate. Best-effort & isolated: a failure is
  * logged (message only, never a record) and never breaks /flow.
  */
-export async function enrichDeviceDetails(graph: FlowGraph, client: NsClient, cache: Cache, domain: string, opts: { refresh?: boolean } = {}): Promise<void> {
+export async function enrichDeviceDetails(graph: FlowGraph, client: NsClient, cache: Cache, env: NsDeviceEnv, domain: string, opts: { refresh?: boolean } = {}): Promise<void> {
   try {
-    const phones = await getDomainPhones(client, cache, domain, opts.refresh ?? false);
+    const phones = await getDomainPhones(client, cache, scopeOf(env), domain, opts.refresh ?? false);
     if (!phones.length) return;
     const byAor = new Map(phones.map((p) => [p.aor, p]));
     annotateDevices(graph, byAor);

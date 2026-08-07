@@ -121,6 +121,14 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
   { key: 'ringotel.orgList', name: 'App-status domains column', description: 'Per-domain app column on the Domains page.', default: 'reseller' },
   { key: 'ringotel.refresh', name: 'Fleet directory refresh', description: 'Force a fleet-wide Ringotel directory rebuild.', default: 'reseller' },
   { key: 'ringotel.profileStatus', name: 'App status on profile', description: 'The app active/inactive indicator on the user-profile page.', default: 'office_manager' },
+  {
+    key: 'ringotel.prepop',
+    name: 'Directory pre-population',
+    description:
+      'Preview and create INACTIVE Ringotel directory entries for NetSapiens users who have none (write). ' +
+      'Inactive entries are not billable and send no mail, but this is a whole-domain operation.',
+    default: 'reseller',
+  },
   { key: 'ringotel.activate', name: 'App activate/deactivate', description: 'Activate or deactivate the app for a user from the profile page (write).', default: 'office_manager' },
   { key: 'ringotel.resetPassword', name: 'App password reset', description: 'Reset the app password for a user from the profile page (write).', default: 'office_manager' },
   { key: 'ringotel.profileAppAccess', name: 'App sign-in details on profile', description: 'The user-visible app sign-in message (domain/username/password + downloads) on the user-profile page.', default: 'office_manager' },
