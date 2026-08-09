@@ -712,6 +712,12 @@ list are all present.
 `"triggers": { "crons": ["17 * * * *"] }` to each environment that should reconcile. Hourly is deliberate:
 the job validates and repairs, it does not keep anything alive.
 
+⚠️ **Turning this on is the number one reason to be on Cloudflare's Paid Workers plan.** It is usually the
+largest source of Worker requests on a real deployment, and it does not scale with your users. Every subscriber edit in NetSapiens becomes a request here whether anyone has the portal
+open or not, so the volume tracks the size and churn of the domains you subscribe. And unlike a page load, this work is unattended: a delivery that exceeds a
+limit fails silently overnight, and the symptom is a directory that has quietly stopped matching
+NetSapiens. Size it before you turn it on — see [SETUP.md § Cloudflare plan](./SETUP.md#cloudflare-plan).
+
 Deeper notes — what a callback URL is, how to retire the feature safely, and what it costs — are in [Event
 subscriptions in depth](#events-reference). All settings below are gated by `RINGOTEL_API_KEY`.
 

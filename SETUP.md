@@ -446,21 +446,85 @@ Addresses block marks which is which. The end-to-end check is still: open your p
 
 ## Cloudflare plan: free or paid ($5)?
 
-Most small deployments run fine on **Workers Free**. Two limits decide whether you will want **Workers
-Paid**:
+**The short answer: if you turn on the app integration with continual change-event sync, get the Paid
+plan.** That one decision is the strongest reason on this page, and it is a $5/month decision against a
+feature that runs continuously and unattended — the wrong place to be economising. Everything else here is
+detail for deployments that have not enabled it.
 
-- **Requests — Free is 100,000/day.** Every portal page load makes several Worker calls (the primary, the
-  gated bundles, each feature's data fetch). A handful of admins browsing stays well under; a busy portal
-  with many active users can cross it → Paid includes 10 million requests/month, then $0.30 per additional
-  million.
-- **Subrequests — Free caps 50 per request, Paid 1,000.** Resolving a **large** domain's call-flow diagram
-  fans out into many NetSapiens API calls, and a big domain can exceed 50 on Free and fail to render.
-  That is the single clearest reason to move to Paid. (CPU time is capped tighter on Free too — 10 ms per
-  request vs 30 s — which a large diagram render can also exceed.)
+Beyond that, the limit people expect to hit is not the one that bites. Requests are rarely the constraint;
+two **per-request** ceilings are, and both fail on a single click rather than on volume.
+
+**Subrequests — Free caps 50 per request, Paid 1,000.** Resolving a **large** domain's call-flow diagram
+fans out into many NetSapiens API calls. A big domain can exceed 50 on Free and fail to render while every
+smaller domain works perfectly — which presents as "this feature is broken for that customer", not as a
+plan limit. This is the clearest single reason to move to Paid.
+
+**CPU time — Free caps 10 ms per request, Paid 30 s.** A large diagram's resolve-and-render can exceed it,
+with the same shape of failure: fine everywhere, broken on your biggest customer.
+
+**Requests — Free is 100,000/day**, and that is a lot of portal here. A cold page load costs roughly half a
+dozen Worker calls (the primary, the gated bundle(s), each feature's data fetch, plus a CORS preflight per
+call type); a warm one costs about half that, because the primary is cached for 5 minutes and the bundles
+for 2. That puts Free somewhere around **15,000 portal page loads a day** before requests matter — well
+past the point where the two limits above will have decided it for you. Paid includes 10 million
+requests/month, then $0.30 per additional million.
+
+### Why change-event sync is the deciding factor
+
+⚠️ **Continual sync is the number one reason to be on Paid, and it does not scale with your users.** With
+[change-event sync](./CONFIG.md#group-events) on, every subscriber edit in NetSapiens becomes a request
+here whether anyone has the portal open or not, so this traffic tracks the **size and churn of the domains
+you subscribe**, not how many people log in. On a real fleet it is routinely the largest source of requests
+by a wide margin.
+
+What makes it the deciding factor is not the volume, though — it is that the work is **unattended and
+per-delivery**. A page load that fails is a person who tries again and tells you. A change-event delivery
+that exceeds a limit fails at three in the morning, and the only symptom is a directory that has quietly
+stopped matching NetSapiens. You would find out from a user signing in with a name you changed weeks ago.
+
+Three consequences worth sizing for:
+
+- Adding domains to `NS_EVENTS_DOMAINS` raises your baseline permanently.
+- [`NS_EVENTS_DEVICE_REPAIR`](./CONFIG.md#NS_EVENTS_DEVICE_REPAIR) set to `report` or `heal` does extra
+  work per event, and a full batch at the default `NS_EVENTS_MAX_EVENTS` of 40 can reach the low hundreds
+  of subrequests **in one delivery** — several times over Free's cap of 50. On Free this feature is
+  effectively unusable at the default batch size; on Paid it is a non-issue.
+- The hourly reconcile runs whether or not anything changed, so there is a floor under this traffic even
+  on a quiet fleet.
 
 **Overages on Paid are minor:** $0.30 per million requests and $0.02 per million CPU-ms — cents, not
-dollars, for a moderately busy portal. Rule of thumb: **start on Free; move to the $5 plan once the portal
-gets busy or you diagram large domains.**
+dollars, for a moderately busy portal.
+
+**Rule of thumb:** start on Free to try it. Move to the $5 plan **before you turn on change-event sync**,
+and certainly before you enable device repair — and move anyway once you are diagramming large domains.
+Both are cheaper decisions than diagnosing a directory that silently stopped syncing, or one customer's
+diagram that will not draw.
+
+### Check your own numbers rather than trusting this page
+
+Everything above is shape, not your deployment. Cloudflare shows you the real thing in two places, and
+both are worth a look before you decide:
+
+- **Dashboard → Workers & Pages → your Worker → Metrics** — requests over time, plus CPU time per request.
+  If the CPU graph has a tail approaching 10 ms, you are close to the Free ceiling on your slowest route,
+  which will be a diagram render.
+- **The same Worker → Logs**, with `"observability": { "enabled": true }` in your `wrangler.jsonc` (this
+  repo ships it on). Group by request path and you can see the split directly: injection and feature
+  fetches on one side, `POST /ns-events/…` on the other.
+
+**What to look for, in order:**
+
+1. **Is your traffic mostly `/ns-events/…`?** If so, your request count is telling you about NetSapiens
+   churn, not about portal usage, and adding portal users will barely move it.
+2. **Does any single request approach 50 subrequests?** That is your largest domain's diagram, and it is
+   the thing that will break first. Render one on your biggest customer before you decide the plan.
+3. **Only then look at the daily total.** For most operators it will be a rounding error against 100,000,
+   and if it is not, the two limits above will already have made the decision.
+
+A worked example from a real four-domain deployment with change events on: **~1,300 requests a day, of
+which the large majority were change-event deliveries and the scheduled reconcile.** Actual human portal
+use was a few hundred requests a *week* — about one percent of the Free allowance. The plan question there
+is entirely about diagram size, not about traffic.
 
 ---
 
