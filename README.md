@@ -3,7 +3,7 @@
 A deployable toolkit of add-ons and integrations for the **NetSapiens Manager Portal**, running on 
 Cloudflare Workers. Bring your own NetSapiens platform and Cloudflare account.
 
-It's a **Manager Portal add-on**: the Cloudflare Worker serves small a JavaScript file, your
+It's a **Manager Portal add-on**: the Cloudflare Worker serves a small JavaScript file, your
 portal loads it, and every call that script makes carries **the signed-in user's own portal token**. No
 NetSapiens credential is stored for user traffic, and NetSapiens enforces each caller's scope — so your
 users get more inside the portal they already use, without logging in anywhere else. (Note: credentials 
@@ -11,7 +11,7 @@ for NetSapiens and other integrations need to be stored in Cloudflare Secrets to
 
 > ### 📖 Read **[SETUP.md](./SETUP.md)** first — before you deploy.
 > It is short. It covers what each feature is for, what that feature needs, and **how to point your 
-> Manager Portal at this Worker**, (or how to ask your provider to do soif you are a reseller). 
+> Manager Portal at this Worker**, (or how to ask your provider to do so if you are a reseller). 
 > There's an AGENTS.md file you can point an AI agent at if you'd like yours to walk you through it.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dszp/ns-portal-kit)
@@ -24,7 +24,7 @@ additional bindings but the basics do not, and you can set up additional feature
 ## Features
 
 Everything is **off until you turn it on**, and each is independently gated to a role, with a flexible 
-role-and-user-based permissions policy. All general configuration settings are stored in the worker.jsonc 
+role-and-user-based permissions policy. All general configuration settings are stored in the wrangler.jsonc 
 Cloudflare Worker configuration file, and all secrets are stored in Cloudflare Secrets.
 
 A demo site you can review prior to deployment is in the works.
@@ -118,8 +118,8 @@ Under consideration for future integrations that are not yet available:
 
 It's still under development, but there's a TamperMonkey script you can install and allow for your 
 Manager Portal address. Once configured, you can temporarily override the deployed production 
-portal installation and utitlize a second Cloudflare Worker instead. Deploy a production instance and 
-and a second development or test instance, from the same local folder, and view the test instance 
+portal installation and utilize a second Cloudflare Worker instead. Deploy a production instance and 
+a second development or test instance, from the same local folder, and view the test instance 
 just on your computer while the test harness is enabled before releasing it to production. Used in 
 development but also useful in deployment testing!
 
