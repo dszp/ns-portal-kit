@@ -1349,7 +1349,7 @@ require a redeploy — but doing it first means you never have a console you can
 
 ```bash
 curl https://your-worker-host/health
-# {"ok":true,"configured":true,"version":"0.2.45","scope":"..."}
+# {"ok":true,"configured":true,"version":"0.2.47","scope":"..."}
 ```
 
 `configured:false` means something required is still missing. `version` should match the release you
