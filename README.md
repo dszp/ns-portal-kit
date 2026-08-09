@@ -1,7 +1,8 @@
 # ns-portal-kit
 
 A deployable toolkit of add-ons and integrations for the **NetSapiens Manager Portal**, running on 
-Cloudflare Workers. Bring your own NetSapiens platform and Cloudflare account.
+Cloudflare Workers. Bring your own NetSapiens platform and Cloudflare account (free may suffice, 
+but a Paid Workers account is inexpensive and recommended especially for busier systems).
 
 It's a **Manager Portal add-on**: the Cloudflare Worker serves a small JavaScript file, your
 portal loads it, and every call that script makes carries **the signed-in user's own portal token**. No
