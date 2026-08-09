@@ -27,9 +27,8 @@ import {
 } from './features.js';
 
 import { productName, releaseNotesUrl, VERSION, type BrandEnv } from './brand.js';
-import { needsSetup, setupIssues, portalMode, portalModeConfigError, nsServerConfigured, type SetupEnv } from './setup.js';
-import { isLocalRequest, serviceTokenBlocked, type ExposureEnv } from './exposure.js';
-import { accessConfig } from './access.js';
+import { needsSetup, setupIssues, nsServerConfigured, type SetupEnv } from './setup.js';
+import { isLocalRequest } from './localRequest.js';
 import { kitConfigError, primaryBasename, type KitEnv } from './kit.js';
 import { menuConfigError, resolveMenus, appsHideSources, bothAppsHideSet, MENU_NAMES, type MenuEnv } from './menus.js';
 import { appAccessConfigError, type AppAccessEnv } from './appAccess.js';
@@ -42,7 +41,7 @@ import { identityUsable, type NsIdentityEnv } from './nsIdentity.js';
 import { scopeOf, ringotelEnabled, type RingotelEnv as RingotelDataEnv } from './ringotel.js';
 import { resolveRingotelConfig, ringotelConfigError, RingotelConfigError, type RingotelEnv as EligibilityEnv } from './eligibility.js';
 
-export type StatusEnv = FeaturesEnv & KitEnv & SetupEnv & ExposureEnv & MenuEnv
+export type StatusEnv = FeaturesEnv & KitEnv & SetupEnv & MenuEnv
   & AppAccessEnv & RingotelDataEnv & EligibilityEnv & NsEventsEnv & NsDeviceEnv
   & BrandEnv & NsIdentityEnv;
 
@@ -192,7 +191,6 @@ for (const k of ['ringotel.activate', 'ringotel.resetPassword', 'ringotel.prepop
 // The admin entry point, the self entry point, and every me.* need portal-backend mode. `me.*` is
 // derived from the registry (like RINGOTEL_KEYS above) so a new `me.*` feature cannot silently miss
 // this — a hardcoded list would need remembering to update.
-for (const k of ['portal.access', 'portal.self', ...ME_KEYS]) need(k, 'PORTAL_MODE');
 // callflow.view needs a real NS_SERVER (set, and not the shipped placeholder).
 need('callflow.view', 'NS_SERVER');
 
@@ -211,8 +209,6 @@ function prereqSatisfied(name: string, env: StatusEnv): boolean {
         if (!(e instanceof RingotelConfigError)) throw e;
         return false; // ringotelConfigError (a configError, not "missing") already reports this loudly
       }
-    case 'PORTAL_MODE':
-      return portalMode(env);
     case 'NS_SERVER':
       return nsServerConfigured(env);
     default:
@@ -251,31 +247,11 @@ function howToSetText(def: SettingDef): string {
 }
 
 /**
- * Can this setting do anything in THIS deployment's mode?
- *
- * Reads `SettingDef.appliesTo` — a per-setting declaration, not a hardcoded list in the renderer, so a
- * future mode-specific setting inherits the treatment by declaring itself. Absent ⇒ applicable, which is
- * the honest default: claiming a live setting is inert is a worse failure than saying nothing.
- *
- * These rows are NOT hidden. "Not applicable here, and why" is information; silence is not — an operator
- * who set `ACCESS_AUD` on a portal deployment needs to be told it is ignored, or they will believe they
- * added a perimeter they do not have.
+ * Every setting this Worker declares is applicable to it: there is one product here, so there is no
+ * "set but ignored in this mode" state left to explain. Kept as a function rather than inlined so the
+ * shape of `SettingView` does not have to change with it.
  */
-function applicabilityOf(def: SettingDef, env: StatusEnv): Applicability {
-  if (!def.appliesTo) return { applicable: true, why: null };
-  const portal = portalMode(env);
-  if (def.appliesTo === 'standalone' && portal) {
-    return {
-      applicable: false,
-      why: 'Ignored in portal-backend mode. Every caller here supplies their own ns_t, so there is no stored credential for this to protect — and a Cloudflare Access gate would refuse the plain <script src> that loads the injected primary, taking the whole injection down. Set it only on a standalone deployment.',
-    };
-  }
-  if (def.appliesTo === 'portal' && !portal) {
-    return {
-      applicable: false,
-      why: 'Ignored in standalone mode: this deployment serves no Manager-Portal injection, so nothing reads it. Set PORTAL_MODE=1 to make it live.',
-    };
-  }
+function applicabilityOf(_def: SettingDef, _env: StatusEnv): Applicability {
   return { applicable: true, why: null };
 }
 
@@ -450,72 +426,13 @@ function probeState<T>(fn: () => T): { ok: true; value: T } | { ok: false; reaso
 
 type CardResult = { state: FeatureState; missing?: MissingRequirement[]; notes?: string[] };
 
-function authCard(env: StatusEnv, hostname: string): CardResult {
+function authCard(env: StatusEnv): CardResult {
+  // The only thing that can make delegated auth inert is having nowhere to send it. Every caller brings
+  // their own ns_t, so there is no stored credential to be present, absent, or refused.
   if (!nsServerConfigured(env)) return inertOn(env, ['NS_SERVER']);
-  const tokenSet = isSet(env.NS_API_TOKEN);
-  if (portalMode(env) || (tokenSet && !serviceTokenBlocked(env, hostname))) return { state: 'on' };
-  // A stored token that exists but is REFUSED is not an unmet token requirement — the requirement is met and
-  // the GATE is what refuses. Saying "NS_API_TOKEN" at all here (missing or not) sends the operator to change
-  // a value that is fine; the fix is one card over.
-  if (tokenSet) {
-    return {
-      state: 'inert',
-      notes: ['The stored NS_API_TOKEN is present but REFUSED, because nothing verifiable is in front of it — see the "Service-token exposure gate" card for what opens that gate.'],
-    };
-  }
-  return inertOn(env, ['NS_API_TOKEN']);
+  return { state: 'on' };
 }
 
-/**
- * In PORTAL mode this card reports `off` with an explanation, never `inert` with a missing requirement.
- * `accessConfig` returns null there by construction, so the naive form asked an operator to set
- * `ACCESS_AUD` when `ACCESS_AUD` was already set — and worse, the repair it implied (finish configuring
- * Access) is the one change that would take the whole injection down. There is nothing to fix: the setting
- * is irrelevant here. Saying so is information; a missing-requirement list would be a false instruction.
- */
-function accessCard(env: StatusEnv): CardResult {
-  const audSet = isSet(env.ACCESS_AUD);
-  const teamSet = isSet(env.ACCESS_TEAM_DOMAIN);
-  if (portalMode(env)) {
-    if (!audSet && !teamSet) {
-      return { state: 'off', notes: ['Not applicable in portal-backend mode: each caller supplies their own ns_t, which IS the gate. Nothing to configure.'] };
-    }
-    return {
-      state: 'off',
-      notes: ['Configured, but IGNORED in portal-backend mode — deliberately, and this is not a problem to fix. An Access gate would refuse the plain <script src> the Manager Portal uses to load the injected primary, so the whole injection would die before any ns_t existed; and there is nothing here for it to protect, since portal mode never reads a stored NS_API_TOKEN. These settings take effect only on a standalone deployment.'],
-    };
-  }
-  if (!audSet && !teamSet) return { state: 'off' };
-  if (accessConfig(env) !== null) return { state: 'on' };
-  return inertOn(env, [audSet ? 'ACCESS_TEAM_DOMAIN' : 'ACCESS_AUD']);
-}
-
-/** The one card with no `missing[]` at all, on purpose — twice over.
- *
- *  In PORTAL mode a stored token is never read (each caller brings their own ns_t), so there is no ambient
- *  authority for this gate to protect: `inert` naming four settings told an operator who had already set
- *  PORTAL_MODE to set PORTAL_MODE, and offered `ALLOW_UNGATED_SERVICE_TOKEN=1` — a no-op in this mode, and
- *  a live hazard the day they switch back to standalone.
- *
- *  In STANDALONE mode the settings that open the gate are ALTERNATIVES, any ONE of which suffices. `Missing`
- *  everywhere else on this page means "all of these are required", so listing them there misread as four
- *  requirements and put the risk-accepting opt-out on the same footing as the two safe options. Prose can
- *  say "any one of these, in this order"; a list under that heading cannot. Wording tracks `setupIssues`'
- *  own fix text for the same condition (`src/setup.ts`) — one condition, one recommendation. */
-function exposureCard(env: StatusEnv, hostname: string): CardResult {
-  if (!isSet(env.NS_API_TOKEN)) return { state: 'off' };
-  if (!serviceTokenBlocked(env, hostname)) return { state: 'on' };
-  if (portalMode(env)) {
-    return {
-      state: 'off',
-      notes: ['NS_API_TOKEN is set, but portal-backend mode never uses a stored token — every caller brings their own ns_t, so this gate has nothing to protect here. The stored token is unused: consider removing it.'],
-    };
-  }
-  return {
-    state: 'inert',
-    notes: ['The stored NS_API_TOKEN is REFUSED, because nothing verifiable is in front of it. ANY ONE of these opens the gate: set ACCESS_AUD and ACCESS_TEAM_DOMAIN together to turn on the in-Worker Cloudflare Access check (it fails closed); or set PORTAL_MODE=1 so each caller brings their own ns_t instead; or, only if you have your own protection in front of this Worker, set ALLOW_UNGATED_SERVICE_TOKEN=1 to accept the risk deliberately.'],
-  };
-}
 
 const brandingCard = (env: StatusEnv): CardResult => ({ state: isSet(env.BRAND_NAME) || isSet(env.BRAND_ACCENT) ? 'on' : 'off' });
 // ALLOWED_DOMAINS/BLOCKED_DOMAINS are worker.ts-only (no dedicated *Env interface) — read via readKey,
@@ -556,11 +473,9 @@ function writesCard(env: StatusEnv, ringErr: string | null): CardResult {
 
 function appAccessCard(env: StatusEnv, aaErr: string | null): CardResult {
   if (aaErr) return { state: 'misconfigured', notes: [aaErr] };
-  const portal = portalMode(env);
   const key = ringotelEnabled(env);
-  if (portal && key) return { state: 'on' };
+  if (key) return { state: 'on' };
   const unmet: string[] = [];
-  if (!portal) unmet.push('PORTAL_MODE');
   if (!key) unmet.push('RINGOTEL_API_KEY');
   return inertOn(env, unmet);
 }
@@ -596,7 +511,6 @@ function menusCard(env: StatusEnv, menuErr: string | null): CardResult {
 }
 
 function injectionCard(env: StatusEnv, kitErr: string | null): CardResult {
-  if (!portalMode(env)) return { state: 'off' };
   if (kitErr) return { state: 'misconfigured', notes: [kitErr] };
   if (env.PORTAL_HANDOFF_URL === undefined) {
     return inertOn(env, ['PORTAL_HANDOFF_URL'], ['Set PORTAL_HANDOFF_URL to "" to declare deliberately that there is no vendor to hand off to.']);
@@ -743,12 +657,8 @@ const PORTAL_INAPPLICABLE: Record<string, string> = {
   access: 'Ignored in portal-backend mode. A Cloudflare Access gate would refuse the plain <script src> that loads the injected primary, so the whole injection would die before any ns_t existed — and there is nothing here for it to protect, since every caller supplies their own ns_t and that verification IS the gate. Set it only on a standalone deployment.',
   exposure: 'Nothing to protect in portal-backend mode. This gate exists to refuse a STORED NetSapiens token that has nothing verifiable in front of it, and portal mode never reads one — a request with no bearer is refused outright rather than falling back. A stored NS_API_TOKEN here is simply unused.',
 };
-const STANDALONE_INAPPLICABLE: Record<string, string> = {
-  injection: 'Nothing is injected in standalone mode: this deployment serves no Manager-Portal scripts, so none of these settings is read. Set PORTAL_MODE=1 to make them live.',
-};
-
-function applicabilityOfSubsystem(id: string, env: StatusEnv): Applicability {
-  const why = portalMode(env) ? PORTAL_INAPPLICABLE[id] : STANDALONE_INAPPLICABLE[id];
+function applicabilityOfSubsystem(id: string, _env: StatusEnv): Applicability {
+  const why = PORTAL_INAPPLICABLE[id];
   return why ? { applicable: false, why } : { applicable: true, why: null };
 }
 
@@ -762,17 +672,9 @@ function buildSubsystems(
 
   const rows: Array<{ id: string; name: string; description: string; group: SettingGroup; tab: SubsystemTab; parent: string | null; settings: string[]; result: CardResult }> = [
     { id: 'auth', name: 'Authentication', group: 'core', tab: 'deployment', parent: null,
-      description: 'How this Worker authenticates to NetSapiens: a stored service token (standalone) or each caller\'s own ns_t (portal mode).',
-      settings: ['NS_SERVER', 'NS_API_TOKEN', 'NS_PORTAL_ISS', 'PORTAL_MODE', 'JWT_RATE_LIMITER'],
-      result: authCard(env, hostname) },
-    { id: 'access', name: 'Cloudflare Access gate', group: 'access', tab: 'deployment', parent: null,
-      description: 'Optional in-Worker verification of a Cloudflare Access JWT — defense in depth for a standalone deployment.',
-      settings: ['ACCESS_AUD', 'ACCESS_TEAM_DOMAIN'],
-      result: accessCard(env) },
-    { id: 'exposure', name: 'Service-token exposure gate', group: 'core', tab: 'deployment', parent: null,
-      description: 'Refuses to serve a stored NS_API_TOKEN until something verifiable is in front of it.',
-      settings: ['NS_API_TOKEN', 'ACCESS_AUD', 'ACCESS_TEAM_DOMAIN', 'ALLOW_UNGATED_SERVICE_TOKEN', 'PORTAL_MODE'],
-      result: exposureCard(env, hostname) },
+      description: 'How this Worker authenticates to NetSapiens: every caller supplies their own ns_t, which is forwarded verbatim. No credential is stored for user traffic.',
+      settings: ['NS_SERVER', 'NS_PORTAL_ISS', 'JWT_RATE_LIMITER'],
+      result: authCard(env) },
     { id: 'branding', name: 'Branding', group: 'branding', tab: 'deployment', parent: null,
       description: 'Cosmetic accent color and product name shown in the viewer and page titles.',
       settings: ['BRAND_NAME', 'BRAND_ACCENT', 'BRAND_LABEL'],
@@ -1317,7 +1219,6 @@ function buildPermissions(
       'This is a pure evaluation of your configuration, not impersonation: it synthesizes a scope and asks the same policy engine the Worker asks. It reads nothing from NetSapiens, grants nothing, and can affect no session.',
       'It answers three questions at once — does the gate admit them, do they receive the bundle that carries the feature, and can the feature actually run as configured. A yes means all three.',
       `The two rightmost columns are the NAMED axes, evaluated at the lowest scope (${LOWEST_SCOPE}) so they isolate what being named buys on its own. A named account that also holds a higher scope gets whatever that scope's column shows as well.`,
-      ...(portalMode(env) ? [] : ['This deployment is in standalone mode and serves no Manager-Portal injection, so every feature delivered by a bundle is inert here regardless of who its gate admits.']),
     ],
     anyNamed: rows.some((r) => r.namedAccounts.length > 0),
     examples: GATE_EXAMPLES,
@@ -1363,13 +1264,6 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
   // a portal. `verifiable: false` is load-bearing on the primary: serving it says nothing whatever about
   // whether any portal is loading it, and a console that implied otherwise would be over-claiming again.
   const endpoints = (): StatusDoc['deployment']['endpoints'] => {
-    if (!portalMode(env)) {
-      return [{
-        label: 'Viewer', url: `https://${hostname}/`, direction: 'serves',
-        what: 'The internal call-flow viewer this standalone deployment serves. It is not an injection endpoint — nothing loads it from a portal.',
-        verifiable: true,
-      }];
-    }
     const base = `https://${hostname}`;
     const handoff = env.PORTAL_HANDOFF_URL;
     return [
@@ -1421,7 +1315,7 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
     version: VERSION,
     hostname,
     cacheScope,
-    mode: portalMode(env) ? 'portal-backend' : 'standalone',
+    mode: 'portal-backend',
     // `?? ''` at the ENV BOUNDARY, not in the renderer: `NS_SERVER` is typed `string` but can be absent at
     // runtime, and `esc(undefined)` threw — so the HTML console 500'd for exactly the operator whose
     // NS_SERVER row reads "Nothing works", i.e. the one who most needs the page. `esc` stays strictly typed.
@@ -1448,7 +1342,6 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
   const issues = setupIssues(env);
 
   // ── config errors: the seven validators, each already owned by its subsystem ────────────────────
-  const pmErr = portalModeConfigError(env);
   const kitErr = kitConfigError(env);
   const aaErr = appAccessConfigError(env);
   const menuErr = menuConfigError(env);
@@ -1459,7 +1352,6 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
   const addErr = (subsystem: string, reason: string | null): void => {
     if (reason) configErrors.push({ subsystem, reason });
   };
-  addErr('Portal mode', pmErr);
   addErr('Injection', kitErr);
   addErr('Feature gating', featuresErr);
   addErr('App access', aaErr);

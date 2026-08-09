@@ -6,7 +6,6 @@
   // viewer with nothing else running.
   //
   // Secrets are NEVER in this file — set them per environment with `wrangler secret put <NAME>`:
-  //   NS_API_TOKEN     standalone-mode API token (service deployments only; omit for portal backend mode)
   //   RINGOTEL_API_KEY enables the Ringotel integration (absent ⇒ it does not run at all)
   //   RINGOTEL_LABEL / RINGOTEL_LABEL_SHORT   white-label display names (default "Ringotel")
   //   BRAND_NAME       your company name (default: unbranded, "NS Portal Kit")
@@ -19,9 +18,9 @@
   "compatibility_flags": ["nodejs_compat"],
 
   // A *.workers.dev URL, so a fresh deploy is reachable and can tell you what to do next. That is safe
-  // here because the Worker REFUSES to use a stored NS_API_TOKEN until something verifiable is in front
-  // of it (Cloudflare Access) — see src/exposure.ts. Until then it serves setup instructions, not data.
-  // Add a custom domain under `routes` when you have one; you can set this false once you do.
+  // here because this Worker holds no credential for user traffic: every request must carry the calling
+  // user's own ns_t, and one that does not is refused. Add a custom domain under `routes` when you have
+  // one; you can set this false once you do.
   "workers_dev": true,
 
   // Defense-in-depth rate limit on ns_t live-checks (bounds forged-token upstream amplification against
@@ -58,9 +57,10 @@
     //        deployments sharing an origin would fight over one subscription set.
     // Secrets (never here) — `wrangler secret put <NAME>`:
     //   NS_EVENTS_PATH_SECRET  master key for the per-domain callback token
-    //   NS_API_KEY             the background service identity, used when an event has no caller.
-    //        NOT the same as NS_API_TOKEN, and there is no fallback between them. Prefer a dedicated
-    //        least-privilege key restricted by allowed-models / domain / ip-address.
+    //   NS_API_KEY             the background service identity, used when an event has no caller — the
+    //        ONLY stored NetSapiens credential this Worker has, and it exists solely because an event
+    //        arrives with nobody attached. Prefer a dedicated least-privilege key restricted by
+    //        allowed-models / domain / ip-address.
 
     // REQUIRED for delegated/portal auth: the Manager Portal host that issues your ns_t.
     // There is deliberately no default — a default issuer would mean accepting tokens minted by a
@@ -68,20 +68,11 @@
     // (exact match, no wildcards).
     "NS_PORTAL_ISS": "manage.example.com",
 
-    // ── Which mode? Leave BOTH blank for standalone mode (an internal tool for your own team). ──
-    // These are here, rather than commented out, so the "Deploy to Cloudflare" form asks for them —
-    // which is what lets you stand up a portal-backend-mode deployment without ever touching a terminal.
-    //
-    // PORTAL_MODE "1" = delegated only: no stored token, every request carries the calling user's own
-    // ns_t.
-    //
-    // NOT A STARTING POINT YET. Portal backend mode is only half of a feature: it does nothing until JS you
-    // inject into your Manager Portal calls it. The Worker SERVES that script itself — hand your
-    // portal https://<your-worker-host>/p.js (the basename is PRIMARY_BASENAME, default "p"); there
-    // is nothing for you to write. Leave PORTAL_MODE blank unless you are running that mode.
-    // See SETUP.md.
-    "PORTAL_MODE": "",
-    // Portal backend mode only: the browser origin your injected JS runs on — normally your Manager Portal.
+    // NOT A STARTING POINT ON ITS OWN. This is half of a feature: it does nothing until your Manager
+    // Portal loads the script this Worker serves. Hand your portal https://<your-worker-host>/p.js (the
+    // basename is PRIMARY_BASENAME, default "p") — there is nothing for you to write. See SETUP.md.
+
+    // The browser origin your injected JS runs on — normally your Manager Portal.
     "ALLOWED_ORIGINS": ""
 
     // ── Optional. Uncomment what you need; each is inert while unset. ──
@@ -120,7 +111,7 @@
   //   "prod": {
   //     "name": "ns-portal-kit-prod",
   //     "routes": [{ "pattern": "portal.example.com", "custom_domain": true }],
-  //     "vars": { "NS_SERVER": "api.example.com", "NS_PORTAL_ISS": "manage.example.com", "PORTAL_MODE": "1", "CACHE_SCOPE": "prod" }
+  //     "vars": { "NS_SERVER": "api.example.com", "NS_PORTAL_ISS": "manage.example.com", "CACHE_SCOPE": "prod" }
   //   }
   // }
 }

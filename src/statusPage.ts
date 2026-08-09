@@ -1075,7 +1075,7 @@ function renderChecks(doc: StatusDoc): string {
   const hasRun = doc.probes !== null;
   const body = hasRun
     ? doc.probes!.map(renderProbeRow).join('')
-    : probeCatalogFor(doc.deployment.mode).map(renderNotRunRow).join('');
+    : probeCatalogFor().map(renderNotRunRow).join('');
   // The button sits ABOVE the rows, not below them — a reader who opens this tab must be able to tell
   // there is an action available without first scrolling past the explainer/result rows.
   const btnLabel = hasRun ? RUN_BTN_LABEL.ranAlready : RUN_BTN_LABEL.notRun;

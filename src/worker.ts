@@ -45,11 +45,9 @@ import {
   type EntityRef,
 } from '@dszp/netsapiens-lib';
 import { worstSeverity, type HealthFlag, type User } from '@dszp/ringotel-lib';
-import { viewerHtml } from './viewerApp.js';
 import { brandAccent, productName, VERSION } from './brand.js';
-import { needsSetup, setupHtml, portalMode, portalModeConfigError } from './setup.js';
+import { needsSetup, setupHtml } from './setup.js';
 import { portalModeHtml } from './portalInfo.js';
-import { serviceTokenBlocked, exposureHtml, BLOCKED_REASON } from './exposure.js';
 import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeWriteClient, invalidateOrgUsers, resolveForWrite, buildExtIndex, ringotelDomains, scopeOf, connectionsOf, orgidOf, type OrgResolution, type UserAppStatus } from './ringotel.js';
 // The eligibility DECISION is the shared engine in the library — one implementation with the SSO worker,
 // so the two can't drift. Only this deployment's config parsing is local.
@@ -58,7 +56,6 @@ import { resolveRingotelConfig, ringotelConfigError } from './eligibility.js';
 import { activate, deactivate, resetPassword, isDomainWritable, RingotelWriteError } from './ringotelActivation.js';
 import { planDirectoryPrepop, applyDirectoryPrepop, type PrepopInput } from './ringotelPrepop.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
-import { accessConfig, verifyAccessRequest } from './access.js';
 import { planDomainSweep, type SweepPlan } from './nsOffboard.js';
 import {
   parseNsEventsConfig, nsEventsConfigError, verifyEventRequest, decodeEventBatch, diagShape,
@@ -95,8 +92,6 @@ import { runProbes } from './statusProbes.js';
 interface Env {
   /** NS API host, e.g. "api.example.com" (var). */
   NS_SERVER: string;
-  /** Service API token for the internal viewer (secret; `wrangler secret put` / .dev.vars). Optional. */
-  NS_API_TOKEN?: string;
   /** Comma-separated allowed browser origins for CORS (var). */
   ALLOWED_ORIGINS?: string;
   /**
@@ -117,10 +112,6 @@ interface Env {
   /** Manager Portal host that issues ns_t, e.g. "manage.example.com". REQUIRED for delegated auth:
    *  jwt.verify() has no issuer default, so an unset value fails closed (see portalIss()). */
   NS_PORTAL_ISS?: string;
-  /** Deliberate opt-out of the ungated-service-token gate (src/exposure.ts). Truthy ⇒ use NS_API_TOKEN
-   *  even with no Access gate in front. Only for deployments protected some other way (mTLS, a WAF, an
-   *  authenticating proxy). */
-  ALLOW_UNGATED_SERVICE_TOKEN?: string;
 
   // ── Optional: branding (see src/brand.ts) ──────────────────────────────────
   // The shared library ships vendor-neutral themes only, so branding is deploy config, not source.
@@ -187,10 +178,6 @@ interface Env {
   NS_DEVICE_DETAILS?: string;
 
   // ── Optional: Cloudflare Access gate (standalone-mode deployments behind Zero Trust; see src/access.ts) ──
-  /** Access Application Audience (AUD) tag. Presence turns ON in-Worker Access-JWT verification. */
-  ACCESS_AUD?: string;
-  /** Access team domain, e.g. "yourteam.cloudflareaccess.com" (bare host or full URL). */
-  ACCESS_TEAM_DOMAIN?: string;
 
   /**
    * Comma-separated domains to hide/refuse regardless of the token's scope — e.g. the DID-holding
@@ -199,12 +186,6 @@ interface Env {
    */
   BLOCKED_DOMAINS?: string;
 
-  /**
-   * "1"/"true" ⇒ PORTAL BACKEND MODE: delegated-only (no service-token fallback) + policy-gated
-   * (verify → toPrincipal → can('portal.access')). Unset ⇒ the existing dual-mode Worker (dia/local),
-   * byte-identical. See src/portal.selftest.ts.
-   */
-  PORTAL_MODE?: string;
 
   // ── Worker-served Manager-Portal injection (portal-mode-only; see src/kit.ts) ──────────────────────
   /** Public primary basename, served at `/<basename>.js` (default `p`). Validated `^[a-z0-9_-]+$`. */
@@ -342,10 +323,6 @@ async function liveCheckRateLimited(request: Request, env: Env): Promise<boolean
  *  variants (e.g. `?domain=0000.12345.Service.` slipping the blocklist). */
 const normDomain = (d: string): string => d.trim().toLowerCase().replace(/\.+$/, '');
 
-// portalMode / portalModeConfigError moved to src/setup.ts — a single parse of PORTAL_MODE shared by
-// worker.ts, kit.ts, and (Task 3) status.ts, so the flag's meaning can't drift between them. Belt-and-
-// braces reminder: policy applies to any delegated principal regardless of the mode flag (see
-// resolveAuth / requireFeature).
 
 /**
  * Feature policies are no longer hardcoded here — they're assembled per-request by
@@ -487,8 +464,13 @@ interface Auth {
   lockedDomain?: string;
   /** Portal reseller fallback: any domain allowed; this one when ?domain is absent. */
   defaultDomain?: string;
-  /** Portal-backend-mode principal (set only in portal backend mode). */
-  principal?: Principal;
+  /** The delegated caller. REQUIRED: `resolveAuth` returns a principal on every success path, because
+   *  there is no stored-credential path left to produce an `Auth` without one. Making it required is what
+   *  keeps that invariant visible at the call sites — three consumers used to read its ABSENCE as
+   *  permission (skip the policy check, grant a fleet-wide cache refresh, skip the fresh-token
+   *  re-validation), which was correct while a service-mode caller existed and would have become
+   *  allow-by-default the moment anything else constructed an Auth without one. */
+  principal: Principal;
   /** True when this caller passed portal.self but NOT portal.access — fenced to the self surface. */
   self?: boolean;
 }
@@ -529,12 +511,8 @@ function portalIss(env: Env): string | string[] {
  * actually read in NetSapiens, in BOTH modes.
  */
 function requireFeature(auth: Auth, feature: string, env: Env, policies: FeaturePolicies): void {
-  // Policy applies whenever a delegated identity is present — NOT only when PORTAL_MODE parses. A
-  // principal is built for every valid Bearer ns_t now (resolveAuth), so a delegated caller can't
-  // dodge feature gating by the deployment forgetting/mistyping the mode flag. Standalone SERVICE mode
-  // has no principal by design (there is no delegated identity, only a stored token); there,
-  // assertDomainReadable is the control, not policy.
-  if (!auth.principal) return;
+  // Policy applies to every caller, because every caller is a delegated identity now — `Auth.principal`
+  // is required, so there is no "authenticated but unpoliced" shape for a request to arrive in.
   if (!can(auth.principal, feature, policies)) throw new HttpError(403, `Not authorized: ${feature}`);
 }
 
@@ -565,25 +543,6 @@ function requireFleetRead(principal: Principal, env: Env): void {
     'that name other domains, and this account is limited to its own domain.');
 }
 
-/**
- * The Cloudflare Access gate, callable from more than one place.
- *
- * Extracted because the console (`/kit/status`, `/kit/spk.js`) is served AHEAD of this point in fetch()
- * and would otherwise be the only route pair that skips Access. That ordering is forced, not chosen:
- * console < Group 2 < the NS-events receiver < this gate, and every link in that chain is load-bearing
- * (see the Task 6 report). So the console calls this directly rather than relying on position.
- *
- * Inert unless BOTH ACCESS_AUD and ACCESS_TEAM_DOMAIN are set (accessConfig() !== null — AUD alone
- * cannot build the JWKS URL, so the check can't run), so local `pnpm dev` and the portal deployment
- * are unaffected. Keying anything off ACCESS_AUD alone was the 356e6d8 fail-open. One implementation,
- * two call sites — the pre-routing gauntlet's inline check, and the console branch.
- */
-async function requireAccess(request: Request, env: Env): Promise<void> {
-  const cfg = accessConfig(env);
-  if (!cfg) return; // Access not configured; nothing to verify
-  const verdict = await verifyAccessRequest(request, cfg, caches.default);
-  if (!verdict.ok) throw new HttpError(verdict.status, 'Cloudflare Access required', verdict.reason);
-}
 
 /**
  * Verify a Bearer ns_t → Principal, WITHOUT the portal.access gate or domain scoping. The shared auth
@@ -641,17 +600,9 @@ async function resolveAuth(request: Request, env: Env, policies: FeaturePolicies
     throw new HttpError(403, 'Not authorized for the svc portal');
   }
 
-  // No bearer. Portal backend mode is delegated-only: never fall back to the stored token.
-  if (portalMode(env)) throw new HttpError(401, 'The svc portal requires Authorization: Bearer <ns_t>');
-
-  if (env.NS_API_TOKEN) {
-    // The one place the Worker lends out a credential the caller never proved they should have. Refuse
-    // unless something verifiable is in front of it (Access), it isn't reachable (local dev), or the
-    // operator explicitly accepted the risk. See src/exposure.ts.
-    if (serviceTokenBlocked(env, new URL(request.url).hostname)) throw new HttpError(403, 'Service token is not protected', BLOCKED_REASON);
-    return { token: env.NS_API_TOKEN };
-  }
-  throw new HttpError(401, 'Unauthenticated: provide Authorization: Bearer <ns_t>, or configure NS_API_TOKEN (standalone mode)');
+  // No bearer. This is a delegated-only backend: there is no stored credential to fall back to, and
+  // there is no configuration that creates one.
+  throw new HttpError(401, 'This portal backend requires Authorization: Bearer <ns_t>');
 }
 
 /**
@@ -669,7 +620,6 @@ async function resolveAuth(request: Request, env: Env, policies: FeaturePolicies
 function refreshRequested(url: URL, auth: Auth, env: Env, policies: FeaturePolicies): boolean {
   const want = url.searchParams.get('refresh');
   if (want !== '1' && want !== 'ringotel') return false;
-  if (!auth.principal) return true;                 // standalone service tool (behind Access): operator-controlled
   return can(auth.principal, 'ringotel.refresh', policies);
 }
 
@@ -725,7 +675,6 @@ function assertDomainWritable(domain: string, writeDomains: string[] | '*'): voi
  * must not leave a cached "valid" verdict good enough to mutate). Driven by needsFreshAuth('write').
  */
 async function requireFreshAuth(auth: Auth, env: Env): Promise<void> {
-  if (!auth.principal) return; // writes already required a principal (requireWriteFeature)
   const fresh = await verify(auth.token, { server: env.NS_SERVER, mode: 'live', expectedIss: portalIss(env), forceFresh: true, cache: new CacheApiVerdictCache(caches.default) });
   if (!fresh.ok) {
     const status = fresh.live === 'invalid' ? (fresh.statusCode ?? 401) : 502;
@@ -1614,11 +1563,6 @@ export default {
     if (url.pathname === '/health') return json({ ok: true, configured: !needsSetup(env), version: VERSION, scope: scopeOf(env) }, 200, cors);
 
     // ── Group 1: gates that must hold before ANY route, including the console ──────────────────────
-    // A mistyped PORTAL_MODE needs no special case: portalMode(env) goes false, so the console's own
-    // `portalMode(env) && …` guard stops matching and the request falls through to Group 2's 500.
-    const pmErr = portalModeConfigError(env);
-    if (pmErr) return json({ error: 'Server misconfigured', reason: pmErr }, 500, cors);
-
     // featuresConfigError CANNOT be demoted to Group 2. resolveFeaturePolicies() IS the authorization
     // the console is gated on; if PORTAL_FEATURES or PORTAL_SUPERADMINS is malformed it throws, and a
     // Worker that cannot evaluate can('kit.status', …) does not know who may see this page. Serving the
@@ -1645,15 +1589,8 @@ export default {
     // beyond what Task 6's brief spelled out for this route; see the Task 6 report for why. Scoped to
     // exactly these two pathnames: no other route's auth timing changes, and resolveAuth is not called
     // twice for a single request — a match here returns before the normal routing section's own call.
-    if (portalMode(env) && (url.pathname === '/kit/status' || url.pathname === '/kit/spk.js' || url.pathname === '/kit/menus/check')) {
+    if ((url.pathname === '/kit/status' || url.pathname === '/kit/spk.js' || url.pathname === '/kit/menus/check')) {
       try {
-        // Access first: this route pair is served ahead of the global Access gate further down (forced
-        // by the ordering chain in the comment above), so it verifies for itself here. Do NOT delete
-        // this on the grounds that the gate "already runs" — for these two paths, it does not, and
-        // skipping it would be the one route pair that bypasses Access when an operator layers it in
-        // front of the whole ns_t-gated deployment. Checked before spending a live /jwt round-trip on a
-        // caller who isn't going to be let through.
-        await requireAccess(request, env);
         const auth = await resolveAuth(request, env, policies);
         if (!auth.principal) throw new HttpError(403, 'The console requires a delegated ns_t');
         if (!can(auth.principal, 'kit.status', policies)) {
@@ -1773,41 +1710,12 @@ export default {
       return handleNsEvent(request, env, evCfg, _ctx, cors);
     }
 
-    // Cloudflare Access gate (defense in depth for standalone-mode deployments) — see requireAccess's
-    // doc comment for the predicate and why it's a shared helper. When active, EVERYTHING below (SPA +
-    // data) requires a valid Access token — a direct hit that bypassed Access (e.g. *.workers.dev) is
-    // refused, so the service NS token never answers an unauthenticated caller.
-    try {
-      await requireAccess(request, env);
-    } catch (err) {
-      if (err instanceof HttpError) return json({ error: err.message, ...(err.reason ? { reason: err.reason } : {}) }, err.status, cors);
-      throw err;
-    }
-
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/app')) {
-      // The internal domain-browser SPA is a SERVICE-mode tool (dia). The delegated `portal` env is an
-      // injection backend, not an SPA host — and the SPA there is non-functional anyway (its fetches carry
-      // no ns_t) — so don't serve it: withhold the internal tooling surface. dia keeps serving it.
-      // Portal backend mode has no UI: it's the backend half of an injected add-on, and the internal SPA is
-      // deliberately withheld here (it's a tooling surface, and its fetches carry no ns_t anyway).
-      // Still 404 — but say why, because someone who just deployed this and opened the URL deserves
-      // better than a bare error. Discloses nothing: no config, no names, no data.
+      // This is the backend half of an injected add-on: there is no UI here, and there never was one for
+      // a portal deployment. Still 404 — but say why, because someone who just deployed this and opened
+      // the URL deserves better than a bare error. Discloses nothing: no config, no names, no data.
       // Deliberately NOT productName(env): BRAND_NAME is a secret, and this page is unauthenticated.
-      if (portalMode(env)) {
-        return new Response(portalModeHtml(), { status: 404, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
-      }
-      // A fresh fork (C3 / the deploy button) cannot be prompted for config, so it arrives here with
-      // placeholders and would otherwise serve an SPA that dies on its first fetch. Say what's missing
-      // instead. Discloses nothing: presence-only, never values, and it vanishes once configured.
-      if (needsSetup(env)) {
-        return new Response(setupHtml(env, productName(env)), { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
-      }
-      // Configured, but the stored token has nothing verifiable in front of it. Don't serve the app —
-      // teach them how to put Access there. Replaced by the real app the moment ACCESS_AUD is set.
-      if (serviceTokenBlocked(env, url.hostname)) {
-        return new Response(exposureHtml(env, url.hostname, productName(env)), { status: 403, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
-      }
-      return new Response(viewerHtml(env), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
+      return new Response(portalModeHtml(), { status: 404, headers: { 'content-type': 'text/html; charset=utf-8', ...cors } });
     }
     if (request.method !== 'GET' && !(request.method === 'POST' && WRITE_PATHS.has(url.pathname)))
       return json({ error: 'Method not allowed' }, 405, cors);
@@ -1815,14 +1723,14 @@ export default {
     try {
       // ── Worker-served injection (portal-mode-only; dia/local never expose these) ──────────────────
       // Public neutral PRIMARY at /<basename>.js — no auth, cache-in-front OK. Carries nothing sensitive.
-      if (portalMode(env) && url.pathname === `/${primaryBasename(env)}.js`) {
+      if (url.pathname === `/${primaryBasename(env)}.js`) {
         return new Response(primaryJs(env), { headers: { 'content-type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=300', ...cors } });
       }
 
       // Manifest SECONDARY at /kit/asset/<name>.js — served from the private ASSETS binding, gated
       // per-entry (public / auth / admin / superadmin / any key). Pre-resolveAuth: `public` needs no token,
       // and `auth` admits any valid ns_t (not just portal.access), so it can't use resolveAuth.
-      if (portalMode(env) && url.pathname.startsWith('/kit/asset/')) {
+      if (url.pathname.startsWith('/kit/asset/')) {
         const name = url.pathname.slice('/kit/asset/'.length).replace(/\.js$/i, '');
         const entry = parseManifest(env).find((e) => e.name === name && isR2Entry(e));
         if (!entry) return json({ error: 'Not found' }, 404, cors); // unknown, or a url: entry (loaded direct)
@@ -1858,7 +1766,7 @@ export default {
       // but a false sense that this is where they're gated. Do not "fix" this omission by adding them.
       if (auth.self) {
         const sp = url.pathname;
-        const selfOk = portalMode(env) && (sp === '/me/status' || sp === '/me/devices' || sp === '/me/resetPassword' || sp === '/me/app-access' || sp === '/kit/self.js');
+        const selfOk = (sp === '/me/status' || sp === '/me/devices' || sp === '/me/resetPassword' || sp === '/me/app-access' || sp === '/kit/self.js');
         if (!selfOk) throw new HttpError(403, 'Not authorized for the svc portal');
       }
 
@@ -1866,7 +1774,7 @@ export default {
       // byte-identical — otherwise an Access-gated dia caller with a reseller ns_t would get the bundle
       // (incl. the label) instead of a 404. resolveAuth already gated portal.access; also require a
       // delegated principal (service mode has none ⇒ 403, fail closed). Per-tier bytes only.
-      if (portalMode(env) && url.pathname === '/kit/portal.js') {
+      if (url.pathname === '/kit/portal.js') {
         if (!auth.principal) throw new HttpError(403, 'The gated bundle requires a delegated ns_t');
         const allowedKeys = featurePolicyKeys().filter((k) => can(auth.principal!, k, policies));
         // Server tier-cache: key includes a host discriminator (caches.default is zone-shared across
@@ -1887,7 +1795,7 @@ export default {
 
       // The minimal SELF bundle: own-account features. Portal-mode-only (like the admin bundle). Any
       // principal that passes portal.self gets it (admins too, for their own home widget); per-tier bytes.
-      if (portalMode(env) && url.pathname === '/kit/self.js') {
+      if (url.pathname === '/kit/self.js') {
         if (!auth.principal) throw new HttpError(403, 'The self bundle requires a delegated ns_t');
         if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
         const selfKeys = selfFeaturePolicyKeys().filter((k) => can(auth.principal!, k, policies));
@@ -2095,7 +2003,7 @@ export default {
       // ── Self-service (own-account) routes ────────────────────────────────────────────
       // Own app status for the home widget. Identity comes from the NS `~` self-wildcard (authoritative,
       // token-scoped) — never client input. Shares the Ringotel org-users cache with /rapp/user.
-      if (portalMode(env) && url.pathname === '/me/status') {
+      if (url.pathname === '/me/status') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         if (!auth.principal) throw new HttpError(403, 'The self status route requires a delegated ns_t');
         if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
@@ -2108,7 +2016,7 @@ export default {
       // Own app-access sign-in details (mode + username + downloads + hide list) for the "how do I sign
       // in" panel. Identity from the NS `~` self-wildcard ONLY — never a request parameter, so no
       // cross-user read is expressible (see src/appAccess.ts for the pure decision matrix).
-      if (portalMode(env) && url.pathname === '/me/app-access') {
+      if (url.pathname === '/me/app-access') {
         if (!auth.principal) throw new HttpError(403, 'The self app-access route requires a delegated ns_t');
         if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
         // This route now carries TWO independent surfaces: the sign-in details (me.appAccess) and portal
@@ -2156,7 +2064,7 @@ export default {
 
       // Own devices (read). Built but default off (me.devices). NS `~` self-wildcard — no ext derivation,
       // no ringotelEnabled gate (a pure NS device read).
-      if (portalMode(env) && url.pathname === '/me/devices') {
+      if (url.pathname === '/me/devices') {
         if (!auth.principal) throw new HttpError(403, 'The self devices route requires a delegated ns_t');
         if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');
         requireFeature(auth, 'me.devices', env, policies);
@@ -2167,7 +2075,7 @@ export default {
       // Reset OWN app password (write). Built but default off (me.resetPassword). Identity from the `~`
       // wildcard; write-rail fenced (RINGOTEL_WRITE_DOMAINS). No assertDomainReadable — own domain by
       // construction, and a low-priv token may be refused NS GET /domains/{d}.
-      if (portalMode(env) && url.pathname === '/me/resetPassword' && request.method === 'POST') {
+      if (url.pathname === '/me/resetPassword' && request.method === 'POST') {
         if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
         if (!auth.principal) throw new HttpError(403, 'The self reset route requires a delegated ns_t');
         if (!can(auth.principal, 'portal.self', policies)) throw new HttpError(403, 'Not authorized: portal.self');

@@ -5,23 +5,27 @@
 # on the setup form. So it is kept SHORT ON PURPOSE — only what a first deploy actually needs. Every
 # key added here becomes one more blank box a newcomer has to understand.
 #
-# Everything else is optional and documented in SETUP.md. Add it later with:
+# Everything else is optional and documented in CONFIG.md. Add it later with:
 #     wrangler secret put <NAME>          # secrets
 #     ...or edit `vars` in wrangler.jsonc # non-secret config
 #
-# NS_SERVER and NS_PORTAL_ISS are NOT here: they live in wrangler.jsonc `vars` and are prompted from
-# there. A key in both places is prompted twice and then shadowed by the config value at runtime —
-# silently ignoring whatever was typed.
+# NS_SERVER, NS_PORTAL_ISS and PORTAL_HANDOFF_URL are NOT here: they live in
+# wrangler.jsonc `vars` and are prompted from there. A key in both places is prompted twice and then
+# shadowed by the config value at runtime — silently ignoring whatever was typed.
 
-# ── The one secret a normal deploy needs. ──
-# A NetSapiens API token. Reads run as this token, so its NetSapiens scope is the real boundary — a
-# reseller-scoped token can read every domain it covers. Prefer the narrowest token that works.
-#
-# LEAVE BLANK if you are running portal mode (PORTAL_MODE=1), where each request carries the calling
-# user's own ns_t and no stored token exists at all. See SETUP.md.
-NS_API_TOKEN=""
+# ── The one secret to set before your first deploy. ──
+# Comma-separated `user@domain` accounts that pass every gate. The integration console — the page that
+# reports how this deployment is actually configured — is gated to these accounts by DEFAULT, so with
+# nobody named it admits NOBODY, including you. Set it now and you never have a console you cannot open.
+PORTAL_SUPERADMINS=""
 
-# ── Optional: who sees which portal features. ──
-# Portal-mode features (call-flow, app columns, banner) are gated to roles by DEFAULT — you need nothing
-# here to get the defaults. To hide/re-level a feature or add a superadmin, set PORTAL_FEATURES (JSON) /
-# PORTAL_SUPERADMINS. Full level vocabulary, registry, and examples: SETUP.md → "Features & gating".
+# ── Optional: the softphone app integration. ──
+# One key turns all of it on: app status columns, the profile-page activation controls, sign-in details.
+# Leave blank and every app feature is inert, with no error — the NetSapiens-only features are unaffected.
+# Writes additionally need RINGOTEL_WRITE_DOMAINS, which is fail-closed when empty. See CONFIG.md.
+RINGOTEL_API_KEY=""
+
+# ── Optional: who sees which feature. ──
+# Every feature is gated to a role by DEFAULT — you need nothing here to get those defaults. To re-level
+# one, switch it off, or grant it to named accounts, set PORTAL_FEATURES (JSON). Full level vocabulary,
+# the feature registry, and worked examples: CONFIG.md → "Features and gating".

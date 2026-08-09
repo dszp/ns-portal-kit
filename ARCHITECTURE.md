@@ -12,7 +12,7 @@ stay read-only by construction. Ringotel reads and writes go through
 
 | File | Role |
 |---|---|
-| `worker.ts` | Cloudflare Worker entry: dual-mode auth, the route table + sensitivity map, per-tier bundle serving, `CacheApiVerdictCache`. Worker-only APIs. |
+| `worker.ts` | Cloudflare Worker entry: delegated auth, the route table + sensitivity map, per-tier bundle serving, `CacheApiVerdictCache`. Worker-only APIs. |
 | `kit.ts` | The **Worker-served injection**: the neutral public **primary** bootstrap, the per-tier gated **bundles** (admin `/kit/portal.js` + self-service `/kit/self.js`), the `PORTAL_SECONDARIES` manifest, and `/kit/asset` secondaries. |
 | `features.ts` | **Feature gating**: the LEVELS scope vocabulary, the `FEATURE_REGISTRY` (defaults), and `resolveFeaturePolicies(env)` from `PORTAL_FEATURES` / `PORTAL_SUPERADMINS`. |
 | `viewerApp.ts` | the viewer SPA the Worker serves (`viewerHtml`). |
@@ -21,8 +21,6 @@ stay read-only by construction. Ringotel reads and writes go through
 | `eligibility.ts` | Ringotel **activation eligibility** (HARD / SOFT / precondition tiers) + `RINGOTEL_*` config resolution. |
 | `ringotelActivation.ts` | activate / deactivate / reset **orchestration** (provision the NS device, copy SIP creds to the app user), incl. duplicate-extension self-heal. |
 | `nsDevices.ts` | optional desk-phone model + registration enrichment (on the diagrams). |
-| `access.ts` | Cloudflare Access JWT verification (RS256/JWKS). Active only when **both** `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` are set — **and never in portal mode**, where it returns inert by construction: a portal deployment stores no credential for Access to protect, and a gate in front of one would refuse the plain `<script src>` that loads the injected primary. |
-| `exposure.ts` | the service-token gate: refuses to use a stored `NS_API_TOKEN` when nothing verifiable is in front of it, and serves the teaching page instead. |
 | `setup.ts` | the unconfigured-deployment checklist: which settings are unset, and the fix for each. Presence only, never values. |
 | `pageShell.ts` | the shared HTML shell + `esc()` used by the setup / exposure / portal-info pages. |
 | `portalInfo.ts` | the terse 404 a portal-backend-mode deployment returns at `/`. Deliberately static — no config, no branding. |
@@ -31,14 +29,11 @@ stay read-only by construction. Ringotel reads and writes go through
 
 ## Auth
 
-**Standalone mode** — a stored token reads any domain it's scoped to. The token's NetSapiens scope is the
-real boundary; `ALLOWED_DOMAINS` is an app-layer gate on top. Pair it with Cloudflare Access
-(`ACCESS_AUD` **+** `ACCESS_TEAM_DOMAIN` — both, or the check can't run): the in-Worker check fails
-closed, so the token only ever answers requests that already passed the Zero Trust policy — a
-`*.workers.dev` or direct-route bypass is refused. Until something verifiable is in front of the token,
-`exposure.ts` refuses to use it at all rather than answer an unauthenticated caller.
-
-**Portal backend mode** — delegated only, no service-token fallback. Every request runs
+**Delegated only, and structurally so.** This Worker stores no NetSapiens credential for user traffic —
+not by configuration but because there is no code left that reads one. The standalone viewer that did
+hold one moved to its own project in 0.3.0, and with it went the Cloudflare Access gate and the
+stored-credential exposure gate that existed to protect it. There is no setting that brings any of that
+back. Every request runs
 `verify → toPrincipal → can(feature)`. A valid `ns_t` **always** yields a policy-gated principal (there is
 no "delegated but unpoliced" path). `portal.access` is the entry gate; a reseller unlocks cross-domain
 reads, everyone else is domain-locked to their own. Two systems sit on top — **feature gating** and the

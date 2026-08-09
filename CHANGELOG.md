@@ -13,12 +13,98 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 Compare that against the latest entry below to see whether there's anything worth pulling. Updating is
 `git fetch upstream && git merge upstream/main` — see
-[SETUP.md → Getting updates later](./SETUP.md#7-getting-updates-later).
+[SETUP.md → Getting updates later](./SETUP.md#getting-updates).
 
 **Why some versions have no release link:** this repository is published in batches, so several versions
 can land in one release. Every version is documented below, but only the ones that were published
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
+
+## [Unreleased]
+
+### Changed
+
+- **`SETUP.md` is a setup guide again, and the settings reference moved to a new `CONFIG.md`.** The old
+  file had grown to 1,400 lines that opened by asking you to choose between two products and then defined
+  66 settings inline — which meant the reader had to finish a reference manual before deploying anything.
+  Setup now covers **one** deployment shape: what each feature is for and why, what that feature needs,
+  how to get onto Cloudflare, how to hand your portal the one URL it needs, and what to check afterwards.
+  Everything past "it works" is a decision, and the integration console is where those get made.
+- **`CONFIG.md` is the new settings reference**, ordered the way the console's Config tab is ordered, with
+  a stable per-setting anchor — `CONFIG.md#RINGOTEL_WRITE_DOMAINS` resolves and survives a heading
+  rewording. It carries the fuller material too: the level vocabulary and feature registry, the menu
+  targeting model, the secondary-script rules, the event-subscription depth notes, and where each value
+  belongs.
+- **`SETUP.md` no longer documents the standalone viewer deployment.** That is a separate product with a
+  different security model — a stored credential and a perimeter, rather than a per-caller token — and
+  describing both in one file made the reader carry a fork through every section. Its documentation moves
+  with it. Nothing about the code changed in this release: a deployment running with `PORTAL_MODE` unset
+  behaves exactly as before.
+- **`README.md` and `AGENTS.md` are portal-only too.** They previously opened by asking the reader to pick
+  between two products, which put the first and least reversible decision before anything they could use.
+  `README.md` now says what this is in its first paragraph and what it adds to a portal in the next.
+  `AGENTS.md`'s opening STOP is no longer "choose a mode" but **"find out who controls the injected-script
+  slot"** — the genuinely blocking question, since for a reseller under another carrier it is a request to
+  their provider rather than a setting, and nothing reaches a user until it is honoured. Its sequence and
+  verify rungs lost their per-mode branches, gained `/p.js` as its own verification step (the one check
+  that separates "the Worker is broken" from "the portal is not loading it"), and gained a narrow-rollout
+  step for an operator whose portal already serves customers.
+- **`.dev.vars.example` prompts for what a portal deployment actually needs.** It is the deploy button's
+  form, so every key in it is a blank box a newcomer must understand: it now asks for `PORTAL_SUPERADMINS`
+  — the one value whose absence produces a working deployment nobody can inspect — and
+  `RINGOTEL_API_KEY`, and explains that features are gated by default so `PORTAL_FEATURES` is optional.
+- **The unconfigured-deployment setup page** now points at `CONFIG.md` rather than `SETUP.md` for settings.
+
+## [0.3.0] — 2026-08-09
+
+**The standalone viewer is gone from this project.** It moved to its own repo, and this one is the portal
+backend and nothing else. If you run this in portal-backend mode — which is what the deploy button and every
+recent version of the docs set up — **nothing about your deployment's behaviour changes.** Upgrade normally.
+
+⚠️ **If you were running it WITHOUT `PORTAL_MODE`** — the standalone call-flow viewer at `/`, with a stored
+`NS_API_TOKEN` behind Cloudflare Access — **do not upgrade to 0.3.0.** That product is not here any more.
+It has its own project now; stay on 0.2.47 until you have moved. This release fails closed rather than
+silently (every request is refused, because there is no stored credential left to serve), but nothing in
+the deployment will tell you why, which is the reason this paragraph exists.
+
+### Removed
+
+- **Two routes: `/` and `/app`.** `/` still answers — with the same page explaining there is no UI here —
+  so a stray bookmark gets an explanation rather than a bare 404.
+- **Five settings**, which are no longer read: `NS_API_TOKEN`, `ALLOW_UNGATED_SERVICE_TOKEN`, `ACCESS_AUD`,
+  `ACCESS_TEAM_DOMAIN`, and **`PORTAL_MODE`** itself. Leaving any of them set in your `wrangler.jsonc` is
+  harmless — nothing reads them and nothing errors — so there is no migration step. Delete them when
+  convenient.
+- **The Cloudflare Access gate and the stored-credential exposure gate.** Both existed to protect a
+  credential this deployment never had. An Access gate in front of a portal backend could never work
+  anyway: the Manager Portal loads the injected primary with a plain `<script src>`, which cannot complete
+  an Access login.
+- **Two console cards** (Access, exposure) and the Access check on the Checks tab, along with the
+  "not applicable to this deployment" treatment on the Config tab — with one product there is nothing left
+  that a setting can be inapplicable *to*. The Config tab now lists 61 settings, all of them live.
+
+### Changed
+
+- **`PORTAL_MODE` is not a mode selector any more, because there is only one mode.** Every conditional it
+  guarded is now unconditional. A deployment that never set it behaves identically to one that set it to
+  `1` — which is the direction that matters, since the failure mode of forgetting it used to be a Worker
+  that served nothing.
+- **`Auth.principal` is required.** Three internal checks used to treat a missing principal as permission —
+  skipping the feature-policy check, granting a fleet-wide cache rebuild, and skipping the fresh-token
+  re-validation before a write. Each was correct while a stored-credential caller existed. With every
+  caller now delegated they would have become allow-by-default branches, so they are gone and the type
+  enforces what `resolveAuth` already guaranteed.
+- **The local dev launcher no longer resolves a NetSapiens credential.** It was handing a broad fleet-read
+  token to a Worker that ignores it, and forcing a secret-store unlock on every dev boot for nothing.
+
+### Notes
+
+- The route table was verified line-by-line across the change: 24 path comparisons before, 24 after,
+  differing only by the removed mode guard. Nothing was dropped — including the injected primary, whose
+  route is built from a template literal and would not have shown up in a naive check.
+- 2001 offline tests pass. The ~100 that went with this release were the ones describing the removed
+  product; the ones that merely *used* it as a convenient way to authenticate were converted to a delegated
+  caller instead, so their coverage of the portal read path is intact.
 
 ## [0.2.47] — 2026-08-09
 
@@ -1037,7 +1123,7 @@ Put an address on the NetSapiens user before resetting.
   does not know is a startup error rather than a rule that silently never matches, and existing menu
   configurations resolve exactly as before: the axis does nothing until a rule names it. While a user is
   masqueraded, the masqueraded user's scope is the one that matches, so an administrator sees the menu that
-  user sees. See [SETUP.md](./SETUP.md#customizing-portal-menus-portal_menus).
+  user sees. See [CONFIG.md](./CONFIG.md#PORTAL_MENUS).
 
 ### Changed
 

@@ -18,7 +18,6 @@ import { isAllowed, type Principal } from '@dszp/netsapiens-lib';
 import { resolveGate, FeaturesConfigError, type Gate } from './features.js';
 import { parseDownloads } from './appAccess.js';
 import { VERSION, productName, releaseNotesUrl } from './brand.js';
-import { portalMode } from './setup.js';
 import { SPK_BRIDGE } from './spkBridge.js';
 
 /** The subset of the Worker `Env` the kit helpers read. Structural, so worker.ts's `Env` satisfies it. */
@@ -44,10 +43,6 @@ export interface KitEnv {
   /** Endpoint returning the status-banner message for the caller. Unset ⇒ the feature is inert.
    *  Receives the caller's live ns_t, so it must be an endpoint the operator controls. */
   STATUS_BANNER_WEBHOOK?: string;
-  /** Whether portal backend mode is on — `kitConfigError` only applies below (the injection surface is
-   *  portal-mode-only); read via `portalMode()` (src/setup.ts) so the parse can't drift from the flag
-   *  that actually gates portal mode elsewhere. */
-  PORTAL_MODE?: string;
   /** Structural for `kitConfigError`'s ASSETS-binding check; see the Worker `Env`'s own doc comment. */
   ASSETS?: { get(key: string): Promise<{ text(): Promise<string> } | null> };
 }
@@ -195,11 +190,10 @@ export function parseManifest(env: KitEnv): ManifestEntry[] {
  * Loud, fail-closed validation of the static injection config (portal-mode-only). A malformed
  * PRIMARY_BASENAME / PORTAL_SECONDARIES / PORTAL_HANDOFF_URL is a deploy-time mistake: surface it as a
  * 500 with an actionable reason on every request (after /health), rather than throwing deep in a route.
- * Returns null when off (non-portal) or valid. The single check — worker.ts calls this rather than
+ * Returns null when the configuration is valid. The single check — worker.ts calls this rather than
  * re-validating the same manifest/basename/handoff shape itself.
  */
 export function kitConfigError(env: KitEnv): string | null {
-  if (!portalMode(env)) return null;
   try {
     primaryBasename(env);
     parseManifest(env);

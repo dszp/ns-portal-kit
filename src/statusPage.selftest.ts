@@ -390,16 +390,7 @@ const DOC = () => buildStatus(
   // correct if it survives where it is real, and a filter that quietly drops it everywhere would pass a
   // one-sided test.
   ok(!panel.includes('Cloudflare Access'), 'no Cloudflare Access row in portal-backend mode');
-  {
-    const sa = DOC(); sa.deployment.mode = 'standalone';
-    const h2 = statusHtml(sa);
-    const b = h2.indexOf('id="spkpanel-checks"');
-    const p2 = h2.slice(b, h2.indexOf('</main>', b));
-    ok(p2.includes('Cloudflare Access'), 'but it is still there in standalone, where the stored token depends on it');
-    ok(!p2.includes('Status banner endpoint'), 'and standalone has no banner check — there is no injection there');
-    ok((p2.match(/NOT RUN/g) || []).length === probeCatalogFor('standalone').length,
-      'each mode showing exactly the checks it will actually run');
-  }
+
 
   // L2 (2026-08-07 pre-deploy review): the intro must not contradict the rows beneath it. It claimed "each
   // check below is a live network call" above two rows whose own `cost` says "No network call". Tied to the

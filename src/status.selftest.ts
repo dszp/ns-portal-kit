@@ -33,11 +33,6 @@ const OK_ENV = {
   ok(d.configured === true, 'a complete portal env reports configured');
   ok(typeof d.version === 'string' && d.version.length > 0, 'reports a version');
 }
-{
-  const d = buildStatus({ NS_SERVER: 'api.example.com' }, { principal: null, hostname: 'dia.example.com' }).deployment;
-  ok(d.mode === 'standalone', 'no PORTAL_MODE ⇒ standalone');
-  ok(d.configured === false, 'no way to authenticate ⇒ not configured');
-}
 
 // ── the environment badge: the page must never leave you guessing which deployment you are reading ──
 ok(envBadge('localhost', 'default') === 'LOCAL', 'localhost ⇒ LOCAL');
@@ -215,36 +210,18 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
 
   // EXACT: `>= 60` against a table of 64 was a floor that passed by coincidence — deleting a SETTINGS row
   // did not trip it. Both numbers are asserted so a shrunk table cannot hide behind a shrunk expectation.
-  // 66 since STATUS_BANNER_WEBHOOK. Pinned as an EXACT number on purpose — `>= 60` was a floor that
-  // passed by coincidence, so deleting a row did not trip it. Bump this deliberately when adding one; the
-  // drift guard in statusModel.selftest.ts is what proves the table matches `interface Env`.
-  ok(SETTINGS.length === 66, `sanity: the descriptor table has exactly 66 rows (got ${SETTINGS.length})`);
-  // Not every row any more: a setting that cannot act in THIS deployment's mode is omitted entirely rather
-  // than dimmed, so the portal console never mentions the Access/stored-token pair. Both halves asserted, so
-  // "omitted" cannot quietly grow into "most things are missing".
-  const inapplicable = SETTINGS.filter((d) => d.appliesTo === 'standalone');
-  ok(inapplicable.length === 4, `sanity: exactly 4 rows are standalone-only (got ${inapplicable.length})`);
-  ok(doc.settings.length === SETTINGS.length - inapplicable.length,
-    `a portal deployment renders every row EXCEPT the standalone-only ones (${doc.settings.length} of ${SETTINGS.length})`);
-  ok(inapplicable.every((d) => !doc.settings.some((v) => v.name === d.name)),
-    'and none of them is mentioned — not dimmed, not present');
-  ok(doc.settings.every((v) => v.applicability.applicable), 'nothing inapplicable survives the filter');
+  // 61 after the standalone viewer left this repo (2026-08-09) and took NS_API_TOKEN,
+  // ALLOW_UNGATED_SERVICE_TOKEN, ACCESS_AUD, ACCESS_TEAM_DOMAIN and PORTAL_MODE with it. Pinned as an
+  // EXACT number on purpose — `>= 60` was a floor that passed by coincidence, so deleting a row did not
+  // trip it. Bump this deliberately when adding one; the drift guard in statusModel.selftest.ts is what
+  // proves the table matches `interface Env`.
+  ok(SETTINGS.length === 61, `sanity: the descriptor table has exactly 61 rows (got ${SETTINGS.length})`);
+  // Every row is rendered now: there is one deployment shape, so no setting is inapplicable to it.
+  ok(doc.settings.length === SETTINGS.length,
+    `every row is rendered (${doc.settings.length} of ${SETTINGS.length})`);
+  ok(doc.settings.every((v) => v.applicability.applicable), 'and every one of them is applicable');
   ok(s('RINGOTEL_API_KEY').set === true, 'a set secret reports set');
   ok(s('RINGOTEL_API_KEY').value === null, 'a secret NEVER carries its value');
-  // NS_API_TOKEN is standalone-only, so a PORTAL doc no longer carries a row for it — these assertions move
-  // to a standalone env rather than disappear. Losing the "a secret never carries its value" check on a
-  // second secret because the row was filtered out would be the filter quietly deleting coverage.
-  {
-    const sa = buildStatus({ NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com', NS_API_TOKEN: 'tok' },
-      { principal: null, hostname: 'dia.example.com' });
-    const tok = sa.settings.find((x) => x.name === 'NS_API_TOKEN')!;
-    ok(!!tok, 'standalone: the stored-token row exists');
-    ok(tok.set === true && tok.value === null, 'standalone: a set secret reports set and NEVER carries its value');
-    ok(/secret/i.test(tok.whyNot), 'standalone: and explains itself as a secret');
-    const sa2 = buildStatus({ NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com' },
-      { principal: null, hostname: 'dia.example.com' });
-    ok(sa2.settings.find((x) => x.name === 'NS_API_TOKEN')!.set === false, 'standalone: an unset secret reports not set');
-  }
   ok(s('ALLOWED_DOMAINS').value === 'acme.example,beta.example', 'a config value is shown');
   ok(s('ALLOWED_DOMAINS').source === 'env', 'a set value reports source=env');
   ok(s('BRAND_ACCENT').source === 'default', 'an unset value reports source=default');
@@ -335,27 +312,17 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // Exact id set, not a floor — a floor lets three cards go missing and the suite stays green. Mirrors
   // statusModel.selftest.ts's own drift guard: diff both directions.
   const ALL_SUBSYSTEM_IDS = [
-    'auth', 'access', 'exposure', 'branding', 'domains', 'cache', 'ringotel', 'eligibility', 'writes',
+    'auth', 'branding', 'domains', 'cache', 'ringotel', 'eligibility', 'writes',
     'appaccess', 'sso', 'menus', 'injection', 'nsdevices', 'events', 'offboarding', 'identity',
     'ratelimit', 'onebill', 'documo',
   ];
   // A subsystem that cannot act in this mode is not rendered at all, so the expected set is per-mode. Both
   // exclusion lists are asserted explicitly and in BOTH directions — "some cards are omitted" must not be
   // able to grow quietly into "most cards are missing", which is what a floor-style check would allow.
-  const PORTAL_OMITS = ['access', 'exposure'];
-  const STANDALONE_OMITS = ['injection'];
-  const EXPECTED_SUBSYSTEM_IDS = ALL_SUBSYSTEM_IDS.filter((id) => !PORTAL_OMITS.includes(id));
-  {
-    const sa = buildStatus({ NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com', NS_API_TOKEN: 'tok' },
-      { principal: null, hostname: 'dia.example.com' });
-    const saIds = sa.subsystems.map((x) => x.id);
-    ok(PORTAL_OMITS.every((id) => saIds.includes(id)),
-      'standalone still renders the Access and exposure cards — they are the only gate in front of a stored token there');
-    ok(STANDALONE_OMITS.every((id) => !saIds.includes(id)),
-      'and omits the injection card, which nothing reads in standalone');
-  }
-  ok(PORTAL_OMITS.every((id) => !doc.subsystems.some((x) => x.id === id)),
-    'the portal console does not mention Access or the exposure gate at all — not dimmed, not present');
+  // The Access and exposure cards left with the standalone viewer (2026-08-09), so every catalogued
+  // subsystem is expected on every deployment now. Kept as an explicit list rather than a count, so a
+  // card disappearing still has to be a deliberate edit here.
+  const EXPECTED_SUBSYSTEM_IDS = ALL_SUBSYSTEM_IDS;
   const gotIds = doc.subsystems.map((x) => x.id);
   const missingIds = EXPECTED_SUBSYSTEM_IDS.filter((id) => !gotIds.includes(id));
   const extraIds = gotIds.filter((id) => !EXPECTED_SUBSYSTEM_IDS.includes(id));
@@ -369,13 +336,6 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // Access is not on a portal console at all now, so its states are asserted on a STANDALONE doc — where the
   // card exists and where the gate is the only thing in front of a stored token. The dedicated [access] block
   // further down covers the rest of its states.
-  {
-    const sa = (env: Record<string, string>) => buildStatus({ NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com', ...env },
-      { principal: null, hostname: 'dia.example.com' }).subsystems.find((x) => x.id === 'access')!;
-    ok(sa({}).state === 'off', 'standalone: Cloudflare Access unconfigured is off');
-    ok(sa({ ACCESS_AUD: 'a', ACCESS_TEAM_DOMAIN: 't.cloudflareaccess.com' }).state === 'on',
-      'standalone: fully configured Access is on');
-  }
   // `off`, not `inert`: NS_EVENTS defaults to `auto`, but a deployment that never touched ANY of the three
   // events settings has not asked for this, so there is nothing to fix. (The message used to say
   // "inert-but-deliberate" while asserting 'off' — the assertion is the correct one.)
@@ -386,16 +346,6 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   ok(sub('onebill').state === 'not-integrated', 'OneBill reports not-integrated');
   ok(sub('documo').state === 'not-integrated', 'Documo reports not-integrated');
   ok(sub('onebill').settings.length === 0, 'a not-integrated subsystem has no settings to show');
-
-  // Half-configured Access is the historical fail-open, and it must be loud — but only where it MATTERS.
-  // OK_ENV is portal mode, where Access is ignored outright, so the loudness belongs on a STANDALONE env;
-  // demanding the missing half in portal mode would be instructing an operator to break their injection.
-  // Both halves of that are asserted in the dedicated [access] block further down.
-  const half = buildStatus({ NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com', ACCESS_AUD: 'aud-value' },
-    { principal: null, hostname: 'dia.example.com' });
-  ok(half.subsystems.find((x) => x.id === 'access')!.state === 'inert', 'standalone: AUD alone leaves Access inert');
-  ok(half.subsystems.find((x) => x.id === 'access')!.missing.some((m) => m.setting === 'ACCESS_TEAM_DOMAIN'),
-    'and it names the missing half');
 
   // An armed events config reports on.
   const armed = buildStatus({
@@ -579,7 +529,7 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
 // just settings[].value, but configErrors[].reason, card notes[], and missing why/how too. ───────────
 {
   const secretNames = SETTINGS.filter((s) => s.kind === 'secret').map((s) => s.name);
-  ok(secretNames.length === 8, `sanity: exactly 8 secret settings (got ${secretNames.length})`);
+  ok(secretNames.length === 7, `sanity: exactly 7 secret settings (got ${secretNames.length})`);
 
   // Every sentinel gets its OWN random body, and no key name in it. The previous shape gave all eight the
   // same 33-char prefix and suffixed the setting's name, which meant `slice(0,10)` and `slice(0,14)` were
@@ -590,7 +540,7 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // Math.random, so a failure is reproducible.
   const BODIES = [
     'q7Ld2Xn4Mb9Rz', 'Ht6Vc1Ws8Pj3K', 'Fy5Gk9Zt2Nq7B', 'Jr4Bm7Xv1Ld6C',
-    'Wp8Nh3Qs5Tz2M', 'Cv9Rk2Fj6Yb4L', 'Zx1Ty7Dn5Gm8P', 'Bs3Wq6Kc9Vf2H',
+    'Wp8Nh3Qs5Tz2M', 'Cv9Rk2Fj6Yb4L', 'Zx1Ty7Dn5Gm8P',
   ];
   ok(new Set(BODIES).size === secretNames.length, 'sanity: one distinct sentinel body per secret');
   const sentinelEnv: Record<string, string> = { ...OK_ENV, RINGOTEL_API_KEY: 'x', RINGOTEL_WRITE_DOMAINS: '*' };
@@ -693,83 +643,6 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
     'and names it as a feature-gating config error with a reason');
 }
 
-// ── Access is ABSENT from a portal console, and intact on a standalone one ────────────────────────────
-//
-// This started as "the card must never demand a setting that is already set" (it fell through to
-// "inert — missing ACCESS_AUD" on a deployment where ACCESS_AUD was set, and the repair that implied would
-// have taken the injection down). David then went further: it should not be mentioned at all on a portal
-// deployment, set or unset, because a console that keeps surfacing something inert trains its reader to
-// ignore it. Both halves are asserted, because the removal must not reach the deployment that needs it.
-{
-  const portalCard = (env: any) => buildStatus(env, { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' })
-    .subsystems.find((s2) => s2.id === 'access');
-  const portalSetting = (env: any) => buildStatus(env, { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' })
-    .settings.find((s2) => s2.name === 'ACCESS_AUD');
-
-  // Absent whether or not it is configured — "set but ignored" is explicitly NOT an exception.
-  ok(!portalCard(OK_ENV), '[access] portal: no Access card when unconfigured');
-  ok(!portalCard({ ...OK_ENV, ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' }),
-    '[access] portal: still no Access card when fully configured — set-but-ignored is not an exception');
-  ok(!portalCard({ ...OK_ENV, ACCESS_AUD: 'aud' }), '[access] portal: nor when half-configured');
-  ok(!portalSetting({ ...OK_ENV, ACCESS_AUD: 'aud' }), '[access] portal: and no Config row for it either');
-  ok(!buildStatus({ ...OK_ENV, ACCESS_AUD: 'aud' }, { principal: P('Super User', 'boss@example.com'), hostname: 'x' })
-    .subsystems.find((s2) => s2.id === 'exposure'), '[access] portal: the exposure gate is gone too');
-
-  // setupIssues must likewise stay quiet in portal mode, and must NOT in standalone, where a half-configured
-  // gate really is a dead deployment.
-  const portalIssues = buildStatus({ ...OK_ENV, ACCESS_AUD: 'aud' }, { principal: P('Super User', 'boss@example.com'), hostname: 'x' }).issues;
-  ok(!portalIssues.some((i) => /half-configured/i.test(i.title)), '[access] portal: setupIssues stays quiet about it');
-
-  // STANDALONE keeps everything. This is the half that must not be collateral damage: Access is the only
-  // thing in front of a stored token's full NetSapiens scope there.
-  const sa = (env: Record<string, string>) => buildStatus({ NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com', ...env },
-    { principal: null, hostname: 'dia.example.com' });
-  const saCard = (env: Record<string, string>) => sa(env).subsystems.find((s2) => s2.id === 'access')!;
-  ok(!!saCard({}), '[access] standalone: the card exists');
-  ok(saCard({}).state === 'off', '[access] standalone: unconfigured is off');
-  ok(saCard({ ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' }).state === 'on',
-    '[access] standalone: fully configured is on');
-  const saHalf = saCard({ ACCESS_AUD: 'aud' });
-  ok(saHalf.state === 'inert' && saHalf.missing.some((m) => m.setting === 'ACCESS_TEAM_DOMAIN'),
-    '[access] standalone: half-configured is inert and names the missing half');
-  ok(sa({ ACCESS_AUD: 'aud' }).issues.some((i) => /half-configured/i.test(i.title)),
-    '[access] standalone: and setupIssues raises it, because there it IS a dead deployment');
-  ok(!!sa({}).settings.find((s2) => s2.name === 'ACCESS_AUD'), '[access] standalone: the Config row exists');
-}
-
-// ── applicability: a setting that cannot act in this mode is OMITTED, not shown ──────────────────────
-// UX-spec items 4 + 11, then superseded by David: not dimmed, gone. `appliesTo` is a per-setting declaration
-// rather than a list in the renderer, so a future mode-specific setting inherits the behaviour by declaring
-// itself. Absence of the field means applicable, which is the honest default — wrongly hiding a live setting
-// is a worse failure than showing one that does nothing.
-{
-  const portal = buildStatus(OK_ENV, { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' }).settings;
-  const sEnv = { NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com' };
-  const standalone = buildStatus(sEnv, { principal: null, hostname: 'dia.example.com' }).settings;
-  const has = (rows: typeof portal, n: string) => rows.some((x) => x.name === n);
-
-  const standaloneOnly = ['NS_API_TOKEN', 'ALLOW_UNGATED_SERVICE_TOKEN', 'ACCESS_AUD', 'ACCESS_TEAM_DOMAIN'];
-  for (const n of standaloneOnly) {
-    ok(!has(portal, n), `[applies] portal: ${n} is not rendered at all`);
-    ok(has(standalone, n), `[applies] standalone: ${n} IS rendered`);
-  }
-  const portalOnly = ['PRIMARY_BASENAME', 'PORTAL_HANDOFF_URL', 'PORTAL_SECONDARIES', 'ASSETS'];
-  for (const n of portalOnly) {
-    ok(has(portal, n), `[applies] portal: ${n} IS rendered`);
-    ok(!has(standalone, n), `[applies] standalone: ${n} is not rendered`);
-  }
-  // PORTAL_MODE is the setting that DECIDES the mode, so hiding it in either direction would hide the one row
-  // an operator needs in order to change the others.
-  ok(has(portal, 'PORTAL_MODE') && has(standalone, 'PORTAL_MODE'), '[applies] PORTAL_MODE is rendered in BOTH modes');
-  // Whatever survives is applicable — the filter is total, not best-effort.
-  ok(portal.every((v) => v.applicability.applicable) && standalone.every((v) => v.applicability.applicable),
-    '[applies] nothing inapplicable survives in either mode');
-  // And the omission is bounded: most of the table is still there.
-  ok(portal.length === SETTINGS.length - standaloneOnly.length,
-    `[applies] portal renders every other row (${portal.length} of ${SETTINGS.length})`);
-  ok(standalone.length === SETTINGS.length - portalOnly.length,
-    `[applies] standalone renders every other row (${standalone.length} of ${SETTINGS.length})`);
-}
 
 // ── gatedBy: a configured setting that is doing nothing says so, naming the gate ──────────────────────
 // UX-spec item 10. It also resolves item 10's sharper half: nothing used to say the NS_EVENTS_* block was

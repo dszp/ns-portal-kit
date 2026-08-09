@@ -35,7 +35,6 @@ globalThis.fetch = modeFetch;
     ok(/NS_EVENTS_BASE_URL/.test(d) && /NS_EVENTS_PATH_SECRET/.test(d),
       `and it names the settings it was waiting on, not just that it was waiting (got: ${d})`);
   }
-  ok(byId(rs, 'access').state === 'skip', 'Access cannot be probed from inside the Worker');
   ok(byId(rs, 'onebill-documo').state === 'skip', 'OneBill/Documo are not integrated');
 }
 
@@ -138,7 +137,7 @@ globalThis.fetch = modeFetch;
     try { out = await runProbes(noServer as any, NO_READ_CTX); }
     catch { threw = true; }
     ok(!threw, 'a probe that throws OUTSIDE its own try/catch still does not reject runProbes (guarded)');
-    ok(out.length === probeCatalogFor('standalone').length, 'and every applicable catalog entry still produces a result');
+    ok(out.length === probeCatalogFor().length, 'and every applicable catalog entry still produces a result');
     // Found by index, not by byId(): byId's `!` is a compile-time assertion only, so when this mutation
     // fires there IS no ns-events result and a property read would kill the process before the summary.
     const ev = out.find((r) => r?.id === 'ns-events');
@@ -161,7 +160,7 @@ globalThis.fetch = modeFetch;
   ok(unknown.length === 0, `every result id is in PROBE_CATALOG${unknown.length ? ` (${unknown.join(', ')})` : ''}`);
   // Per APPLICABLE entry: these envs set no PORTAL_MODE, so this is a standalone deployment and the
   // banner check is not among them. The 1:1 contract holds against the same filter the renderer uses.
-  const applicable = probeCatalogFor('standalone');
+  const applicable = probeCatalogFor();
   ok(rs.length === applicable.length, 'and every applicable catalog entry produces a result');
   ok(rs.map((r) => r.id).join(',') === applicable.map((p) => p.id).join(','),
     'in the catalog\'s own order — the order the not-run rows are rendered in');

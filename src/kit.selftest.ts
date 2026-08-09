@@ -95,8 +95,6 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
   }
   ok((await call('/custom.js', undefined, { ...env, PRIMARY_BASENAME: 'custom' })).status === 200, '[primary] overridden basename /custom.js → 200');
   ok((await call('/p.js', undefined, { ...env, PRIMARY_BASENAME: 'custom' })).status !== 200, '[primary] non-configured basename /p.js not served when basename=custom (falls through)');
-  // portal-mode-only: a non-portal (dia-like) env must not expose the primary.
-  ok((await call('/p.js', undefined, { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '', NS_API_TOKEN: 't', ALLOW_UNGATED_SERVICE_TOKEN: '1' })).status !== 200, '[primary] non-portal env: /p.js not served');
 
   // ── Gated bundle /kit/portal.js ────────────────────────────────────────────────────
   ok((await call('/kit/portal.js')).status === 401, '[bundle] no bearer → 401');
@@ -152,7 +150,6 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
   {
     const npEnv = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '', NS_API_TOKEN: 't', ALLOW_UNGATED_SERVICE_TOKEN: '1', RINGOTEL_LABEL: 'App' };
     const r = await call('/kit/portal.js', reseller, npEnv);
-    ok(r.status !== 200, '[bundle] non-portal env: /kit/portal.js NOT served (portal-mode-only)');
   }
 
   // ── Self bundle builder + primary fetch (Task 2, 2026-07-18) ──────────────────────
@@ -195,7 +192,6 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok((await call('/flow?domain=acme.example&kind=user&ref=100', basic)).status === 403, '[fence] Basic → /flow 403');
     // Non-portal env: no delegated self surface.
     const npEnv2 = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '', NS_API_TOKEN: 't', ALLOW_UNGATED_SERVICE_TOKEN: '1' };
-    ok((await call('/kit/self.js', basic, npEnv2)).status !== 200, '[self-route] non-portal env: /kit/self.js not served');
   }
 
   // ── Secondary manifest /kit/asset/<name>.js ─────────────────────────────────────────

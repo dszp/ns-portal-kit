@@ -31,13 +31,11 @@ import { NsClient, NsApiError, assertBareServer, NsSubscriptionsClient } from '@
 import { RingotelReadClient, RingotelApiError } from '@dszp/ringotel-lib';
 
 import { PROBE_CATALOG, probeCatalogFor } from './statusModel.js';
-import { portalMode } from './mode.js';
 import type { ProbeResult, ProbeCatalogEntry } from './statusModel.js';
 import type { StatusEnv } from './status.js';
 import { ringotelEnabled } from './ringotel.js';
 import { resolveWriteIdentity, parseNsEventsConfig, ownedPrefix, type NsEventsConfig } from './nsEvents.js';
 import { getServiceToken, NsIdentityError } from './nsIdentity.js';
-import { accessConfig } from './access.js';
 
 export interface ProbeCtx {
   /** NS API host — the same value the rest of the Worker reads from `env.NS_SERVER`. */
@@ -275,24 +273,6 @@ async function statusBannerProbe(env: StatusEnv, ctx: ProbeCtx): Promise<ProbeOu
   return { state: 'pass', detail: `Reachable, and returned a usable message: "${shown}"` };
 }
 
-/** Always `skip` — Cloudflare Access sits in front of the Worker, so nothing inside a request can
- *  confirm the edge policy. `detail` reports what IS knowable: whether the config half that lives in
- *  this deployment's own vars is present. */
-function accessProbeResult(env: StatusEnv): ProbeResult {
-  const entry = CATALOG_BY_ID['access']!;
-  const audSet = isSet(env.ACCESS_AUD);
-  const teamSet = isSet(env.ACCESS_TEAM_DOMAIN);
-  let detail: string;
-  if (!audSet && !teamSet) {
-    detail = 'Cloudflare Access is not configured for this deployment.';
-  } else if (accessConfig(env)) {
-    detail = 'ACCESS_AUD and ACCESS_TEAM_DOMAIN are both set — verify the edge policy in the Cloudflare dashboard; this Worker cannot confirm it from inside a request.';
-  } else {
-    detail = `Cloudflare Access is only half-configured (missing ${audSet ? 'ACCESS_TEAM_DOMAIN' : 'ACCESS_AUD'}).`;
-  }
-  return { id: entry.id, name: entry.name, cost: entry.cost, state: 'skip', detail };
-}
-
 /** Always `skip` — neither integration exists in this Worker. */
 function onebillDocumoProbeResult(): ProbeResult {
   const entry = CATALOG_BY_ID['onebill-documo']!;
@@ -315,7 +295,7 @@ export async function runProbes(env: StatusEnv, ctx: ProbeCtx): Promise<ProbeRes
   // the injected primary. So the row is not merely inert here, it describes a control this deployment
   // could not adopt -- and a check for it implies otherwise. The Config tab already removed the Access
   // SETTINGS in portal mode for the same reason; this is the half that was missed.
-  const wanted = new Set(probeCatalogFor(portalMode(env) ? 'portal-backend' : 'standalone').map((c) => c.id));
-  const all = [nsRead, nsIdentity, ringotel, nsEvents, banner, accessProbeResult(env), onebillDocumo];
+  const wanted = new Set(probeCatalogFor().map((c) => c.id));
+  const all = [nsRead, nsIdentity, ringotel, nsEvents, banner, onebillDocumo];
   return all.filter((r) => wanted.has(r.id));
 }

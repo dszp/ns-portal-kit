@@ -98,25 +98,12 @@ ok(SETTINGS.filter((s) => s.group === 'bindings').every((s) => s.kind === 'confi
   'and a binding is never marked secret — it has no value to withhold');
 
 // The probe catalog: one row per live check, and the Checks tab renders the not-run state from it.
-ok(PROBE_CATALOG.length === 7, `the probe catalog has exactly 7 checks (got ${PROBE_CATALOG.length})`);
-// Mode-scoped: a check that cannot apply is REMOVED, not shown-and-explained (unlike a setting, which the
-// operator typed and therefore deserves an answer). Assert the partition rather than the two counts, so
-// adding a mode-specific check later cannot leave one side silently empty.
-{
-  const portal = probeCatalogFor('portal-backend').map((p) => p.id);
-  const standalone = probeCatalogFor('standalone').map((p) => p.id);
-  ok(!portal.includes('access'), 'Cloudflare Access is not checked in portal-backend mode');
-  ok(standalone.includes('access'), 'but is in standalone, where the stored token depends on it');
-  ok(!standalone.includes('status-banner'), 'the banner endpoint is not checked in standalone — there is no injection there');
-  ok(portal.includes('status-banner'), 'but is in portal-backend mode');
-  const both = new Set([...portal, ...standalone]);
-  ok(both.size === PROBE_CATALOG.length, 'and between them the two modes cover every catalog row');
-}
+ok(PROBE_CATALOG.length === 6, `the probe catalog has exactly 6 checks (got ${PROBE_CATALOG.length})`);
 ok(new Set(PROBE_CATALOG.map((p) => p.id)).size === PROBE_CATALOG.length, 'with no duplicate ids');
 ok(PROBE_CATALOG.every((p) => p.name.trim() && p.what.trim() && p.cost.trim()), 'each carrying a name, a what and a cost');
 
 // The secret list is a security control, so assert it explicitly rather than trusting the table.
-const SECRETS = ['NS_API_TOKEN', 'RINGOTEL_API_KEY', 'NS_EVENTS_PATH_SECRET', 'NS_API_KEY',
+const SECRETS = ['RINGOTEL_API_KEY', 'NS_EVENTS_PATH_SECRET', 'NS_API_KEY',
   'NS_ADMIN_USER', 'NS_ADMIN_PASS', 'NS_OAUTH_CLIENT_ID', 'NS_OAUTH_CLIENT_SECRET'];
 const markedSecret = SETTINGS.filter((s) => s.kind === 'secret').map((s) => s.name).sort();
 ok(JSON.stringify(markedSecret) === JSON.stringify([...SECRETS].sort()),
@@ -148,11 +135,7 @@ ok(JSON.stringify(markedSecret) === JSON.stringify([...SECRETS].sort()),
   // Against the UNION of both modes, not just this doc: a subsystem that cannot act in the mode being built is
   // filtered out of it, so checking one mode makes the other mode's cards look like orphans. `access` and
   // `exposure` are exactly that case — real cards, absent from a portal document by design.
-  const standalone = buildStatus(
-    { NS_SERVER: 'ns.example.com', NS_PORTAL_ISS: 'portal.example.com', NS_API_TOKEN: 'tok' },
-    { principal: null, hostname: 'dia.example.com' },
-  );
-  const ids = new Set([...doc.subsystems, ...standalone.subsystems].map((x) => x.id));
+  const ids = new Set(doc.subsystems.map((x) => x.id));
   const orphans = Object.keys(SUBSYSTEM_DETAIL).filter((k) => !ids.has(k));
   ok(orphans.length === 0, `no explanation is written for a card that does not exist${orphans.length ? ` (${orphans.join(', ')})` : ''}`);
 
@@ -167,7 +150,7 @@ ok(JSON.stringify(markedSecret) === JSON.stringify([...SECRETS].sort()),
   ok(thinBackend.length === 0, `and in prose, not a stub${thinBackend.length ? ` (too thin: ${thinBackend.join(', ')})` : ''}`);
 
   // Every card on BOTH tabs, in one assertion, so a future tab cannot be added and quietly left bare.
-  const allCards = [...doc.subsystems, ...standalone.subsystems];
+  const allCards = doc.subsystems;
   const bare = allCards.filter((x) => x.detail.length === 0).map((x) => x.id);
   ok(bare.length === 0,
     `and no card in EITHER mode carries a state with no explanation${bare.length ? ` (${[...new Set(bare)].join(', ')})` : ''}`);

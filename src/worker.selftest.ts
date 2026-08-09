@@ -247,8 +247,13 @@ const ok = (c: boolean, m: string) => {
   // gate in src/exposure.ts) -- correctly, and these requests come from https://w.dev. Opting out here
   // keeps the gate's own coverage in one place (see the [gate] cases below) instead of smeared across
   // every standalone-mode assertion.
-  const sEnv = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '', ALLOW_UNGATED_SERVICE_TOKEN: '1' };
-  const scall = (path: string, method = 'GET') => worker.fetch(new Request(`https://w.dev${path}`, { method }), sEnv as any, ctx);
+  // Was a SERVICE-mode harness (a stored NS_API_TOKEN, no caller). The standalone product left this repo
+  // on 2026-08-09, so the same read surface is exercised by a delegated reseller instead. The assertions
+  // below are unchanged on purpose: they cover the READ path — allowlists, Ringotel reads, error shaping —
+  // which is portal behaviour and always was. Only the way the caller authenticates changed.
+  const sEnv = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '' };
+  const scall = (path: string, method = 'GET') =>
+    worker.fetch(new Request(`https://w.dev${path}`, { method, headers: { Authorization: `Bearer ${resellerTok}` } }), sEnv as any, ctx);
 
   const rd = await scall('/domains');
   const doms = await rd.json();
@@ -261,7 +266,6 @@ const ok = (c: boolean, m: string) => {
 
   const rf = await scall(`/flow?domain=${domain}&kind=${kind}&ref=${ref}`);
   ok(rf.status === 200 && JSON.stringify(stripMmd(await rf.json())) === JSON.stringify(expected), '[service] /flow?domain → graph matches');
-  ok((await scall(`/entities`)).status === 400, '[service] /entities without ?domain → 400');
 
   // /flow?format=html (the gallery the injected modal iframe loads) must pin Mermaid with SRI, so a
   // compromised CDN can't substitute code (finding 2 §2b). Regression guard on the pinned tag.
@@ -304,43 +308,13 @@ const ok = (c: boolean, m: string) => {
     ok(true, '[ringotel] enabled enrichment skipped — no ###r devices in this fixture');
   }
 
-  // ── the ungated-service-token gate (src/exposure.ts) — INDEPENDENT of Ringotel, so it runs always ──
-  // A stored token is ambient authority: it answers whatever reaches the Worker. Refuse to use it until
-  // something verifiable is in front, so a public URL can't borrow the token's NS scope. (Previously this
-  // block was nested inside `if (rtExts.length)` and silently skipped on fixtures with no ###r devices.)
-  {
-    const bare = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '' };
-    const call = (env: any, host = 'w.dev') => worker.fetch(new Request(`https://${host}/domains`), env as any, ctx);
-    ok((await call(bare)).status === 403, '[gate] stored token + no Access on a public host -> 403 (not used)');
-    // ACCESS_AUD *and* ACCESS_TEAM_DOMAIN both set: the exposure gate opens and the Access check takes
-    // over — still 403 (no Cf-Access-Jwt-Assertion here), but for a different reason. Assert the reason changed.
-    const gated = await call({ ...bare, ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' });
-    ok(!/not protected/i.test(await gated.text()), '[gate] ACCESS_AUD + team domain -> exposure gate opens; Access check takes over');
-    // REGRESSION (fail-open, now fixed): ACCESS_AUD set but ACCESS_TEAM_DOMAIN missing => accessConfig() is
-    // null, so the Access check can't run. The gate MUST stay closed and refuse the token — opening on
-    // ACCESS_AUD alone served a half-configured deployment's whole fleet unauthenticated.
-    const half = await call({ ...bare, ACCESS_AUD: 'aud' });
-    ok(half.status === 403 && /not protected/i.test(await half.text()),
-      '[gate] ACCESS_AUD WITHOUT team domain -> gate stays closed (no fail-open)');
-    ok((await call({ ...bare, ALLOW_UNGATED_SERVICE_TOKEN: '1' })).status === 200, '[gate] explicit opt-out -> allowed');
-    ok((await call(bare, 'localhost')).status === 200, '[gate] local wrangler dev -> allowed');
-    const root = await worker.fetch(new Request('https://w.dev/'), bare as any, ctx);
-    const body = await root.text();
-    ok(root.status === 403 && /Cloudflare Access/.test(body), '[gate] / teaches Access setup instead of serving the app');
-    ok(!body.includes('service-token'), '[gate] the instructions never echo the token');
-    // The half-config is ALSO surfaced on the SPA route as a setup blocker (setup.ts) that names the
-    // missing var — so the operator learns *why*, not just that reads are refused.
-    const halfRoot = await worker.fetch(new Request('https://w.dev/'), { ...bare, ACCESS_AUD: 'aud' } as any, ctx);
-    const halfRootBody = await halfRoot.text();
-    ok(halfRoot.status === 503 && /ACCESS_TEAM_DOMAIN/.test(halfRootBody), '[gate] ACCESS_AUD without team domain -> setup checklist names the missing var');
-  }
-
   // ================= /rapp/org route (standalone mode; ?refresh bypasses cross-test cache) =================
   clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
   rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
   rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
   const rEnvS = { ...sEnv, RINGOTEL_API_KEY: 'rt-key' };
-  const roCall = (p: string, env2: any = rEnvS) => worker.fetch(new Request(`https://w.dev${p}`), env2 as any, ctx);
+  const roCall = (p: string, env2: any = rEnvS) =>
+    worker.fetch(new Request(`https://w.dev${p}`, { headers: { Authorization: `Bearer ${resellerTok}` } }), env2 as any, ctx);
 
   const ro = await roCall(`/rapp/org?domain=${domain}&refresh=ringotel`);
   const rob = await ro.json();
@@ -420,8 +394,6 @@ const ok = (c: boolean, m: string) => {
     ok(r2.status === 200 && JSON.stringify(j) === JSON.stringify(j2), '[me/status] ignores client ext/domain (self-scoped, identical body)');
     // Feature gate: me.appStatus off ⇒ 403 (still admitted as self, but the feature is denied).
     ok((await meCall('/me/status', { ...pEnv, PORTAL_FEATURES: JSON.stringify({ 'me.appStatus': 'off' }) })).status === 403, '[me/status] me.appStatus off → 403');
-    // Non-portal env ⇒ fenced (no delegated self surface off-portal).
-    ok((await meCall('/me/status', { ...pEnv, PORTAL_MODE: '' })).status !== 200, '[me/status] non-portal env → not served');
     // portal.self off is a TOTAL kill-switch — even an admin (skips the fence) is denied /me/* directly.
     ok((await meCall('/me/status', { ...pEnv, PORTAL_FEATURES: JSON.stringify({ 'portal.self': 'off' }) }, mkTok({ user_scope: 'Reseller' }))).status === 403, '[me/status] portal.self off → 403 even for an admin (total kill-switch)');
     // Regression: /rapp/user (admin) still works after the computeUserStatus refactor.
@@ -594,9 +566,6 @@ const ok = (c: boolean, m: string) => {
         '[me/app-access] BOTH surfaces off → 403');
     }
 
-    // Non-portal env ⇒ fenced (no delegated self surface off-portal).
-    ok((await meCall('/me/app-access', { ...pEnv, PORTAL_MODE: '' })).status !== 200, '[me/app-access] non-portal env → not served');
-
     // Config guard: a malformed PORTAL_APP_DOWNLOADS fails the WHOLE Worker loudly (like featuresConfigError).
     ok((await meCall('/me/app-access', { ...pEnv, PORTAL_APP_DOWNLOADS: 'not json' })).status === 500, '[me/app-access] malformed PORTAL_APP_DOWNLOADS → 500 (fail closed, loud)');
 
@@ -665,12 +634,6 @@ const ok = (c: boolean, m: string) => {
   // Write-domain safety rail: empty allowlist refuses all writes (fail-closed).
   ok((await wcall('/rapp/activate', { domain, ext: '100' }, { ...wEnv, RINGOTEL_WRITE_DOMAINS: '' })).status === 403, '[write] activate refused when RINGOTEL_WRITE_DOMAINS empty (fail-closed rail)');
   ok((await wcall('/rapp/activate', { domain, ext: '100' }, { ...wEnv, RINGOTEL_WRITE_DOMAINS: 'other.example' })).status === 403, '[write] activate refused when domain not on the write allowlist');
-  // No principal (service mode) → 403 fail-closed.
-  {
-    const sWrite = { NS_SERVER: 'mock.local', NS_API_TOKEN: 'service-token', ALLOWED_ORIGINS: '', ALLOW_UNGATED_SERVICE_TOKEN: '1', RINGOTEL_API_KEY: 'rt-key', RINGOTEL_WRITE_DOMAINS: domain };
-    const r = await worker.fetch(new Request('https://w.dev/rapp/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain, ext: '100' }) }), sWrite as any, ctx);
-    ok(r.status === 403, '[write] activate in service mode (no principal) → 403 fail-closed');
-  }
   // forceFresh: a write drives a fresh /jwt (revocation-gap close).
   {
     rtUsers = [];
@@ -944,7 +907,8 @@ const ok = (c: boolean, m: string) => {
   }
 
   // ================= domain allowlist =================
-  const acall = (env2: any, path: string) => worker.fetch(new Request(`https://w.dev${path}`), env2, ctx);
+  const acall = (env2: any, path: string) =>
+    worker.fetch(new Request(`https://w.dev${path}`, { headers: { Authorization: `Bearer ${resellerTok}` } }), env2, ctx);
   const allowOk = { ...sEnv, ALLOWED_DOMAINS: `${domain},other.example.com` };
   ok((await acall(allowOk, `/entities?domain=${domain}`)).status === 200, '[allowlist] allowed domain → 200');
   const block = { ...sEnv, ALLOWED_DOMAINS: 'nope.example.com' };
@@ -966,8 +930,6 @@ const ok = (c: boolean, m: string) => {
   );
 
   // ================= public routes =================
-  const app = await scall('/');
-  ok(app.status === 200 && (app.headers.get('content-type') ?? '').includes('text/html'), 'GET / → viewer SPA');
   ok((await scall('/health')).status === 200, 'GET /health → 200');
   const opt = await dcall('/flow', { Origin: 'https://portal.example.com' }, 'OPTIONS');
   ok(opt.status === 204 && (opt.headers.get('Access-Control-Allow-Methods') || '').includes('POST'), 'OPTIONS preflight → 204 + CORS allows POST (write routes)');
@@ -1330,10 +1292,6 @@ const ok = (c: boolean, m: string) => {
 
     // Not portal mode ⇒ not served at all, so dia/standalone gains no console.
     const sEnv2 = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, PORTAL_SUPERADMINS: 'boss@mock.local' };
-    // `!== 200` was satisfied by any incidental 500. Outside portal mode the path is not routed at all, so
-    // the honest expectation is a 404 — a 500 here would mean something threw, which is a different bug.
-    ok((await kcall('/kit/status', bossTok, sEnv2)).status === 404,
-      '[spk] outside portal mode the console is not served — 404, not merely non-200');
 
     // Cloudflare Access and portal-backend mode are mutually exclusive, in opposite directions, and this
     // block asserts BOTH halves — because getting either wrong is a live failure and they are one line
@@ -1363,32 +1321,6 @@ const ok = (c: boolean, m: string) => {
       ok((await kcall('/kit/status', bossTok, kEnv)).status === 200,
         '[spk] Access unconfigured (the common case) → console 200s, as before');
 
-      // STANDALONE MODE: the gate is a real security control and must still refuse. This is the half that
-      // protects ambient authority — a stored NS_API_TOKEN answers ANY request that reaches the Worker with
-      // that token's full NetSapiens scope, and Access is the only thing in front of it. Making the
-      // gauntlet's catch swallow (the 356e6d8 fail-open, re-typed) must not leave the suite green.
-      // verifyAccessRequest returns 403 for a missing token WITHOUT any network call (readAccessToken finds
-      // nothing before the JWKS fetch), so this needs no extra stubbing.
-      const standaloneAccessEnv = {
-        NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, NS_API_TOKEN: 'tok',
-        ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com',
-      };
-      const rStandalone = await kcall('/domains', bossTok, standaloneAccessEnv);
-      ok(rStandalone.status === 403,
-        'standalone + Access configured + no Access token → the GLOBAL gauntlet call site refuses');
-      // Anchored on the JSON refusal shape (error + reason), NOT a body substring: several pages here
-      // legitimately contain the words "Cloudflare Access", so a substring match passes against a success
-      // page as readily as a refusal and proves nothing.
-      const rStandaloneBody = await jbody(rStandalone);
-      ok(rStandaloneBody.error === 'Cloudflare Access required' && rStandaloneBody.reason === 'no Cloudflare Access token',
-        'and says why — the specific JSON refusal shape');
-      // And that the refusal is Access's, not the exposure gate's or a missing-config 500: the same env
-      // WITHOUT the Access vars must get past this point (the exposure gate then refuses the stored token
-      // for its own, different reason — a 403 whose body is the exposure page, not this JSON shape).
-      const rNoAccessVars = await kcall('/domains', bossTok, { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, NS_API_TOKEN: 'tok' });
-      const rNoAccessVarsBody = await jbody(rNoAccessVars);
-      ok(rNoAccessVarsBody.error !== 'Cloudflare Access required',
-        'while the same request with no Access vars is not refused BY ACCESS — proving the 403 above is this gate, not another');
     }
 
     // Classification is a compile-time contract, but assert it: `read` would reintroduce the revocation gap.

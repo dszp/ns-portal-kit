@@ -10,7 +10,7 @@
 
 export type SettingKind = 'secret' | 'config';
 export type SettingGroup =
-  | 'core' | 'access' | 'branding' | 'domains' | 'ringotel' | 'eligibility'
+  | 'core' | 'branding' | 'domains' | 'ringotel' | 'eligibility'
   | 'appaccess' | 'menus' | 'injection' | 'events' | 'identity' | 'bindings';
 
 /** How consequential this setting is. Absent ⇒ `normal`. It orders rows within a group and drives visual
@@ -18,10 +18,6 @@ export type SettingGroup =
  *  and they do not. */
 export type SettingImportance = 'critical' | 'important' | 'normal' | 'minor';
 
-/** Which deployment mode a setting applies in. ABSENT means "both", and absent is the honest default —
- *  a wrong claim here greys out a setting that is actually live, which is worse than not saying. Only
- *  settings whose inapplicability is structural (not merely unused) carry this. */
-export type SettingAppliesTo = 'portal' | 'standalone';
 
 export interface SettingDef {
   name: string;            // the env key, verbatim
@@ -36,7 +32,6 @@ export interface SettingDef {
    *  row itself, so a reader never has to infer why a whole block is inert — and so the twelve
    *  `NS_EVENTS_*` settings finally say out loud that they exist to keep the app directory in sync. */
   gatedBy?: string;
-  appliesTo?: SettingAppliesTo;
   /** A literal example value — the thing to actually type. Prose describing a syntax is not a syntax. */
   example?: string;
   what: string;            // operator-facing one-liner: what this controls
@@ -48,12 +43,12 @@ export interface SettingDef {
  *  `interface Env` (so a reviewer can read the two side by side) — which is the right order for auditing
  *  the table and the wrong one for reading the page. */
 export const GROUP_ORDER: SettingGroup[] = [
-  'core', 'access', 'domains', 'injection', 'menus', 'ringotel', 'eligibility',
+  'core', 'domains', 'injection', 'menus', 'ringotel', 'eligibility',
   'appaccess', 'events', 'identity', 'branding', 'bindings',
 ];
 
 export const GROUP_LABEL: Record<SettingGroup, string> = {
-  core: 'Core', access: 'Cloudflare Access', domains: 'Domain limits', injection: 'Portal injection',
+  core: 'Core', domains: 'Domain limits', injection: 'Portal injection',
   menus: 'Portal menus', ringotel: 'App integration', eligibility: 'Activation rules',
   appaccess: 'Self-service app access', events: 'Change events', identity: 'Background service identity',
   branding: 'Branding', bindings: 'Worker bindings',
@@ -61,7 +56,6 @@ export const GROUP_LABEL: Record<SettingGroup, string> = {
 
 export const GROUP_BLURB: Record<SettingGroup, string> = {
   core: 'What this deployment is and how it authenticates.',
-  access: 'The optional Cloudflare Access perimeter, for a standalone deployment.',
   domains: 'App-layer limits on which NetSapiens domains this deployment will touch.',
   injection: 'What gets served to the Manager Portal, and who may receive it.',
   menus: 'Adding and hiding entries in the portal\'s stock menus. Two settings can hide an Apps entry; setting both merges them.',
@@ -303,18 +297,13 @@ export interface ProbeResult {
 /** One live check, as declared BEFORE it runs. `what` is the standing description (what this check does
  *  and with which credential); `cost` is what running it spends. A `ProbeResult`'s `detail` is the OUTCOME
  *  of one run — a different fact, which is why both fields exist. */
-export interface ProbeCatalogEntry { id: string; name: string; what: string; cost: string;
-  /** Which deployment mode this check means anything in. Absent ⇒ both, the honest default.
-   *  Unlike `SettingDef.appliesTo`, an inapplicable check is REMOVED rather than shown-and-explained:
-   *  a setting someone typed needs an answer ("you set this and it is ignored"), whereas a check nobody
-   *  asked for is just a row implying a control this deployment does not have. */
-  appliesTo?: SettingAppliesTo }
+export interface ProbeCatalogEntry { id: string; name: string; what: string; cost: string }
 
-/** The checks that mean something in this mode. Both the runner and the not-run renderer filter through
- *  this, so the 1:1 contract between catalog and results holds in either mode. */
-export function probeCatalogFor(mode: 'portal-backend' | 'standalone'): ProbeCatalogEntry[] {
-  const want: SettingAppliesTo = mode === 'portal-backend' ? 'portal' : 'standalone';
-  return PROBE_CATALOG.filter((p) => !p.appliesTo || p.appliesTo === want);
+/** Every catalogued check applies here: there is one deployment shape, so nothing is filtered out.
+ *  Kept as a function because both the runner and the not-run renderer call it, and a future
+ *  per-deployment filter (a check that needs a binding, say) belongs behind this name. */
+export function probeCatalogFor(): ProbeCatalogEntry[] {
+  return PROBE_CATALOG;
 }
 
 /**
@@ -352,15 +341,11 @@ export const PROBE_CATALOG: ProbeCatalogEntry[] = [
     cost: 'One OAuth grant (if needed) plus one flat subscription-list read — the same call the reconcile itself makes.',
   },
   {
-    id: 'status-banner', name: 'Status banner endpoint', appliesTo: 'portal',
+    id: 'status-banner', name: 'Status banner endpoint',
     what: 'Calls STATUS_BANNER_WEBHOOK exactly as the injected code does — the same POST, carrying YOUR OWN ns_t — and reports whether the reply is one this kit can render. Skipped when the setting is unset. The failure this exists for is silent: an endpoint that answers 200 with a body carrying none of the keys the parser accepts draws no banner and reports no error, which from inside the portal is indistinguishable from the feature being off.',
     cost: 'One POST to the endpoint YOU configured, carrying the current session\'s ns_t — the same request every portal page load already makes.',
   },
-  {
-    id: 'access', name: 'Cloudflare Access', appliesTo: 'standalone',
-    what: 'Reports whether this deployment\'s own half of the Access config (ACCESS_AUD + ACCESS_TEAM_DOMAIN) is present. The edge policy itself cannot be verified from inside a request, so this check never passes or fails — it always reports SKIP with what is knowable.',
-    cost: 'No network call — cannot be probed from inside the Worker.',
-  },
+
   {
     id: 'onebill-documo', name: 'OneBill / Documo',
     what: 'Nothing to check — neither integration is wired into this Worker.',
@@ -537,17 +522,8 @@ export const SUBSYSTEM_DETAIL: Record<string, string[]> = {
     'How this Worker proves to NetSapiens that a read or write is allowed. There are two answers, and a deployment uses exactly one of them.',
     '### Portal-backend mode',
     'Every request must carry the caller\'s own `ns_t` from the Manager Portal, and there is no stored credential to fall back on — a request with no bearer is refused outright. That is the property the whole gating model rests on: an action is performed as the person who asked for it, bounded by their own NetSapiens scope, so a mistake in this kit cannot exceed what that person could already do by hand.',
-    '### Standalone mode',
-    'A stored token answers on behalf of whoever reaches the Worker. That is ambient authority and it is a genuinely different security model, which is why it has a gate of its own and why one Worker is one mode — switching a deployment between them is not a configuration change, it is a second deployment.',
-    '### What does not change between them',
-    'A valid bearer token always yields a policy-gated principal, in either mode. There is no "authenticated but ungated" path — a blank or misspelled `PORTAL_MODE` used to produce one, serving delegated reads with every feature gate bypassed, and that is why an unrecognised value here is a startup error rather than a silent fallback to off.',
-  ],
-  exposure: [
-    'A stored `NS_API_TOKEN` answers any request that reaches this Worker, with that token\'s full NetSapiens scope. If the Worker is publicly reachable, that hands your fleet to whoever finds the URL. This gate refuses to use the token at all until something verifiable is in front of it.',
-    '### Three ways to open it, and they are not equivalent',
-    'Configure Cloudflare Access (both variables — either alone leaves the check inert and the gate stays closed); or switch to portal-backend mode so each caller brings their own token and there is no ambient authority left to protect; or set the opt-out, which accepts the risk deliberately and is only correct when something else — mutual TLS, a WAF, an authenticating proxy — is genuinely in front. The first two remove the hazard; the third only acknowledges it.',
-    '### Why it fails closed',
-    'Refusing to serve is recoverable in a minute and visibly wrong. Serving a fleet-scoped credential to an anonymous caller is not recoverable at all, and looks fine from the outside. An earlier version keyed this off one Access variable instead of both, which meant a half-configured deployment reported itself protected while the check never ran.',
+    '### There is no ungated path',
+    'A valid bearer token always yields a policy-gated principal. There is no "authenticated but ungated" route through this Worker: a request either carries a token that resolves to a principal the policy engine can judge, or it is refused.',
   ],
   branding: [
     'Cosmetic only: an accent colour and a company name for the pages and modals this kit renders. Nothing here affects behaviour, gating or what any user can reach.',
@@ -592,13 +568,6 @@ export const SUBSYSTEM_DETAIL: Record<string, string[]> = {
     '### The binding is optional and worth having',
     'Without it an in-isolate limiter still applies, but only per isolate, so a distributed flood is bounded once per edge location rather than once overall. A fork with no binding is safe, just less effective — which is why it is not a startup requirement.',
   ],
-  access: [
-    'Verifies a Cloudflare Access token inside the Worker, so a request that reached it some other way is refused rather than served.',
-    '### Why verify again inside the Worker',
-    'Access is enforced at the edge for the hostname it is configured on. A Worker can also be reachable by other routes, and anything that skips the edge policy skips the check with it. Verifying here means the stored credential only ever answers a request that genuinely passed the policy, whatever path it arrived by.',
-    '### Both variables or nothing',
-    'The audience tag identifies the application and the team domain is what the signing keys are fetched from, so one without the other cannot verify anything. A half-configured gate is therefore treated as inert AND the stored token is refused — failing closed rather than reporting itself protected while the check never runs.',
-  ],
   onebill: [
     'Coming soon — not wired into this Worker yet. Intended to provide a link between [OneBill](https://www.onebillsoftware.com/) customers and portal domains, sites, and extensions for billing and reconciliation purposes. This is an unofficial integration.',
     'There is nothing to configure yet.',
@@ -624,11 +593,6 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'Nothing works. A fresh deployment ships the placeholder api.example.com, which is reported as a setup blocker.',
     affects: ['auth', 'callflow.view', 'ringotel.orgStatus'] },
 
-  { name: 'NS_API_TOKEN', group: 'core', kind: 'secret',
-    importance: 'critical', appliesTo: 'standalone',
-    what: 'The STANDALONE deployment\'s stored read credential: a NetSapiens bearer token this Worker sends on every read when there is no signed-in caller. Ambient authority — it answers any request that reaches the Worker with that token\'s full NetSapiens scope, which is why it is refused until something verifiable is in front of it. Not interchangeable with `NS_API_KEY`: the two are the same kind of value (both are sent as a bearer) but they exist for different jobs, and there is deliberately no fallback between them. This one serves callers of a standalone deployment; NS_API_KEY performs background writes for change events. The names suggest a technical difference that does not exist — the difference is purpose and scope.',
-    whenUnset: 'Standalone mode cannot authenticate. Portal-backend mode does not need it — each caller brings their own ns_t.',
-    affects: ['auth', 'exposure'] },
 
   { name: 'ALLOWED_ORIGINS', group: 'core', kind: 'config',
     importance: 'important', example: 'https://manage.example.com',
@@ -648,11 +612,6 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'Delegated auth fails closed: every ns_t is rejected, since there is no issuer to match it against.',
     affects: ['auth'] },
 
-  { name: 'ALLOW_UNGATED_SERVICE_TOKEN', group: 'core', kind: 'config',
-    importance: 'important', appliesTo: 'standalone', example: '1',
-    what: 'Deliberate opt-out of the safety check that refuses to serve the standalone service token with no Cloudflare Access gate in front. Truthy ⇒ allow NS_API_TOKEN to answer requests even with no Access gate — only for a deployment protected some other way (mTLS, a WAF, an authenticating proxy).',
-    whenUnset: 'The service token is refused unless ACCESS_AUD and ACCESS_TEAM_DOMAIN are both set — fail-closed by default.',
-    affects: ['exposure'] },
 
   // ── domains: allow/block lists that bound what a token can reach, on top of its own NS scope ─────
   { name: 'ALLOWED_DOMAINS', group: 'domains', kind: 'config',
@@ -817,40 +776,25 @@ export const SETTINGS: SettingDef[] = [
     affects: ['nsDevices'] },
 
   // ── access: the optional Cloudflare Access gate for standalone-mode deployments ────────────────────
-  { name: 'ACCESS_AUD', group: 'access', kind: 'config',
-    importance: 'important', appliesTo: 'standalone', example: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-    what: 'Cloudflare Access Application Audience (AUD) tag. Presence turns on in-Worker verification of the Access JWT, so only requests that already passed your Zero Trust policy are served.',
-    whenUnset: 'Access verification is off for this Worker (fine only if something else — mTLS, a WAF — protects it; see ALLOW_UNGATED_SERVICE_TOKEN).',
-    affects: ['access'] },
 
-  { name: 'ACCESS_TEAM_DOMAIN', group: 'access', kind: 'config',
-    importance: 'important', appliesTo: 'standalone', example: 'yourteam.cloudflareaccess.com',
-    what: 'Cloudflare Zero Trust team domain (e.g. yourteam.cloudflareaccess.com) used to fetch the Access JWKS for verification. Required alongside ACCESS_AUD — one without the other leaves the gate inert and requests are refused rather than served.',
-    whenUnset: 'Access verification cannot run even if ACCESS_AUD is set.',
-    affects: ['access'] },
 
   // ── core (continued): overall auth/deployment mode ─────────────────────────────────────────────────
-  { name: 'PORTAL_MODE', group: 'core', kind: 'config',
-    importance: 'critical', example: '1',
-    what: '"1"/"true" ⇒ portal-backend mode: delegated auth only (no service-token fallback), policy-gated on portal.access. Unset ⇒ the standalone dual-mode Worker (service-token + delegated).',
-    whenUnset: 'Standalone dual-mode — the pre-portal-console Worker behavior, byte-identical.',
-    affects: ['auth'] },
 
   // ── injection: the Worker-served Manager-Portal injection surface (portal-mode only) ──────────────
   { name: 'PRIMARY_BASENAME', group: 'injection', kind: 'config',
-    defaultValue: 'p', importance: 'important', appliesTo: 'portal', example: 'p',
+    defaultValue: 'p', importance: 'important', example: 'p',
     what: 'The basename the injected primary script is served at: `/<basename>.js`. Must match `^[a-z0-9_-]+$`.',
     whenUnset: 'Defaults to "p".',
     affects: ['injection'] },
 
   { name: 'PORTAL_HANDOFF_URL', group: 'injection', kind: 'config',
-    importance: 'important', appliesTo: 'portal', example: 'https://vendor.example.com/bundleRouter.bundle.js',
+    importance: 'important', example: 'https://vendor.example.com/bundleRouter.bundle.js',
     what: 'The vendor bundle-router the injected primary chain-loads, so an existing portal add-on keeps working alongside this kit. Set it here and this Worker loads it for you; the primary checks the page first and skips the injection if a script with that exact URL is already present, so it will not double-load one a static loader already added. The match is on the exact URL string — a different-looking URL for the same file would load twice.',
     whenUnset: 'Absent and empty mean different things, and neither means "nothing loads the vendor router". Absent is treated as a misconfiguration: any vendor add-on you already run would break, so a warning banner is shown to resellers. Empty ("") is a deliberate declaration that this Worker chain-loads nothing — it says nothing about the rest of the page, and the router may still be loaded by a static loader or by other code that is not this kit, which is a normal arrangement. It should be loaded in exactly one place: if an add-on is present and working while this is empty, something else is loading it, and that is where to go look.',
     affects: ['injection'] },
 
   { name: 'PORTAL_SECONDARIES', group: 'injection', kind: 'config',
-    importance: 'important', appliesTo: 'portal', example: '[{"name": "my-feature", "from": "url:https://cdn.example.com/my-feature.js", "auth": "public"}]',
+    importance: 'important', example: '[{"name": "my-feature", "from": "url:https://cdn.example.com/my-feature.js", "auth": "public"}]',
     what: 'JSON array of secondary-injection manifest entries (`{name, from: "r2:<key>" | "url:<https>", auth}`) — the gated feature scripts served alongside the primary.',
     whenUnset: 'No secondaries — the primary loads with nothing gated to inject.',
     affects: ['injection'] },
@@ -887,7 +831,7 @@ export const SETTINGS: SettingDef[] = [
 
   // ── bindings: structural Worker bindings, not string env values ────────────────────────────────────
   { name: 'ASSETS', group: 'bindings', kind: 'config',
-    importance: 'important', appliesTo: 'portal',
+    importance: 'important',
     example: '"r2_buckets": [{ "binding": "ASSETS", "bucket_name": "your-bucket" }]',
     what: 'Optional private R2 bucket binding that serves any r2: entry in the injection manifest.',
     whenUnset: 'Not bound. Harmless unless PORTAL_SECONDARIES lists an r2: entry, in which case every request fails with a loud config error.',
