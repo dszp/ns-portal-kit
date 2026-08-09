@@ -47,7 +47,7 @@ import {
 import { worstSeverity, type HealthFlag, type User } from '@dszp/ringotel-lib';
 import { viewerHtml } from './viewerApp.js';
 import { brandAccent, productName, VERSION } from './brand.js';
-import { needsSetup, setupHtml } from './setup.js';
+import { needsSetup, setupHtml, portalMode, portalModeConfigError } from './setup.js';
 import { portalModeHtml } from './portalInfo.js';
 import { serviceTokenBlocked, exposureHtml, BLOCKED_REASON } from './exposure.js';
 import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeWriteClient, invalidateOrgUsers, resolveForWrite, buildExtIndex, ringotelDomains, scopeOf, connectionsOf, orgidOf, type OrgResolution, type UserAppStatus } from './ringotel.js';
@@ -68,7 +68,7 @@ import {
 import { getServiceToken } from './nsIdentity.js';
 import { syncIdentity, deactivateAppOnly, repairDeviceForEvent } from './ringotelActivation.js';
 import { NsSubscriptionsClient, planSubscriptions } from '@dszp/netsapiens-lib';
-import { resolveFeaturePolicies, featuresConfigError, parseSuperadmins } from './features.js';
+import { resolveFeaturePolicies, featuresConfigError, parseSuperadmins, kitStatusLockedReason, fleetReadAllowed } from './features.js';
 import { resolveMenus, menuConfigError, type MenuPlan } from './menus.js';
 import { resolveAppAccess, ssoEnabled, autoActivates, parseDownloads, parseHideList, appAccessConfigError, appStatusView, type AppAccessMode, type DownloadLink } from './appAccess.js';
 import {
@@ -77,15 +77,20 @@ import {
   parseManifest,
   buildKitBundle,
   buildSelfBundle,
+  buildSpkBundle,
   featurePolicyKeys,
   selfFeaturePolicyKeys,
+  spkFeaturePolicyKeys,
   tierHash,
   kitGateAllows,
   secondaryNeedsAuth,
   isR2Entry,
   r2Key,
-  KitConfigError,
+  kitConfigError,
 } from './kit.js';
+import { buildStatus } from './status.js';
+import { statusHtml } from './statusPage.js';
+import { runProbes } from './statusProbes.js';
 
 interface Env {
   /** NS API host, e.g. "api.example.com" (var). */
@@ -170,6 +175,10 @@ interface Env {
   SSO_AUTO_ACTIVATE?: string;
   /** Stock app-menu labels to hide, fleet-wide (CSV) or per-domain (JSON `{"<domain>":[...],"*":[...]}`). */
   PORTAL_APPS_HIDE?: string;
+  /** JSON `{ "<menu>": { hide?: [...], add?: [...] } }` for the apps/account/management menus, targetable
+   *  by domain/scope/app state (see src/menus.ts). Setting both this AND PORTAL_APPS_HIDE for the apps
+   *  menu's hide list is a config error, not a precedence rule — PORTAL_MENUS supersedes when unambiguous. */
+  PORTAL_MENUS?: string;
   /** JSON array of `{label,url,title?}` download links shown on the app-access surface. Unset ⇒ none. */
   PORTAL_APP_DOWNLOADS?: string;
 
@@ -209,6 +218,12 @@ interface Env {
   PORTAL_FEATURES?: string;
   /** Comma-separated `user@domain` accounts that see everything (except CC-only) + gate `superadmin`. */
   PORTAL_SUPERADMINS?: string;
+  /** Where "what changed in this version" lives, with `{version}` substituted. Absent ⇒ the public release
+   *  list anchored at this version; present but EMPTY ⇒ never link (see brand.ts releaseNotesUrl). */
+  PORTAL_RELEASE_NOTES_URL?: string;
+  /** Endpoint the status banner asks for the caller's message. Unset ⇒ the feature is inert. Must be https:
+   *  the request carries the caller's live ns_t, so it may only be an endpoint the operator controls. */
+  STATUS_BANNER_WEBHOOK?: string;
   /** Optional app-dashboard link base for gated features (empty ⇒ plain label). Gated bundle only. */
   RINGOTEL_APP_BASE_URL?: string;
   /** OPTIONAL private R2 binding serving `r2:` manifest secondaries. Structural so selftests can mock it;
@@ -252,6 +267,13 @@ interface Env {
   NS_EVENTS_PREFERRED_SERVER?: string;
   NS_EVENTS_MAX_EVENTS?: string;
   NS_EVENTS_DIAG_RAW?: string;
+  /** `off` (default) | `deactivate`. Whether an NS-deleted user's app record is deactivated, by both the
+   *  event tier and the cron sweep. `deactivate+delete` is deliberately NOT accepted (see src/nsEvents.ts). */
+  NS_EVENTS_OFFBOARD?: string;
+  /** `off` (default) | `report` | `heal`. Device self-heal triggered by a user-change event. */
+  NS_EVENTS_DEVICE_REPAIR?: string;
+  /** Max extensions deactivated per sweep run. Default 200; overflow is logged, never silent. */
+  NS_EVENTS_SWEEP_MAX?: string;
 
   /**
    * SECRET. The background **service identity** — used when an event arrives with no caller.
@@ -320,29 +342,10 @@ async function liveCheckRateLimited(request: Request, env: Env): Promise<boolean
  *  variants (e.g. `?domain=0000.12345.Service.` slipping the blocklist). */
 const normDomain = (d: string): string => d.trim().toLowerCase().replace(/\.+$/, '');
 
-/** Portal backend mode: delegated-only + policy-gated. Off ⇒ existing dual-mode (dia/local) unchanged. */
-function portalMode(env: Env): boolean {
-  const v = (env.PORTAL_MODE ?? '').trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
-}
-
-/**
- * PORTAL_MODE must be unset (⇒ standalone) or a recognized boolean. A typo like `enabled` used to
- * read as "off" via portalMode() — silently disabling the portal policy gate while the delegated
- * reads still served. Return a message (⇒ 500, fail closed) for any unrecognized non-empty value so
- * the misconfiguration is loud, not silent. Names no value (it's operator config, but this is served
- * pre-auth). Pairs with the belt-and-braces fix: policy now applies to any delegated principal, mode
- * flag or not (see resolveAuth / requireFeature).
- */
-function portalModeConfigError(env: Env): string | null {
-  const raw = (env.PORTAL_MODE ?? '').trim();
-  if (raw === '') return null;
-  const v = raw.toLowerCase();
-  const known = ['1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'];
-  return known.includes(v)
-    ? null
-    : 'PORTAL_MODE is set to an unrecognized value. Use "1" to enable portal backend mode, or leave it unset for standalone. A typo must not silently disable the policy gate.';
-}
+// portalMode / portalModeConfigError moved to src/setup.ts — a single parse of PORTAL_MODE shared by
+// worker.ts, kit.ts, and (Task 3) status.ts, so the flag's meaning can't drift between them. Belt-and-
+// braces reminder: policy applies to any delegated principal regardless of the mode flag (see
+// resolveAuth / requireFeature).
 
 /**
  * Feature policies are no longer hardcoded here — they're assembled per-request by
@@ -356,7 +359,7 @@ function portalModeConfigError(env: Env): string | null {
  * new route can't be added unclassified). Reads are cache-fronted; cross-domain reseller reads are
  * elevated to force-fresh at request time (Task 4), independent of this base class.
  */
-const ROUTES = {
+export const ROUTES = {
   '/domains': { sensitivity: 'read' },
   '/entities': { sensitivity: 'read' },
   '/flow': { sensitivity: 'read' },
@@ -370,6 +373,17 @@ const ROUTES = {
   '/rapp/resetPassword': { sensitivity: 'write' },
   '/kit/portal.js': { sensitivity: 'read' },
   '/kit/self.js': { sensitivity: 'read' },
+  // `read` is correct here: the console BUNDLE carries no configuration — it is neutral menu + bridge JS.
+  '/kit/spk.js': { sensitivity: 'read' },
+  // `sensitive`, not `read`: THIS route returns the deployment's configuration, so needsFreshAuth forces
+  // a fresh GET /jwt and a logged-out token cannot pull it from a cached verdict. The extra NetSapiens
+  // round-trip is deliberate — decided 2026-08-07. Do NOT relax this to `read` to save a call.
+  '/kit/status': { sensitivity: 'sensitive' },
+  // `read`, not `sensitive`: it discloses nothing about the deployment. It takes a CANDIDATE config the
+  // caller just typed and answers whether `menuConfigError` accepts it — a pure function of the query
+  // string, touching neither env nor any upstream. Still gated on `kit.status` like the rest of the
+  // console, and still a GET, so the "non-GET means write" invariant is untouched.
+  '/kit/menus/check': { sensitivity: 'read' },
   '/me/status': { sensitivity: 'read' },
   '/me/devices': { sensitivity: 'read' },
   '/me/resetPassword': { sensitivity: 'write' },
@@ -391,37 +405,8 @@ const PREFIX_ROUTES = {
   [NS_EVENTS_PREFIX]: { sensitivity: 'write' },
 } satisfies Record<string, { sensitivity: CallSensitivity }>;
 
-/**
- * Loud, fail-closed validation of the static injection config (portal-mode-only). A malformed
- * PRIMARY_BASENAME / PORTAL_SECONDARIES / PORTAL_HANDOFF_URL is a deploy-time mistake: surface it as a
- * 500 with an actionable reason on every request (after /health), rather than throwing deep in a route.
- * Returns null when off (non-portal) or valid.
- */
-function kitConfigError(env: Env): string | null {
-  if (!portalMode(env)) return null;
-  try {
-    primaryBasename(env);
-    parseManifest(env);
-  } catch (e) {
-    if (e instanceof KitConfigError) return e.message;
-    throw e;
-  }
-  const h = env.PORTAL_HANDOFF_URL;
-  if (h !== undefined && h.trim() !== '' && !/^https:\/\/\S+$/i.test(h.trim()))
-    return 'PORTAL_HANDOFF_URL must be an https URL (or unset for a loud no-handoff signal, or "" for an intentional none)';
-  // RINGOTEL_APP_BASE_URL becomes an <a href> in the gated bundle — require https (buildKitBundle also
-  // drops a non-https value defensively, but fail loud so the operator fixes it rather than silently
-  // losing the app-dashboard links).
-  const ab = env.RINGOTEL_APP_BASE_URL;
-  if (ab !== undefined && ab.trim() !== '' && !/^https:\/\/\S+$/i.test(ab.trim()))
-    return 'RINGOTEL_APP_BASE_URL must be an https URL (it becomes an app-dashboard link href), or unset';
-  // An r2: secondary with no ASSETS binding is a broken deploy — surface it uniformly here (loud, every
-  // route) rather than as a per-name 500 on the asset route (which would disclose config to an
-  // unauthenticated caller before the gate). parseManifest already validated above, so it won't throw.
-  if (!env.ASSETS && parseManifest(env).some(isR2Entry))
-    return 'A PORTAL_SECONDARIES entry uses r2: but no ASSETS R2 binding is bound';
-  return null;
-}
+// kitConfigError moved to src/kit.ts (exported) — it validates only KitEnv-shaped config, so it lives
+// with the module that owns the injection manifest rather than being re-derived here.
 
 /** Parse the domain allowlist (normalized); null ⇒ unrestricted. */
 function domainAllowlist(env: Env): Set<string> | null {
@@ -551,6 +536,53 @@ function requireFeature(auth: Auth, feature: string, env: Env, policies: Feature
   // assertDomainReadable is the control, not policy.
   if (!auth.principal) return;
   if (!can(auth.principal, feature, policies)) throw new HttpError(403, `Not authorized: ${feature}`);
+}
+
+/**
+ * The console's SECOND gate, independent of the feature policy.
+ *
+ * `kit.status`'s allowedLevels floor constrains which LEVELS config may name, but a `users:` grant names
+ * an account directly at any scope — so the floor alone cannot keep a domain-locked principal out. This
+ * page necessarily reports settings that carry OTHER customers' domain names (ALLOWED_DOMAINS,
+ * NS_EVENTS_DOMAINS, RINGOTEL_WRITE_DOMAINS, SSO_AUTO_ACTIVATE, PORTAL_MENUS targeting, PORTAL_APPS_HIDE,
+ * RINGOTEL_OVERRIDES, RINGOTEL_EXCLUDE_EXTS_BY_DOMAIN, PORTAL_SUPERADMINS — and whatever is added next).
+ *
+ * Two doors, both deliberate: reseller scope (structural — resolveAuth already lets them read any domain,
+ * so the console discloses nothing they could not GET), or a named superadmin (the operator's own account
+ * list, fleet-disclosing by definition).
+ *
+ * A rule on the VIEWER rather than a per-setting redaction list, on purpose: an enumeration of "settings
+ * that can contain a domain name" is a second hand-maintained list with no mechanical guard, and
+ * forgetting to mark one leaks silently. That is the exact failure this whole feature exists to prevent.
+ */
+function requireFleetRead(principal: Principal, env: Env): void {
+  // The predicate itself lives in features.ts — the integration console's Permissions matrix reads the SAME
+  // one to decide what each scope can actually reach, so a matrix that says "an Office Manager can open
+  // the console" and a Worker that refuses them cannot come apart. This function owns only the wording.
+  if (fleetReadAllowed(principal, env)) return;
+  throw new HttpError(403,
+    'The configuration console requires reseller scope or a listed superadmin account: it reports settings ' +
+    'that name other domains, and this account is limited to its own domain.');
+}
+
+/**
+ * The Cloudflare Access gate, callable from more than one place.
+ *
+ * Extracted because the console (`/kit/status`, `/kit/spk.js`) is served AHEAD of this point in fetch()
+ * and would otherwise be the only route pair that skips Access. That ordering is forced, not chosen:
+ * console < Group 2 < the NS-events receiver < this gate, and every link in that chain is load-bearing
+ * (see the Task 6 report). So the console calls this directly rather than relying on position.
+ *
+ * Inert unless BOTH ACCESS_AUD and ACCESS_TEAM_DOMAIN are set (accessConfig() !== null — AUD alone
+ * cannot build the JWKS URL, so the check can't run), so local `pnpm dev` and the portal deployment
+ * are unaffected. Keying anything off ACCESS_AUD alone was the 356e6d8 fail-open. One implementation,
+ * two call sites — the pre-routing gauntlet's inline check, and the console branch.
+ */
+async function requireAccess(request: Request, env: Env): Promise<void> {
+  const cfg = accessConfig(env);
+  if (!cfg) return; // Access not configured; nothing to verify
+  const verdict = await verifyAccessRequest(request, cfg, caches.default);
+  if (!verdict.ok) throw new HttpError(verdict.status, 'Cloudflare Access required', verdict.reason);
 }
 
 /**
@@ -1224,7 +1256,13 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
         email: emailForWrite(rec, u.ext, undefined),
       });
       if (res.action === 'synced') await invalidateOrgUsers(cache, scopeOf(env), orgid);
-      console.log(JSON.stringify({ msg: 'ns-event sync', domain: u.domain, ext: u.ext, action: res.action, changed: res.changed }));
+      // `flattenedEmails` is present only when the write destroyed extra addresses the user had entered in
+      // the app — irreversible, and invisible from their side. It rides the normal sync line rather than a
+      // separate warning so the count sits next to the `changed: ['email']` that caused it.
+      console.log(JSON.stringify({
+        msg: 'ns-event sync', domain: u.domain, ext: u.ext, action: res.action, changed: res.changed,
+        ...(res.flattenedEmails ? { flattenedEmails: res.flattenedEmails } : {}),
+      }));
 
       if (cfg.deviceRepair !== 'off') {
         // Its own try/catch: a device problem must never lose the identity sync that already succeeded,
@@ -1575,23 +1613,142 @@ export default {
     // label, not a secret: same disclosure class as `version`, which is already here.
     if (url.pathname === '/health') return json({ ok: true, configured: !needsSetup(env), version: VERSION, scope: scopeOf(env) }, 200, cors);
 
-    // Fail closed on a mistyped PORTAL_MODE (e.g. "enabled") — after /health so probes still work, and
-    // before every other route so a typo can't serve a single delegated read with the gate disabled.
+    // ── Group 1: gates that must hold before ANY route, including the console ──────────────────────
+    // A mistyped PORTAL_MODE needs no special case: portalMode(env) goes false, so the console's own
+    // `portalMode(env) && …` guard stops matching and the request falls through to Group 2's 500.
     const pmErr = portalModeConfigError(env);
     if (pmErr) return json({ error: 'Server misconfigured', reason: pmErr }, 500, cors);
 
-    // Fail closed + loud on a malformed injection config (portal-mode-only) — after /health so probes
-    // still work. A bad basename/manifest/handoff is a deploy mistake; 500 with a reason beats a deep throw.
-    const kitErr = kitConfigError(env);
-    if (kitErr) return json({ error: 'Server misconfigured', reason: kitErr }, 500, cors);
-
-    // Fail closed + loud on a malformed PORTAL_FEATURES / PORTAL_SUPERADMINS — after /health, and in
-    // EVERY mode (the resolved policies below are used for delegated auth regardless of PORTAL_MODE).
+    // featuresConfigError CANNOT be demoted to Group 2. resolveFeaturePolicies() IS the authorization
+    // the console is gated on; if PORTAL_FEATURES or PORTAL_SUPERADMINS is malformed it throws, and a
+    // Worker that cannot evaluate can('kit.status', …) does not know who may see this page. Serving the
+    // configuration document in that state is the fail-open shape this repo has been bitten by before.
+    // The 500 already carries an actionable reason — the same thing the console would have told them.
     const featErr = featuresConfigError(env);
     if (featErr) return json({ error: 'Server misconfigured', reason: featErr }, 500, cors);
 
-    // Fail closed + loud on a malformed PORTAL_APP_DOWNLOADS / PORTAL_APPS_HIDE (me.appAccess config) —
-    // same fail-closed pattern as featErr above.
+    // The effective feature policies for THIS request: registry defaults ⊕ PORTAL_FEATURES overrides,
+    // each gate resolved through the level vocabulary + the superadmin union. Computed once per fetch
+    // (cheap, pure) and threaded to every gate below — never memoized in module scope (avoids stale
+    // config across deploys). Safe here: featuresConfigError above already proved it won't throw. Moved
+    // ahead of Group 2 (was previously computed right before the Access gate) because the console's own
+    // auth chain, immediately below, needs it before any Group 2 gate has run.
+    const policies = resolveFeaturePolicies(env);
+
+    // ── The operator console: GET /kit/status (the document) and GET /kit/spk.js (the bundle — bytes
+    // ship starting Task 7). Both are gated by the SAME two checks — resolveAuth, the kit.status feature
+    // gate, then requireFleetRead — run HERE, ahead of Group 2, so a deployment broken in one of Group
+    // 2's five ways still serves the diagnostic document instead of a bare 500 (Task 3's finding:
+    // `misconfigured` and `configErrors[]` were unreachable in production before this reorder). Applying
+    // the gate to /kit/spk.js now (rather than waiting for Task 7's bundle) means the bytes are refused
+    // from day one even if a future edit to the bundle handler forgets to re-check — a judgment call
+    // beyond what Task 6's brief spelled out for this route; see the Task 6 report for why. Scoped to
+    // exactly these two pathnames: no other route's auth timing changes, and resolveAuth is not called
+    // twice for a single request — a match here returns before the normal routing section's own call.
+    if (portalMode(env) && (url.pathname === '/kit/status' || url.pathname === '/kit/spk.js' || url.pathname === '/kit/menus/check')) {
+      try {
+        // Access first: this route pair is served ahead of the global Access gate further down (forced
+        // by the ordering chain in the comment above), so it verifies for itself here. Do NOT delete
+        // this on the grounds that the gate "already runs" — for these two paths, it does not, and
+        // skipping it would be the one route pair that bypasses Access when an operator layers it in
+        // front of the whole ns_t-gated deployment. Checked before spending a live /jwt round-trip on a
+        // caller who isn't going to be let through.
+        await requireAccess(request, env);
+        const auth = await resolveAuth(request, env, policies);
+        if (!auth.principal) throw new HttpError(403, 'The console requires a delegated ns_t');
+        if (!can(auth.principal, 'kit.status', policies)) {
+          // If nobody at all can reach the console (off, or no superadmin named), say so and name the
+          // setting to fix — that's actionable. Otherwise this caller just isn't on a list that does
+          // admit others, and the terse message is correct as-is (naming who IS admitted would leak it).
+          const lockedReason = kitStatusLockedReason(env);
+          // /kit/spk.js is fetched speculatively by EVERY authenticated user on EVERY page load (see
+          // primaryJs's fetchInject calls in kit.ts) — a non-superadmin being refused is the steady
+          // state, not an incident. A permanently-high 403 rate from normal operation is a worse signal
+          // than one that only fires when something is actually broken, so this specific case — the
+          // bundle route, refused, and the policy still admits SOMEONE (lockedReason null) — answers
+          // quietly: 204, no body, same as if the route didn't exist for this caller. fetchInject only
+          // injects on a literal `r.status===200`, so a 204 is skipped exactly as the 403 was; nothing
+          // downstream changes. Do NOT extend this to /kit/status: that route is only ever requested by
+          // someone who already received the bundle and clicked the menu item, so a denial there means
+          // the menu should not have appeared — genuinely actionable, and it must stay loud. Do NOT
+          // extend this to a null-`can` reason with lockedReason SET either (misconfiguration — nobody
+          // at all can open the console — stays a loud 403 that names the setting to fix.
+          // Same header treatment as the 403 it replaces (the catch block below, via `json(..., cors)`):
+          // plain `cors` — Access-Control-Allow-* when the Origin matched, Vary: Origin from
+          // corsHeaders()'s baseline. Not the wider `Vary: Origin, Authorization` used on the 200
+          // bundle/status responses above — those vary the RESPONSE BODY by principal (tiered Cache
+          // API entries), and this 204 is never cached, so there is no per-Authorization content to
+          // distinguish. A browser must still be able to make the same cross-origin accept/reject call
+          // it made on the 403 this replaces, which plain `cors` already guarantees.
+          if (url.pathname === '/kit/spk.js' && !lockedReason) {
+            return new Response(null, { status: 204, headers: { ...cors } });
+          }
+          throw new HttpError(403, lockedReason ? `Not authorized: kit.status — ${lockedReason}` : 'Not authorized: kit.status');
+        }
+        requireFleetRead(auth.principal, env); // the second, structural gate — see its own doc comment
+        if (url.pathname === '/kit/spk.js') {
+          // Both gates above already ran (kit.status + requireFleetRead) — this is the tier-cached bundle
+          // response, same shape as /kit/portal.js and /kit/self.js below. Its own tier namespace (`spk`)
+          // keeps it from colliding with those caches even when the allowed-key sets happen to hash equal.
+          const spkKeys = spkFeaturePolicyKeys().filter((k) => can(auth.principal!, k, policies));
+          const tierKey = new Request(`https://inject.internal/${url.hostname}/spk/${tierHash(spkKeys)}/${VERSION}`);
+          const hit = await caches.default.match(tierKey);
+          let bundle: string;
+          if (hit) {
+            bundle = await hit.text();
+          } else {
+            bundle = buildSpkBundle(spkKeys, env);
+            await caches.default.put(tierKey, new Response(bundle, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'max-age=60' } }));
+          }
+          return new Response(bundle, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...cors, 'Cache-Control': 'private, max-age=120', Vary: 'Origin, Authorization' } });
+        }
+        // Validate a CANDIDATE PORTAL_MENUS the builder just assembled. It answers only "would this be
+        // accepted", touching neither `env` nor any upstream — so it is `read`, not `sensitive`, and skips
+        // the fresh-auth round-trip the config document needs. It exists so the builder does not carry a
+        // second copy of the validation rules: the https-only scheme, the ban on a {variable} in a URL's
+        // authority, the known-variable list. A browser-side copy is a copy that drifts, and the half that
+        // drifts would be the one enforcing a phishing guard.
+        if (url.pathname === '/kit/menus/check') {
+          const candidate = url.searchParams.get('c') ?? '';
+          // Bounded so a runaway value cannot turn into an expensive parse. The builder refuses to send
+          // more than this too; the limit is repeated here because a route may not trust its caller.
+          if (candidate.length > 8192) throw new HttpError(413, 'Candidate config too large to validate');
+          // Probed against ONLY the candidate: passing the live env would let a deployment that is already
+          // misconfigured report every candidate as broken, which is the opposite of useful while fixing it.
+          const error = menuConfigError({ PORTAL_MENUS: candidate });
+          return json({ ok: error === null, error }, 200, { ...cors, "Cache-Control": "no-store" });
+        }
+        if (needsFreshAuth(ROUTES['/kit/status'].sensitivity)) await requireFreshAuth(auth, env);
+        const wantProbes = url.searchParams.get('probe') === '1';
+        // Bound the button: probes reach upstream APIs, so spend the same per-IP budget the ns_t live
+        // check uses rather than inventing a second limiter.
+        if (wantProbes && (await liveCheckRateLimited(request, env))) throw new HttpError(429, 'Too many checks — try again in a minute');
+        const probes = wantProbes
+          ? await runProbes(env, { server: env.NS_SERVER, token: auth.token ?? null, domain: auth.lockedDomain ?? auth.defaultDomain ?? null })
+          : null;
+        const doc = buildStatus(env, { principal: auth.principal, hostname: url.hostname, probes });
+        // Header order: ours go AFTER ...cors so `Vary: Origin, Authorization` wins over cors's bare
+        // `Vary: Origin` — getting this backwards lets a cache serve one principal's bytes to another.
+        if (url.searchParams.get('format') === 'json') {
+          return new Response(JSON.stringify(doc), { headers: { 'content-type': 'application/json; charset=utf-8', ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' } });
+        }
+        return new Response(statusHtml(doc), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' } });
+      } catch (err) {
+        if (err instanceof HttpError) return json({ error: err.message, ...(err.reason ? { reason: err.reason } : {}) }, err.status, cors);
+        console.error(JSON.stringify({ msg: 'request failed', path: url.pathname, error: (err as Error).message }));
+        return json({ error: 'Request failed' }, 500, cors);
+      }
+    }
+
+    // ── Group 2: reportable by the console, still fatal for every other route ─────────────────────
+    // These five are why the console exists. It is a diagnostic surface, not a licence to run broken:
+    // every OTHER route still refuses on them exactly as before.
+    // Fail closed + loud on a malformed injection config (portal-mode-only). A bad basename/manifest/
+    // handoff is a deploy mistake; 500 with a reason beats a deep throw.
+    const kitErr = kitConfigError(env);
+    if (kitErr) return json({ error: 'Server misconfigured', reason: kitErr }, 500, cors);
+
+    // Fail closed + loud on a malformed PORTAL_APP_DOWNLOADS / PORTAL_APPS_HIDE (me.appAccess config).
     const appErr = appAccessConfigError(env);
     if (appErr) return json({ error: 'Server misconfigured', reason: appErr }, 500, cors);
 
@@ -1616,23 +1773,15 @@ export default {
       return handleNsEvent(request, env, evCfg, _ctx, cors);
     }
 
-    // The effective feature policies for THIS request: registry defaults ⊕ PORTAL_FEATURES overrides,
-    // each gate resolved through the level vocabulary + the superadmin union. Computed once per fetch
-    // (cheap, pure) and threaded to every gate below — never memoized in module scope (avoids stale
-    // config across deploys). Safe here: featuresConfigError above already proved it won't throw.
-    const policies = resolveFeaturePolicies(env);
-
-    // Cloudflare Access gate (defense in depth for standalone-mode deployments). Inert unless BOTH
-    // ACCESS_AUD and ACCESS_TEAM_DOMAIN are set (accessConfig() !== null — AUD alone cannot build the
-    // JWKS URL, so the check can't run), so local `pnpm dev` and the portal deployment are unaffected.
-    // The exposure gate keys off the SAME predicate on purpose: believing AUD alone meant "protected"
-    // was the 356e6d8 fail-open. When active,
-    // EVERYTHING below (SPA + data) requires a valid Access token — a direct hit that bypassed Access
-    // (e.g. *.workers.dev) is refused, so the service NS token never answers an unauthenticated caller.
-    const accessCfg = accessConfig(env);
-    if (accessCfg) {
-      const verdict = await verifyAccessRequest(request, accessCfg, caches.default);
-      if (!verdict.ok) return json({ error: 'Cloudflare Access required', reason: verdict.reason }, verdict.status, cors);
+    // Cloudflare Access gate (defense in depth for standalone-mode deployments) — see requireAccess's
+    // doc comment for the predicate and why it's a shared helper. When active, EVERYTHING below (SPA +
+    // data) requires a valid Access token — a direct hit that bypassed Access (e.g. *.workers.dev) is
+    // refused, so the service NS token never answers an unauthenticated caller.
+    try {
+      await requireAccess(request, env);
+    } catch (err) {
+      if (err instanceof HttpError) return json({ error: err.message, ...(err.reason ? { reason: err.reason } : {}) }, err.status, cors);
+      throw err;
     }
 
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/app')) {
@@ -1702,6 +1851,11 @@ export default {
       // A self principal (portal.self but not portal.access) may reach ONLY the self surface, and ONLY in
       // portal-backend mode — so dia/standalone gains no delegated self surface. Every admin route keeps
       // its own gate, but /domains and /entities lean on resolveAuth's admin gate, so fence here.
+      // `/kit/status` and `/kit/spk.js` are deliberately NOT listed here. Neither reaches this fence at
+      // all — both are handled in their own branch earlier in fetch(), ahead of Group 2 — but even setting
+      // that aside, a self principal is domain-locked by construction and can never satisfy
+      // requireFleetRead (reseller scope or a listed superadmin), so listing them here would buy nothing
+      // but a false sense that this is where they're gated. Do not "fix" this omission by adding them.
       if (auth.self) {
         const sp = url.pathname;
         const selfOk = portalMode(env) && (sp === '/me/status' || sp === '/me/devices' || sp === '/me/resetPassword' || sp === '/me/app-access' || sp === '/kit/self.js');
@@ -1974,7 +2128,7 @@ export default {
           // Pass the same vars as the integrated path: without them {ext}/{name} would silently resolve
           // empty on exactly the deployments this branch exists to serve.
           const { ext: e0, domain: d0, record: r0 } = await resolveSelfNsUser(client, auth.principal);
-          return json({ menus: resolveMenus(env, { domain: d0, app: 'none', scope: auth.principal.scope, vars: menuVars(r0, e0, d0) }) }, 200, cors);
+          return json({ menus: resolveMenus(env, { domain: d0, app: 'none', scope: auth.principal.scope, user: auth.principal.id, vars: menuVars(r0, e0, d0) }) }, 200, cors);
         }
 
         // Identity from `~` ONLY (resolveSelfNsUser). The org/status/eligibility/decision logic — incl.
@@ -1990,7 +2144,7 @@ export default {
         if (wantMenus) {
           // `principal.scope` is the EFFECTIVE scope — the masked user's while masquerading — so an
           // operator viewing a masked session sees the menu that user sees, which is the point of masking.
-          menus = resolveMenus(env, { domain, app: proj.present ? 'ringotel' : 'none', scope: auth.principal.scope, vars: menuVars(record, ext, domain) });
+          menus = resolveMenus(env, { domain, app: proj.present ? 'ringotel' : 'none', scope: auth.principal.scope, user: auth.principal.id, vars: menuVars(record, ext, domain) });
         }
 
         // The sign-in fields (mode/username/appDomain/downloads) belong to me.appAccess — a menus-only

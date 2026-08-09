@@ -21,7 +21,7 @@ stay read-only by construction. Ringotel reads and writes go through
 | `eligibility.ts` | Ringotel **activation eligibility** (HARD / SOFT / precondition tiers) + `RINGOTEL_*` config resolution. |
 | `ringotelActivation.ts` | activate / deactivate / reset **orchestration** (provision the NS device, copy SIP creds to the app user), incl. duplicate-extension self-heal. |
 | `nsDevices.ts` | optional desk-phone model + registration enrichment (on the diagrams). |
-| `access.ts` | Cloudflare Access JWT verification (RS256/JWKS). Active only when **both** `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` are set. |
+| `access.ts` | Cloudflare Access JWT verification (RS256/JWKS). Active only when **both** `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` are set — **and never in portal mode**, where it returns inert by construction: a portal deployment stores no credential for Access to protect, and a gate in front of one would refuse the plain `<script src>` that loads the injected primary. |
 | `exposure.ts` | the service-token gate: refuses to use a stored `NS_API_TOKEN` when nothing verifiable is in front of it, and serves the teaching page instead. |
 | `setup.ts` | the unconfigured-deployment checklist: which settings are unset, and the fix for each. Presence only, never values. |
 | `pageShell.ts` | the shared HTML shell + `esc()` used by the setup / exposure / portal-info pages. |

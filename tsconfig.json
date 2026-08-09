@@ -16,5 +16,5 @@
     "noUncheckedIndexedAccess": false,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/worker.ts", "src/access.ts", "src/viewerApp.ts", "src/ringotel.ts", "src/nsDevices.ts"]
+  "include": ["src/worker.ts", "src/access.ts", "src/viewerApp.ts", "src/ringotel.ts", "src/nsDevices.ts", "src/status.ts", "src/statusPage.ts"]
 }

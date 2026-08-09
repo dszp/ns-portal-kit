@@ -14,12 +14,16 @@
  * (fixed in 356e6d8; see exposure.ts). If you are adding a new "is Access on?" test anywhere, call
  * `accessConfig(env) !== null` and nothing else. setup.ts raises a blocker for the half-config state.
  *
- * Fully env-gated: with Access unconfigured this module is inert — local dev, the offline selftests,
- * and the delegated/portal deployment (which authenticates via `ns_t` instead) are unaffected.
+ * Fully env-gated: with Access unconfigured this module is inert — local dev and the offline selftests
+ * are unaffected. **Portal-backend mode is inert by construction, not by configuration:** `accessConfig`
+ * returns null whenever `PORTAL_MODE` is on, because an Access gate there would refuse the `<script src>`
+ * that loads the injected primary and take the whole product down. See `accessConfig`'s own comment.
  *
  * Worker-only (uses `crypto.subtle`, `fetch`, Cache API). NOT part of the portable library surface.
  * Fails CLOSED: any decode/fetch/verify problem returns a non-ok result, never a pass.
  */
+
+import { portalMode } from './mode.js';
 
 export interface AccessConfig {
   /** Application Audience (AUD) tag of the Access app. */
@@ -30,8 +34,29 @@ export interface AccessConfig {
   certsUrl: string;
 }
 
-/** Build Access config from env; null ⇒ Access verification disabled (no ACCESS_AUD/team domain). */
-export function accessConfig(env: { ACCESS_AUD?: string; ACCESS_TEAM_DOMAIN?: string }): AccessConfig | null {
+/**
+ * Build Access config from env; null ⇒ Access verification disabled.
+ *
+ * Null for two different reasons, and the second one is load-bearing:
+ *
+ *  1. `ACCESS_AUD` / `ACCESS_TEAM_DOMAIN` are not BOTH set — there is nothing to verify against.
+ *  2. **This is a portal-backend deployment.** Access is not merely redundant there, it is destructive:
+ *     the Manager Portal loads the injected primary with a plain `<script src>`, which cannot complete an
+ *     Access login (no redirect to follow, no cookie to present), so the whole injection dies at step one
+ *     and every gated route below it becomes unreachable. Meanwhile there is nothing for Access to
+ *     protect: portal mode never reads a stored `NS_API_TOKEN` (`resolveAuth` 401s on a missing bearer
+ *     rather than falling back), so each caller's own `ns_t` already IS the gate. Losing a redundant
+ *     network perimeter beats breaking the deployment, so the setting is IGNORED here rather than
+ *     honoured or flagged.
+ *
+ * Returning null in one place is what makes every consumer inherit that decision — `requireAccess`, the
+ * global gate in `fetch()`, `setupIssues`' half-configured warning, the exposure gate, and the status
+ * console's Access card. Scattering `portalMode` checks across each call site is precisely how the belief
+ * that Access "applies in portal mode" survived a code read (the code path DOES run; the resulting
+ * configuration cannot function).
+ */
+export function accessConfig(env: { ACCESS_AUD?: string; ACCESS_TEAM_DOMAIN?: string; PORTAL_MODE?: string }): AccessConfig | null {
+  if (portalMode(env)) return null;
   const aud = (env.ACCESS_AUD ?? '').trim();
   let team = (env.ACCESS_TEAM_DOMAIN ?? '').trim();
   if (!aud || !team) return null;

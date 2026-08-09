@@ -17,6 +17,7 @@ import { THEMES, type ThemeDef } from '@dszp/netsapiens-lib';
 import pkg from '../package.json' with { type: 'json' };
 
 export interface BrandEnv {
+  PORTAL_RELEASE_NOTES_URL?: string;
   /** Hex accent color, e.g. "#b3282d". Absent/invalid ⇒ no brand theme. */
   BRAND_ACCENT?: string;
   /** Company name, e.g. "Acme Voice". Drives {@link productName} and the default theme label.
@@ -33,6 +34,34 @@ const DEFAULT_ORG = 'NS';
 
 /** Software version — read from package.json so there is exactly one place to bump. */
 export const VERSION: string = pkg.version;
+
+/**
+ * Where "what changed in this version" lives, with `{version}` substituted — or null when this deployment
+ * has declared that it should not be linked.
+ *
+ * Three states, the same shape `PORTAL_HANDOFF_URL` already uses, so a reader who has met one has met both:
+ *   - absent ⇒ the public release list, anchored at this version
+ *   - a value ⇒ theirs, with `{version}` replaced (a fork, or their own notes)
+ *   - present but EMPTY ⇒ null: a deliberate "never link", not an omission
+ *
+ * The default anchors into the full release LIST rather than the single-release page, deliberately. Both
+ * work; they fail differently, and the list is the better landing either way. Someone clicking a version
+ * number is usually asking two things at once — what is in mine, and am I behind — and the list answers both
+ * (it carries a version sidebar and GitHub's Compare control) while the anchor answers the first directly.
+ * If the anchor ever stops matching, the reader lands on a page that states which version it is showing,
+ * beside a list they can pick theirs from — a degraded landing rather than a silent wrong answer.
+ *
+ * Only `{version}` is substituted, and the result is not validated as a URL here: it is operator
+ * configuration, rendered into an href by callers that escape it, and a wrong value is visibly wrong.
+ */
+const DEFAULT_RELEASE_NOTES = 'https://github.com/dszp/ns-portal-kit/releases#release-v{version}';
+
+export function releaseNotesUrl(env: { PORTAL_RELEASE_NOTES_URL?: string }): string | null {
+  const raw = env.PORTAL_RELEASE_NOTES_URL;
+  if (raw !== undefined && raw.trim() === '') return null; // declared as "do not link"
+  const tpl = (raw ?? '').trim() || DEFAULT_RELEASE_NOTES;
+  return tpl.replace(/\{version\}/g, VERSION);
+}
 
 /** Configured company name, or undefined when unset. */
 export function brandName(env: BrandEnv): string | undefined {

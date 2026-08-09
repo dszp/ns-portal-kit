@@ -4,7 +4,11 @@
  *   pnpm test:kit
  */
 import { Script } from 'node:vm';
-import { buildKitBundle, buildSelfBundle, featurePolicyKeys, selfFeaturePolicyKeys, primaryJs } from './kit.js';
+import { buildKitBundle, buildSelfBundle, buildSpkBundle, featurePolicyKeys, selfFeaturePolicyKeys, primaryJs, SELF_FEATURE_KEYS, SPK_FEATURE_KEYS, FEATURE_KEYS } from './kit.js';
+import { keysDeliveredBy, FEATURE_REGISTRY } from './features.js';
+import { parseManifest, kitGateAllows, kitConfigError } from './kit.js';
+import { VERSION } from './brand.js';
+import { SPK_BRIDGE } from './spkBridge.js';
 const b64url = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const ISS = 'portal.example.com'; // NOT 'manage.example.com' — that's setup.ts's placeholder (would trip /health)
 const ORIGIN = 'https://manage.example.com';
@@ -447,6 +451,443 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
 
     let fOk = true; try { new Function(b); } catch (e) { fOk = false; }
     ok(fOk, '[fresh] bundle with the freshness control parses');
+  }
+
+  // ── the SPK bundle (2026-08-07) ──────────────────────────────────────────────────
+  {
+    const env = { RINGOTEL_LABEL: 'App', PORTAL_MODE: '1' };
+    const js = buildSpkBundle(['kit.status'], env as any);
+    ok(js.includes('Super Portal Kit'), '[spk] the bundle carries the menu label');
+    // PREPEND, not append. Position must not depend on which bundle's fetch resolves first —
+    // managementMenu() (self bundle, PORTAL_MENUS additions) appends to the same <ul>, and appending
+    // here made the entry move between reloads. Observed live 2026-08-08.
+    // Scoped to spkMenu's own body: KIT_COMMON's menuApply legitimately appends, so asserting over the
+    // whole bundle matches the wrong function — which is exactly how a green assertion proves nothing.
+    const spkMenuBody = /function spkMenu\(\)\{[\s\S]*?\n\}/.exec(js)?.[0] ?? '';
+    ok(spkMenuBody.length > 0, '[spk] spkMenu is present in the bundle');
+    ok(/ul\.insertBefore\(li,\s*ul\.firstChild\)/.test(spkMenuBody), '[spk] the menu entry is PREPENDED, so its position is deterministic');
+    ok(!/ul\.appendChild\(li\)/.test(spkMenuBody), '[spk] and never appended — appending raced managementMenu for position');
+    ok(/fontWeight\s*=\s*'600'/.test(spkMenuBody), '[spk] the entry is bold — an operator tool among per-customer entries');
+    ok(js.includes('function mgmtUl('), '[spk] it carries the SHARED Management-menu anchor, not a copy');
+    ok((js.match(/function mgmtUl\(/g) || []).length === 1, '[spk] exactly one definition of the anchor');
+    ok(js.includes('/kit/status'), '[spk] it fetches the console document');
+    ok(js.includes(`${SPK_BRIDGE.tag}:'${SPK_BRIDGE.response}'`), '[spk] it posts results under the shared bridge protocol');
+    ok(js.includes(`${SPK_BRIDGE.dataKey}:(r&&r.probes)||[]`), '[spk] carrying the probe list under the protocol\'s data key');
+    ok(js.includes(`${SPK_BRIDGE.errorKey}:1`), '[spk] and signals a failed run explicitly rather than posting an empty list');
+    ok(js.includes('box('), '[spk] it opens the shared modal');
+    ok(!js.includes('profileActivation'), '[spk] it does NOT carry admin feature code');
+    ok(!js.includes('homeStatus'), '[spk] it does NOT carry self feature code');
+
+    let sOk = true; try { new Function(js); } catch (e) { sOk = false; }
+    ok(sOk, '[spk] bundle parses');
+
+    // Denied ⇒ inert bytes. The route should 403 before this, but the body must not act on its own.
+    const denied = buildSpkBundle([], env as any);
+    ok(/status:false/.test(denied), '[spk] with the key denied the flag is false');
+
+    // F4: the console bundle must be buildable while PORTAL_APP_DOWNLOADS is malformed. wrapBundle calls
+    // parseDownloads, which THROWS — and /kit/spk.js is served ahead of the validator that would have caught
+    // it, so a throw here costs the operator the menu entry to the page that names the broken setting. The
+    // SPK body never reads _KC.dl, so the value is stripped in the same spread that strips the app base URL.
+    {
+      const brokenDl = { ...env, PORTAL_APP_DOWNLOADS: '{not json' };
+      let threw: unknown;
+      let out = '';
+      try { out = buildSpkBundle(['kit.status'], brokenDl as any); } catch (e) { threw = e; }
+      ok(!threw, `[spk] a malformed PORTAL_APP_DOWNLOADS does not break the console bundle${threw ? ` (threw: ${(threw as Error).message})` : ''}`);
+      ok(out.includes('"dl":[]'), '[spk] the download list is simply absent from _KC, not half-parsed');
+      ok(!out.includes('not json'), '[spk] and the broken value never reaches the served bytes');
+      // The ADMIN and SELF bundles DO use _KC.dl, and both are served behind the validator — so they must
+      // still fail loudly rather than quietly shipping an empty list.
+      let adminThrew = false;
+      try { buildKitBundle(['callflow.view'], brokenDl as any); } catch { adminThrew = true; }
+      ok(adminThrew, '[spk] while the admin bundle (which DOES use the download list) still fails loudly');
+    }
+
+    // The admin bundle must still work after box() moved to KIT_COMMON. Note: mgmtUl() moved from
+    // KIT_SELF_BODY, NOT KIT_ADMIN_BODY as an earlier draft of this brief assumed (verified against
+    // the actual source: managementMenu/mgmtUl live only in KIT_SELF_BODY — buildKitBundle's own
+    // gated features never touch the Management menu) — so the admin bundle carries mgmtUl's
+    // definition (from the now-shared KIT_COMMON) but never calls it, and the "still resolves"
+    // half of that check belongs on the self bundle below, where the caller actually lives.
+    const admin = buildKitBundle(['callflow.view'], env as any);
+    ok(admin.includes('box('), '[spk] the admin bundle still has box()');
+    ok((admin.match(/function box\(/g) || []).length === 1, '[spk] and exactly one definition of it');
+    ok((admin.match(/function mgmtUl\(/g) || []).length === 1, '[spk] and exactly one definition of mgmtUl (unused here, defined once via KIT_COMMON)');
+
+    // The self bundle is where managementMenu() actually lives and calls mgmtUl() — confirm it still
+    // resolves now that mgmtUl() is defined in the shared KIT_COMMON rather than inline in KIT_SELF_BODY.
+    const self = buildSelfBundle(selfFeaturePolicyKeys(), env as any);
+    ok((self.match(/function mgmtUl\(/g) || []).length === 1, '[spk] the self bundle also carries exactly one mgmtUl');
+    ok(self.includes('managementMenu'), '[spk] managementMenu stayed in the self body and still resolves the shared mgmtUl');
+  }
+
+  // ── the modal's iframe has an accessible name ──────────────────────────────────
+  // It had none, so assistive tech announced every one of these as just "frame". `box()` already takes the
+  // title as its first argument, so this is one property — and it fixes every modal the kit opens (the
+  // call-flow diagrams included), not only the integration console.
+  {
+    const b = buildKitBundle(['callflow.view'], { PORTAL_HANDOFF_URL: '' } as any);
+    ok(/f\.sandbox=/.test(b), '[a11y] the modal iframe is still sandboxed');
+    ok(/f\.title=t;/.test(b), '[a11y] and carries the modal title as its accessible name');
+    // Both must be set BEFORE srcdoc: assigning srcdoc first starts the load, and a frame that begins
+    // loading unsandboxed is a security bug rather than an accessibility one.
+    const i = b.indexOf('f.srcdoc=');
+    ok(i > -1 && b.indexOf('f.title=t;') < i && b.indexOf('f.sandbox=') < i,
+      '[a11y] both are set before srcdoc, so the document never begins loading unnamed or unsandboxed');
+  }
+
+  // ── delivery is DECLARED, and the bundle's flag list has to agree with it ────────────────────────────
+  // The contract the `deliveredBy` refactor buys: a feature declares which bundle carries it, and the
+  // hand-written flag↔key list for that bundle must be exactly the keys that declare it. Membership is
+  // checkable; the short `flag` names are not derivable (`resetPassword` means two different keys in the
+  // two bundles), which is why the list stays written down and this assertion exists instead.
+  {
+    const selfKeys = SELF_FEATURE_KEYS.map((f) => f.key).sort();
+    const declaredSelf = keysDeliveredBy('self').sort();
+    ok(JSON.stringify(selfKeys) === JSON.stringify(declaredSelf),
+      `[delivery] the self bundle's flag list is exactly the keys declaring deliveredBy self (list: ${selfKeys.join(',')} | registry: ${declaredSelf.join(',')})`);
+
+    const spkKeys = SPK_FEATURE_KEYS.map((f) => f.key).sort();
+    ok(JSON.stringify(spkKeys) === JSON.stringify(keysDeliveredBy('console').sort()),
+      '[delivery] and the console bundle\'s list is exactly the keys declaring console');
+
+    // The admin bundle is a SUBSET, not an equality: `ringotel.prepop` is gated by the registry and enforced
+    // on its route, but has no `_AF` flag because nothing in the bundle self-hides on it. Asserting equality
+    // here would be asserting a fact that is false, so assert the one that is true — no flag may name a key
+    // the admin bundle does not carry.
+    const strays = FEATURE_KEYS.map((f) => f.key).filter((k) => !keysDeliveredBy('access').includes(k));
+    ok(strays.length === 0, `[delivery] no admin flag names a key delivered by another bundle${strays.length ? ` (${strays.join(', ')})` : ''}`);
+  }
+
+  // ── the footer version line (portal.versionLine) ─────────────────────────────────────────────────────
+  {
+    const env = { BRAND_NAME: 'Acme Voice', PORTAL_HANDOFF_URL: '' } as any;
+    const on = buildSelfBundle(selfFeaturePolicyKeys(), env);
+    ok(/versionLine:true/.test(on), '[verline] the flag is on when the key is allowed');
+    ok(/"vl":\{/.test(on), '[verline] and the version config rides the bundle');
+    ok(on.includes('Acme Voice Portal Kit'), '[verline] carrying the branded product name');
+    ok(on.includes(`"ver":"${VERSION}"`), '[verline] and the running version');
+    ok(/getElementById\('footer'\)/.test(on), '[verline] rendered into the portal footer');
+    // Joined onto the VERSION ROW — identified by carrying a version pair, not by being last. "Last
+    // paragraph" produced a duplicate in production: a vendor add-on appends its version row async, so that
+    // rule resolved to the Powered-by line or the version row depending purely on load order.
+    ok(/host\.appendChild\(sp\)/.test(on) && /\\d\+\\\.\\d\+/.test(on),
+      '[verline] joined onto the row that carries a version, not merely the last paragraph');
+    ok(!/ps\[ps\.length-1\]/.test(on), '[verline] and no longer keys off position at all');
+    // One entry on the page, whatever produced a stray. Self-healing beats a guard that can only ever
+    // decline to add a second — that guard was present when the duplicate appeared.
+    ok(/querySelectorAll\('\._svxver'\)/.test(on) && /removeChild\(old\[k\]\)/.test(on),
+      '[verline] removing any stray copy rather than only declining to add one');
+    // No version row yet means WAIT. Landing in the Powered-by line is what stranded it there.
+    ok(/if\(!host\)return;/.test(on), '[verline] and waits for the row rather than settling for another');
+    // Asserted as the ESCAPE, not the character: a literal in the served bytes decodes correctly only if
+    // the charset says so, and a mock server without one rendered it as mojibake. An escape cannot be
+    // garbled by a response header, a proxy, or the host page's own encoding.
+    ok(on.includes("createTextNode('\\u00a0|\\u00a0')"),
+      '[verline] with the platform\'s own separator byte for byte — NBSP, pipe, NBSP');
+    // This assertion used to read `includes('\u2502')`, and it kept passing after the separator changed:
+    // the box-drawing escape still appears in the fossil-cleaner's regex, which matches BOTH separators on
+    // purpose. A presence check that any other line can satisfy is not a check. Anchor it to the call.
+    ok(!/createTextNode\('\\u2502'\)|createTextNode\(' \\u2502 '\)/.test(on),
+      '[verline] and no longer emits the box-drawing bar as the separator');
+    // The reported "duplicate" was one live entry plus a FOSSIL: the vendor rebuilds the row from its
+    // textContent, which inlines our words into its own anchor and destroys our span, leaving text with no
+    // class for the dedupe to find. Cleaning runs BEFORE the host election, because a fossil carries a
+    // version pair and would otherwise let a row that only looks like a version row win.
+    ok(/function vlFossil\(/.test(on) && on.indexOf('vlFossil(f,') < on.indexOf('getElementsByTagName(\'p\')'),
+      '[verline] clears a fossil of its own entry, before choosing which row to write to');
+    ok(/_svxver/.test(on) && /own=true/.test(on),
+      '[verline] and never strips the live entry while doing it');
+    // The separator is styled FROM THE PAGE, not from pinned values. Ours sits inside the version row and
+    // inherited its 10px grey while the portal's own separator is a sibling at 13px near-black -- two pipes
+    // a few characters apart, visibly different. Copying the operator's own values is the only version that
+    // does not bake one deployment's theme into a kit that ships to others.
+    ok(/if\(cs\)\{bar\.style\.color=cs\.color;bar\.style\.fontSize=cs\.fontSize\}/.test(on),
+      '[verline] separator takes its colour and size from the portal\'s own separator');
+    // No pinned COLOUR anywhere: that is the value that goes wrong on a portal themed unlike the stock one.
+    ok(!/#[0-9a-f]{3,6}|rgb\(/i.test(on.slice(on.indexOf('function verLine'), on.indexOf('var F=['))),
+      '[verline] and pins no colour of its own, on any path');
+    // NO VENDOR ADD-ON, STILL WORKS. Without it the footer is the platform's own version paragraph and
+    // there is no separator span to copy from: the loop simply finds nothing, the entry still appends with
+    // inherited styling, and there is no second pipe for it to clash with anyway. The append must therefore
+    // sit OUTSIDE the search -- a style lookup that could skip the entry would trade a cosmetic mismatch
+    // for a missing version line on every portal without the add-on.
+    ok(/sp\.appendChild\(bar\);sp\.appendChild\(inner\);host\.appendChild\(sp\)/.test(on),
+      '[verline] appends unconditionally, so a portal with no vendor add-on still gets the line');
+    ok(/var par=host\.parentNode,kids=par\?par\.children:null,ref=null;/.test(on),
+      '[verline] and tolerates a version row with no parent at all');
+    // With no separator on the page there is nothing to copy, and inheriting the row rendered a 10px pipe
+    // beside our own 13px link. The fallback is the observed stock appearance instead. Pinned values are a
+    // LAST resort by construction -- a separator found on the page always wins.
+    // RELATIVE, not pixels: the stock separator is 1.3x its row, and a ratio tracks whatever base size the
+    // operator's footer uses. Pinned pixels would assume ours.
+    ok(/var BAR_SCALE='130%';/.test(on) && /else\{bar\.style\.fontSize=BAR_SCALE\}/.test(on),
+      '[verline] with none to copy, scales the pipe relatively rather than pinning a pixel size');
+    ok(!/BAR_SCALE/.test(on.slice(on.indexOf('if(cs)'), on.indexOf('if(cs)')+40)),
+      '[verline] and a separator that IS on the page still wins over the fallback');
+    // Located structurally. Keying off the vendor container's id would couple this to one add-on.
+    ok(/tagName==='SPAN'/.test(on) && !/release-notes/.test(on),
+      '[verline] finding that separator by shape rather than by the vendor container name');
+    // The footer outlives the 8s observer. Only verLine re-runs: it is idempotent, the menus are not.
+    ok(/if\(_AF\.versionLine\)verLine\(\)/.test(on),
+      '[verline] re-checked on late passes that outlive the mutation observer');
+    // The old fallback (make our own paragraph when none matched) is GONE on purpose: it is what put the
+    // entry in the wrong place and left it there. Absent beats misplaced for a version string.
+    ok(!/f\.appendChild\(np\)/.test(on), '[verline] with no fallback that strands it in the wrong paragraph');
+    ok(/_isRes\(\)/.test(on), '[verline] and the link is gated on the reader\'s own scope');
+
+    // NOT in the bytes at all for a tier that does not carry the feature. Same rule as appBase: a bundle
+    // should not ship config it will never read, and the product name carries BRAND_NAME.
+    const off = buildSelfBundle(selfFeaturePolicyKeys().filter((k) => k !== 'portal.versionLine'), env);
+    ok(/versionLine:false/.test(off), '[verline] the flag is off when the key is not allowed');
+    ok(!/"vl":/.test(off), '[verline] and the version config is absent from those bytes entirely');
+    ok(!off.includes('Acme Voice'), '[verline] so BRAND_NAME does not ride a bundle that cannot use it');
+
+    // Present-but-empty PORTAL_RELEASE_NOTES_URL ⇒ no URL to link to, at any scope. The body reads '' as
+    // "text only", so the anchor is never constructed rather than being built and hidden.
+    const noLink = buildSelfBundle(selfFeaturePolicyKeys(), { ...env, PORTAL_RELEASE_NOTES_URL: '' });
+    ok(/"url":""/.test(noLink), '[verline] an empty release-notes setting ships an empty url');
+    ok(/"vl":\{/.test(noLink), '[verline] while the name and version still ship');
+
+    // The admin bundle has no version line, so it must not carry its config either.
+    ok(!/"vl":/.test(buildKitBundle(featurePolicyKeys(), env)), '[verline] the admin bundle carries none of this');
+  }
+
+  // ── hides run BEFORE adds, and that order is the contract ───────────────────────────────────────────
+  // A hide names a STOCK entry. Applying hides to the menu as the portal shipped it — before any of this
+  // config's own entries exist — is what keeps the two lists independent: a hide can never remove one of
+  // your own additions, and neither list's meaning depends on the other. Today it holds because of the
+  // order of two statements in one function, which is exactly the kind of property a tidy-up silently
+  // inverts, so assert it rather than trust it.
+  {
+    const b = buildSelfBundle(selfFeaturePolicyKeys(), { PORTAL_HANDOFF_URL: '' } as any);
+    const body = b.slice(b.indexOf('function menuApply'));
+    const hideAt = body.indexOf('.hide||[]).forEach');
+    const addAt = body.indexOf('var add=(plan&&plan.add)');
+    ok(hideAt > -1 && addAt > -1 && hideAt < addAt,
+      `[order] menuApply hides before it adds (hide@${hideAt}, add@${addAt})`);
+  }
+
+  // ── the status banner (portal.statusBanner) ──────────────────────────────────────────────────────────
+  {
+    const URL_ = 'https://automation.example.com/hook';
+    const on = buildSelfBundle(selfFeaturePolicyKeys(), { STATUS_BANNER_WEBHOOK: URL_, PORTAL_HANDOFF_URL: '' } as any);
+    ok(/statusBanner:true/.test(on) && on.includes(URL_), '[banner] the endpoint rides a tier that carries the feature');
+
+    // TEXT, never markup. The content is remote and shows to every signed-in user, so innerHTML here would
+    // be an injection vector owned by whoever controls that endpoint. This repo already bans innerHTML in
+    // injected code; the banner must not be the exception.
+    // HTML IS supported — a support message wants links and emphasis, and David's own prior code sanitized
+    // rather than refusing markup. What is NOT supported is handing markup to innerHTML: the message is
+    // parsed in an inert document and copied across tag by tag, so script cannot execute because nothing
+    // script-bearing is ever copied. Structural, not a rule someone has to remember.
+    ok(/function bannerHtml/.test(on) && /DOMParser/.test(on), '[banner] markup is parsed inertly, then rebuilt');
+    ok(/BAN_TAGS=\{A:1/.test(on), '[banner] from an allow-list of tags a message actually needs');
+    ok(/https:\\\/\\\/\|mailto:/.test(on) || on.includes('https:\\/\\/|mailto:'),
+      '[banner] with link hrefs held to the same scheme rule menu entries use');
+    // ASSIGNMENT, not the word: the bundle legitimately mentions innerHTML in a trailing comment explaining
+    // why a copy button uses textContent. A test matching the word failed on the comment, which is a test
+    // measuring the wrong thing rather than a finding.
+    ok(!/\.innerHTML\s*=/.test(on), '[banner] and nothing in the self bundle assigns innerHTML');
+
+    // https only: this request carries a live ns_t.
+    const plain = buildSelfBundle(selfFeaturePolicyKeys(), { STATUS_BANNER_WEBHOOK: 'http://insecure.example.com/h' } as any);
+    ok(!plain.includes('insecure.example.com'), '[banner] a non-https endpoint is refused, not shipped');
+
+    // Inert when unset — no request, nothing drawn, and no endpoint in the bytes.
+    const off = buildSelfBundle(selfFeaturePolicyKeys(), { PORTAL_HANDOFF_URL: '' } as any);
+    ok(!/"bw":/.test(off), '[banner] unset ⇒ no endpoint in the bundle');
+    // And absent for a tier that does not carry the feature, even when configured.
+    const notMine = buildSelfBundle(selfFeaturePolicyKeys().filter((k) => k !== 'portal.statusBanner'),
+      { STATUS_BANNER_WEBHOOK: URL_ } as any);
+    ok(!notMine.includes(URL_), '[banner] and absent from a tier that is not granted it');
+
+    // One request per page: the element check cannot cover the in-flight window, so a re-entrant observer
+    // pass would multiply a network call on every portal page.
+    ok(/__svxBannerAsked/.test(on), '[banner] asked at most once per page load');
+    // A plain-text reply is the simplest endpoint someone can write; refusing it would make the easy case
+    // the unsupported one.
+    // banner_message is named explicitly: a real endpoint returns that key, and a version of this test
+    // that only listed the obvious names passed while a working webhook rendered nothing.
+    ok(/j\.message\|\|j\.banner_message\|\|j\.text\|\|j\.banner/.test(on),
+      '[banner] accepts JSON (message / banner_message / text / banner) or bare text');
+    // Mounted in the portal's own header band when there is one — at the top of <body> it pushed the page
+    // down and read as browser chrome.
+    // Anchored BEFORE the navigation: appending to #header landed it below the page-title bar, because that
+    // element wraps more than the top row. Ordered fallbacks, most specific first.
+    ok(/getElementById\('header'\)/.test(on), '[banner] anchored to the portal header');
+    // OVERLAID, not inserted. Normal flow was tried first and adds height, so every page shifts down by the
+    // banner — worse than the arithmetic it avoided, and the reason the portal's own banner is positioned.
+    ok(/position:absolute/.test(on) && /head\.style\.position='relative'/.test(on),
+      '[banner] overlays the header instead of adding height to the page');
+    // Bounded by the logo and user menu, because the slot IS the gap between them — full width lets a
+    // narrow window run the text under both.
+    // Positioned BELOW the logo, not centred in the header: the header box IS the logo/nav row, so
+    // centring in it puts the text level with them. Two attempts got this wrong before the screenshots.
+    // TWO bounds at once. Each attempt that used only one landed wrong: left-only ran the text under the
+    // logo, top-only put it level with the menus. The safe strip is right-of-logo AND below-nav-row.
+    ok(/header-logo/.test(on) && /header-user/.test(on), '[banner] bounded on both axes');
+    // TWO placements chosen by measurement. Measured on the real portal: at ~1135px+ there is a 30px strip
+    // between the user menu and the navigation; at ~687px the user menu wraps to its own row and the strip
+    // is ZERO. Overlay-always therefore has nowhere to go when narrow, and flow-always shifts the page when
+    // there was room. Neither is right on its own, which is why three fixed attempts all collided.
+    ok(/strip<need\+2/.test(on), '[banner] overlays only when the message actually fits the strip');
+    // The decision must not depend on the element it decides about. Using d.offsetHeight fed back into
+    // itself — the flowed element is a different size from the overlaid one — so a resize stuttered between
+    // modes and settled wherever the drag stopped. A constant plus hysteresis makes the choice stable.
+    ok(/var need=20;/.test(on), '[banner] decided from a constant, not the element\'s own height');
+    ok(/flowed\?strip<30:strip<need\+2/.test(on),
+      '[banner] with separate enter and leave thresholds, so a boundary width settles instead of oscillating');
+    // SYMMETRIC insets. Left-from-the-logo and right-from-the-page-edge centres the text in a lopsided box,
+    // which reads as off-centre because it IS. Mirroring the inset centres it on the page, keeps it clear of
+    // the logo, and makes a narrowing window wrap the message rather than shift or collide with it.
+    ok(/d\.style\.left=left\+'px';d\.style\.right=left\+'px'/.test(on),
+      '[banner] centred by mirroring the logo inset on both sides');
+    // Lifted into the menu row's unused lower edge: the strip is ~30px and two lines need ~34, so anchoring
+    // at the strip's top clipped the buttons. Borrowing 8px of slack fits both cases.
+    ok(/Math\.max\(0,top-8\)/.test(on), '[banner] lifted 8px so a two-line message clears the buttons');
+    ok(/btns\.parentNode\.insertBefore\(d,btns\)/.test(on), '[banner] and falls into the flow when it does not');
+    // No clear:both in the flowed style — this header is float-based, and clearing pushed the banner past
+    // every float, inflating the header. The flowed path goes INSIDE the navigation block instead, where
+    // it stacks above the buttons without touching the floats.
+    ok(!/clear:both/.test(on), '[banner] without clearing floats, which inflated the header');
+    // Smaller text on the flowed path only. It is reached exactly at the widths where the button row is
+    // already clipped, so shrinking the message is cheaper than any of the alternatives — and it uses the
+    // full width, because at that vertical position the logo is a row above and reserving space beside it
+    // would waste the room that keeps the text on one line.
+    ok(/font-size:12\.5px/.test(on), '[banner] shrinks a step when it has to take its own row');
+    // Pulled up into whitespace that already exists, so wrapping to a second line grows into unused space
+    // instead of pushing the button row further down.
+    ok(/margin-top:-12px/.test(on), '[banner] and grows upward into existing whitespace rather than downward');
+    // No clamp on this path: at these widths wrapping beats truncating.
+    ok(!/margin-top:-12px[^']*-webkit-line-clamp/.test(on), '[banner] with wrapping allowed rather than clipped');
+    ok(/if\(!flowed\)\{flowed=true/.test(on) && /if\(flowed\)\{flowed=false/.test(on),
+      '[banner] switching both ways, so a resize past the threshold recovers');
+    ok(/window\.addEventListener\('resize',place\)/.test(on),
+      '[banner] re-measured on resize, because the strip appears and disappears with the wrap');
+    // The `font:` SHORTHAND with `inherit` as the family is invalid and the browser drops the whole
+    // declaration — the banner rendered 400-weight at 16px and looked close enough to pass a glance.
+    // Separate properties, always.
+    ok(/font-weight:700;font-size:14px/.test(on), '[banner] weight and size set as separate properties');
+    ok(!/font:\s*\d+\s+\d+px\/[\d.]+\s+inherit/.test(on), '[banner] and never via a font shorthand ending in inherit');
+    // No header at all ⇒ a normal-flow bar at the top. Shifting a page we do not recognise beats overlaying
+    // something unknown, so the fallback deliberately does NOT try to position.
+    ok(/b\.insertBefore\(d,b\.firstChild\)/.test(on), '[banner] with a top-of-page fallback for a portal shaped differently');
+    // NOT clamped. A clamp truncates at two lines, which would fire before the shrink loop could act, and
+    // truncating a status notice mid-sentence is the one outcome it must not have. It shrinks instead.
+    ok(!/-webkit-line-clamp/.test(on), '[banner] not clamped, so a third line is not silently cut off');
+    ok(/for\(var fs=14;fs>10&&d\.offsetHeight>room;fs--\)/.test(on),
+      '[banner] shrinking to fit the available room instead, down to a floor');
+    ok(/d\.style\.fontSize='14px';/.test(on),
+      '[banner] resetting the size each pass, so widening the window recovers rather than ratcheting down');
+    // <br> is in the allow-list, so a message can force its own break.
+    ok(/BR:1/.test(on), '[banner] and a message may force a line break with <br>');
+  }
+
+  // ── the primary records what it already worked out about the hand-off ───────────────────────────────
+  // It has always walked the page's scripts to avoid double-loading; it just threw the answer away. The
+  // console reads it back over the bridge, which is why "chain loading is unverifiable" was never true.
+  {
+    const withHandoff = primaryJs({ PORTAL_HANDOFF_URL: 'https://vendor.example.com/router.js' });
+    ok(/window\.__kitCfg\.ho=HO/.test(withHandoff), '[observed] the primary publishes its hand-off facts');
+    ok(/HO\.pre=true/.test(withHandoff), '[observed] recording that the script was already on the page');
+    ok(/HO\.add=true/.test(withHandoff), '[observed] and, separately, that this kit is what added it');
+    // Recorded in all three config states — a block that only publishes when configured would leave the
+    // console unable to distinguish "declared none" from "no answer yet".
+    ok(/window\.__kitCfg\.ho=HO/.test(primaryJs({ PORTAL_HANDOFF_URL: '' })), '[observed] published when declared as none');
+    ok(/window\.__kitCfg\.ho=HO/.test(primaryJs({})), '[observed] and when not configured at all');
+    for (const [name, js] of [['configured', withHandoff], ['none', primaryJs({ PORTAL_HANDOFF_URL: '' })], ['absent', primaryJs({})]] as const) {
+      let okc = true; try { new Script(js); } catch { okc = false; }
+      ok(okc, `[observed] the primary still compiles (${name})`);
+    }
+  }
+
+  // ── the console's entry point must survive a portal with no Management menu ──────────────────────────
+  // mgmtUl() finds that menu by its toggle's LABEL, so it misses on a portal that renames it, one that does
+  // not have it, and any scope the portal hides it from. Before the fallback that left the console with no
+  // way in at all: bundle served, routes answering, nothing to click. Our portal has the menu, which is why
+  // it never showed up — the shape of bug a single-deployment test cannot find.
+  {
+    const b = buildSpkBundle(['kit.status'], { PORTAL_HANDOFF_URL: '' } as any);
+    ok(/mgmtUl\(\),fallback=false/.test(b), '[entry] the console anchors on Management first');
+    ok(/if\(!ul\)\{ul=acctUl\(\);fallback=!!ul\}/.test(b),
+      '[entry] and falls back to the account menu when there is none');
+    // The fallback must key on something NAME-independent, or it inherits the failure it exists to cover.
+    ok(b.includes('hasSignOut') || /function acctUl/.test(b),
+      '[entry] using the finder that keys on sign-out + profile rather than on a menu name');
+    ok(/if\(fallback\)a\.title=/.test(b), '[entry] and says why it is there when it lands in the account menu');
+  }
+
+  // ── a secondary can be gated to named ACCOUNTS, like a feature ───────────────────────────────────────
+  // resolveGate has always accepted {levels, users}; parseManifest insisted on a string, so a secondary
+  // could be gated to a level but never to named accounts while a feature could. An accident of the parse,
+  // not a decision — and the asymmetry mattered as soon as a niche per-customer script needed one.
+  {
+    const withUsers = JSON.stringify([
+      { name: 'pub', from: 'r2:pub', auth: 'public' },
+      { name: 'named', from: 'r2:named', auth: { users: ['boss@acme.example'] } },
+      { name: 'mixed', from: 'r2:mixed', auth: { levels: ['reseller'], users: ['boss@acme.example'] } },
+    ]);
+    // ASSETS present: r2: entries require the binding, and this test is about the GATE, not the binding.
+    const secEnv = { PORTAL_MODE: '1', PORTAL_SECONDARIES: withUsers, PORTAL_HANDOFF_URL: '', ASSETS: makeAssets() };
+    ok(kitConfigError(secEnv as any) === null, '[secgate] a secondary may be gated to named accounts');
+    const entries = parseManifest({ PORTAL_SECONDARIES: withUsers } as any);
+    const named = entries.find((e) => e.name === 'named')!;
+    ok(kitGateAllows(named.auth, { id: 'boss@acme.example', scope: 'Basic User', domain: 'acme.example' } as any, []),
+      '[secgate] and the named account passes regardless of scope');
+    ok(!kitGateAllows(named.auth, { id: 'other@acme.example', scope: 'Reseller', domain: 'acme.example' } as any, []),
+      '[secgate] while an unnamed reseller does not');
+    // Still loud on nonsense, and still requires a value.
+    ok(kitConfigError({ ...secEnv, PORTAL_SECONDARIES: JSON.stringify([{ name: 'x', from: 'r2:x', auth: { levels: ['nope'] } }]) } as any) !== null,
+      '[secgate] an unknown level inside the object is still a config error');
+    ok(kitConfigError({ ...secEnv, PORTAL_SECONDARIES: JSON.stringify([{ name: 'x', from: 'r2:x' }]) } as any) !== null,
+      '[secgate] and auth is still required');
+
+    // THE LEAK THIS WOULD HAVE OPENED. The primary is public and unauthenticated; it used to carry each
+    // entry's auth VALUE, which was merely needless for a level and would publish an account list now.
+    // The client's only question is "token or not", so it gets one boolean.
+    const pj = primaryJs({ PORTAL_SECONDARIES: withUsers, PORTAL_HANDOFF_URL: '' } as any);
+    ok(!pj.includes('boss@acme.example'), '[secgate] the public primary carries no account from a gate');
+    // Precisely: no `auth` FIELD at all. (A bare /reseller/ search matches the `_isReseller` helper the nag
+    // uses — a false positive that would have made this assertion look meaningful while testing nothing.)
+    ok(!/"auth"/.test(pj), '[secgate] nor an auth field of any kind');
+    ok(!/"levels"/.test(pj) && !/"users"/.test(pj), '[secgate] nor the shape of a gate');
+    ok(/"pub":true/.test(pj) && /"pub":false/.test(pj), '[secgate] only whether each entry needs a token');
+    let compiles = true; try { new Script(pj); } catch { compiles = false; }
+    ok(compiles, '[secgate] and the primary still compiles');
+  }
+
+  // ── the two operator URLs that had no loud validation (Fable review, 2026-08-09) ─────────────────────
+  // Both end up in an href or receive a live credential, and both failed SILENTLY: wrapBundle drops a
+  // non-https banner endpoint, so the feature read as configured and drew nothing; the release-notes URL
+  // was not checked at all, and escaping does not neutralise a javascript: value in an href position.
+  {
+    const err = (env: Record<string, unknown>) => kitConfigError({ PORTAL_MODE: '1', ...env } as any);
+    ok(/STATUS_BANNER_WEBHOOK must be an https URL/.test(err({ STATUS_BANNER_WEBHOOK: 'http://x.example/h' }) || ''),
+      '[cfg] a non-https banner endpoint is a loud config error, not a silently inert feature');
+    ok(err({ STATUS_BANNER_WEBHOOK: 'https://x.example/h' }) === null, '[cfg] https is accepted');
+    ok(err({ STATUS_BANNER_WEBHOOK: '' }) === null, '[cfg] and empty stays the off switch');
+
+    ok(/PORTAL_RELEASE_NOTES_URL must be an https URL/.test(err({ PORTAL_RELEASE_NOTES_URL: 'javascript:alert(1)' }) || ''),
+      '[cfg] a javascript: release-notes URL is refused — it would land in an href');
+    ok(/PORTAL_RELEASE_NOTES_URL must be an https URL/.test(err({ PORTAL_RELEASE_NOTES_URL: 'notaurl' }) || ''),
+      '[cfg] as is a typo, rather than shipping a broken link');
+    ok(err({ PORTAL_RELEASE_NOTES_URL: '' }) === null,
+      '[cfg] but "" is the deliberate never-link state and must stay valid');
+    ok(err({ PORTAL_RELEASE_NOTES_URL: 'https://example.com/releases#v{version}' }) === null,
+      '[cfg] and a real value with the {version} placeholder passes');
+  }
+
+  // The banner feature card must not contradict the code. It described the SUPERSEDED text-only renderer
+  // while the Config row and the shipped bannerHtml allow-list simple HTML — two answers on one console,
+  // and the wrong one overstated a safety property.
+  {
+    const card = FEATURE_REGISTRY.find((f) => f.key === 'portal.statusBanner');
+    const detail = (card?.detail ?? []).join(' ');
+    ok(!/Text, not markup/.test(detail), '[banner] the feature card no longer claims the reply is rendered as text');
+    ok(/allow-list/i.test(detail) && /unwrapped/i.test(detail),
+      '[banner] and describes the allow-list rebuild the code actually performs');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

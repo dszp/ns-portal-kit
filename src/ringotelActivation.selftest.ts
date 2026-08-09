@@ -103,9 +103,12 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
   {
     const { dw } = mockDevices({ '100r': 'OLDPW' });
     const { rw, calls } = mockRt();
-    await activate({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 0 })] });
+    // The fixture carries a STALE stored address, which is the situation the contract exists for — and
+    // the one the write has to actually change. (It previously had none, so the assertion passed on a
+    // write that cleared nothing; `emailDiffers` now skips that no-op, covered separately below.)
+    await activate({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 0, info: { email: 'stale@acme.example' } })] });
     const u = calls.find((x) => x.m === 'updateUser')!;
-    ok('email' in u.args && u.args.email === '', 'activate PROPAGATES a blank email (NS is the source of truth for identity)');
+    ok('email' in u.args && u.args.email === '', 'activate PROPAGATES a blank email over a stale one (NS is the source of truth for identity)');
   }
   {
     const { dw } = mockDevices({ '100r': 'OLDPW' });
@@ -118,7 +121,7 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
   {
     const { dw } = mockDevices({ '100r': 'PW2' });
     const { rw, calls } = mockRt();
-    await resetPassword({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 1 })] });
+    await resetPassword({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 1, info: { email: 'stale@acme.example' } })] });
     const u = calls.find((x) => x.m === 'updateUser')!;
     ok('email' in u.args && u.args.email === '', 'reset PROPAGATES a blank email, so the new password cannot be mailed to a stale address');
   }
@@ -133,9 +136,17 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
   {
     const { dw } = mockDevices({ '100r': 'PW' });
     const { rw, calls } = mockRt();
-    await deactivate({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 1 })] });
+    await deactivate({ ...base(), email: '', nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 1, info: { email: 'stale@acme.example' } })] });
     const u = calls.find((x) => x.m === 'updateUser')!;
-    ok('email' in u.args && u.args.email === '', 'deactivate PROPAGATES a blank email');
+    ok('email' in u.args && u.args.email === '', 'deactivate PROPAGATES a blank email over a stale one');
+  }
+  {
+    // The other half of the contract, and the behaviour change `emailDiffers` introduced: when there is
+    // nothing stored, a blank NS address has nothing to clear, so the key is omitted. Same end state, one
+    // fewer write — and, on a record whose stored value is an ARRAY, one fewer irreversible flatten.
+    const { rw, calls } = mockRt();
+    await activate({ ...base(), email: '', nsWrite: mockDevices({ '100r': 'OLDPW' }).dw, rtWrite: rw, users: [rtUser({ id: 'U100', ext: '100', status: 0 })] });
+    ok(!('email' in calls.find((x) => x.m === 'updateUser')!.args), 'a blank NS address over a record with no stored address writes nothing');
   }
 
   // ── deactivate: best-effort identity sync, then deactivateUser (NON-BILLABLE) + delete device ──
@@ -406,6 +417,106 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe' })];
     const r = await syncIdentity({ ...base(), email: '', nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
     ok(r.action === 'no-change' && rt.calls.length === 0, 'no address on either side is a no-op, not a perpetual write');
+  }
+
+  // ── info.email is `string | string[]` — the multi-value field (live-verified 2026-08-06/07) ──────────
+  // A user who adds a second Email row in the desktop app turns the field into an array. Read as a bare
+  // string it yielded '', so every event saw a difference and rewrote the NS address as a FLAT string,
+  // destroying the extra address — and, since only the app can create an array, doing it again forever.
+  {
+    const rt = mockRt();
+    const multi = () => [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: ['jane@acme.example', 'personal@example.net'] } })];
+    const o = { ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: multi() as any };
+    const r1 = await syncIdentity(o);
+    const r2 = await syncIdentity({ ...o, users: multi() as any });
+    ok(r1.action === 'no-change' && r2.action === 'no-change', 'a multi-value info.email matching NS at [0] is a no-change');
+    ok(rt.calls.length === 0, 'ZERO writes — the array is never flattened just for being an array');
+  }
+  {
+    // A REAL change still syncs. It cannot be lossless: `updateUser` with an array is a hard 500, so only
+    // the app can create one. Report the loss rather than silently swallow it.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: ['old@acme.example', 'personal@example.net'] } })];
+    const r = await syncIdentity({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'synced' && r.changed.join() === 'email', 'a genuinely changed address still writes');
+    ok(rt.calls[0].args.email === 'jane@acme.example', 'and it is written FLAT (an array would be a 500)');
+    ok(r.flattenedEmails === 2, 'the write reports how many stored values it destroyed');
+  }
+  {
+    // The counter must not fire on the ordinary single-value write, or the log cries wolf on every change.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: 'old@acme.example' } })];
+    const r = await syncIdentity({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'synced' && r.flattenedEmails === undefined, 'a single-value write reports no flattening');
+  }
+  {
+    // Position fidelity: index 0 is the slot NS owns. A blank primary beside a secondary must NOT be
+    // compacted — compacting would promote the user's second address into NetSapiens' slot and call the
+    // record settled, leaving NS's own address unwritten.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: ['', 'jane@acme.example'] } })];
+    const r = await syncIdentity({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'synced' && rt.calls[0].args.email === 'jane@acme.example', 'a blank PRIMARY is a mismatch even when NS\'s address sits at [1] (index 0 is not compacted)');
+  }
+  {
+    // ⚠️ A REMOVAL is asymmetric — it must clear EVERY value, not just slot [0]. Comparing only [0] made
+    // this state look settled, so a departed occupant's address at [1] would have survived forever: no
+    // later event could produce a difference. Ringotel mails app credentials to the stored address.
+    const rt = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: ['', 'departed@example.net'] } })];
+    const r = await syncIdentity({ ...base(), email: '', nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+    ok(r.action === 'synced' && rt.calls[0].args.email === '', 'a removal clears a secondary address even when the PRIMARY is already blank');
+    ok(r.flattenedEmails === 2, 'and reports the values it destroyed');
+  }
+  {
+    // The same asymmetry on the human paths, where the stale address is about to be mailed a password.
+    const stale = () => [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: ['', 'departed@example.net'] } })];
+    const rtR = mockRt();
+    await resetPassword({ ...base(), email: '', nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtR.rw as any, users: stale() as any });
+    ok(rtR.calls.find((c) => c.m === 'updateUser')!.args.email === '', 'resetPassword clears a secondary before mailing a new password');
+    const rtD = mockRt();
+    await deactivate({ ...base(), email: '', nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtD.rw as any, users: stale() as any });
+    ok(rtD.calls.find((c) => c.m === 'updateUser')!.args.email === '', 'deactivate clears a secondary too');
+  }
+  {
+    // ...but a removal against a record that stores nothing is still a no-op, in every shape.
+    const rt = mockRt();
+    for (const info of [undefined, { email: '' }, { email: [] }, { email: ['', ''] }]) {
+      const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', ...(info ? { info } : {}) })];
+      const r = await syncIdentity({ ...base(), email: '', nsWrite: mockDevices().dw as any, rtWrite: rt.rw as any, users: users as any });
+      ok(r.action === 'no-change', `a removal over an empty stored value (${JSON.stringify(info)}) is a no-op`);
+    }
+    ok(rt.calls.length === 0, 'and none of those shapes produced a write');
+  }
+  {
+    // The same gate guards the three human-initiated writes, which flattened unconditionally before.
+    const multi = () => [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: ['jane@acme.example', 'personal@example.net'] } })];
+    const rtA = mockRt();
+    await activate({ ...base(), nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtA.rw as any, users: multi() as any });
+    const upA = rtA.calls.find((c) => c.m === 'updateUser')!;
+    ok(!('email' in upA.args), 'activate omits email when the stored primary already matches (no needless flatten)');
+    ok(upA.args.status === 1, 'activate still (re)activates — the gate touches only the email key');
+
+    const rtR = mockRt();
+    await resetPassword({ ...base(), nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtR.rw as any, users: multi() as any });
+    ok(!('email' in rtR.calls.find((c) => c.m === 'updateUser')!.args), 'resetPassword omits a redundant email write');
+
+    const rtD = mockRt();
+    await deactivate({ ...base(), nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtD.rw as any, users: multi() as any });
+    ok(!('email' in rtD.calls.find((c) => c.m === 'updateUser')!.args), 'deactivate omits a redundant email write');
+  }
+  {
+    // ...and still write it when it genuinely differs, on every one of the three.
+    const stale = () => [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r', name: 'Jane Doe', info: { email: 'old@acme.example' } })];
+    const rtA = mockRt();
+    await activate({ ...base(), nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtA.rw as any, users: stale() as any });
+    ok(rtA.calls.find((c) => c.m === 'updateUser')!.args.email === 'jane@acme.example', 'activate still pushes a changed address');
+    const rtR = mockRt();
+    await resetPassword({ ...base(), nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtR.rw as any, users: stale() as any });
+    ok(rtR.calls.find((c) => c.m === 'updateUser')!.args.email === 'jane@acme.example', 'resetPassword still pushes a changed address before mailing');
+    const rtD = mockRt();
+    await deactivate({ ...base(), nsWrite: mockDevices({ '100r': 'pw' }).dw as any, rtWrite: rtD.rw as any, users: stale() as any });
+    ok(rtD.calls.find((c) => c.m === 'updateUser')!.args.email === 'jane@acme.example', 'deactivate still pushes a changed address');
   }
   {
     const rt = mockRt();

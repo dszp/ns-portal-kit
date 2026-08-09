@@ -83,7 +83,10 @@ Each answer becomes configuration, and each default is the *quiet* option rather
 | Should app activation **writes** be enabled, and for which domains? | `RINGOTEL_WRITE_DOMAINS` mutates a **third-party** app system: activating users, deactivating them, resetting passwords. **Empty means every write is refused**, which is the safe state; `*` means every in-scope domain. Note activation now **replaces the SIP password of a softphone device it did not create** (`RINGOTEL_ROTATE_SIP_ON_ACTIVATE`, default on) — correct, but it will break anything else still registering with that credential, so the operator should be told rather than surprised. |
 | Should **event subscriptions** be enabled? | This is the only thing that puts a stored NetSapiens credential on a portal-mode Worker, and it also publishes a callback URL and needs a cron trigger. In exchange, a user renamed or re-emailed in NetSapiens reaches the app directory without anyone clicking anything. Off unless all of its settings are present. |
 | Should **directory pre-population** be enabled, and who may run it? | It creates *inactive* app-directory entries in bulk for users who have none — a write, gated by `ringotel.prepop` (default `reseller`) and bounded by `RINGOTEL_WRITE_DOMAINS`. Harmless in itself, but it is the operator's directory and they should expect it to fill up. |
+| **Which accounts should be superadmins?** *(portal mode)* | `PORTAL_SUPERADMINS` is the account list that passes every gate, and it is the **only** thing that admits anyone to the integration console — the page that reports how the deployment is actually configured. **Unset, it admits nobody**, so skipping this question produces a working deployment that nobody can inspect. Ask for at least one account; do not pick them. |
 | Who should see each feature? | Defaults are deliberate (`callflow.view` = `reseller`, the write features = `office_manager`). Widening a gate is a policy change about who can act on customers. |
+| Should the portal's **menus** be customized? | `PORTAL_MENUS` adds and hides entries in menus the operator's *customers* use. It is cosmetic and never a security control — hiding a link does not remove access to what it pointed at — but it lands on real users' portals. A first rule should be scoped to one account or one domain and widened after they have looked at it. |
+| Is there an endpoint that will supply the **status banner** text? *(portal mode)* | `STATUS_BANNER_WEBHOOK` names a URL **the operator has to build and host**. The kit renders whatever that endpoint returns and has no message store of its own, so there is no way to "just set a message" here — see the Never entry below. If they do not have such an endpoint, the answer is to leave it unset. |
 | Brand name and accent colour? | Branding is configuration here, never source. Absent it ships unbranded, which is correct until they tell you otherwise. |
 | **Who controls the Manager Portal's injected-script slot?** *(portal mode)* | If the operator does not run the NetSapiens platform, this is a **request to their provider**, not a setting — and nothing works until that request is honoured. Find out before promising a timeline. |
 
@@ -123,6 +126,23 @@ Settings, formats and defaults: [SETUP.md § 3](./SETUP.md#3-optional--each-turn
 - **Never invent `NS_SERVER` or `NS_PORTAL_ISS`.** `NS_PORTAL_ISS` has no default *on purpose* — a default
   would mean accepting tokens minted by a portal the operator does not control. Ask; do not guess from a
   domain name.
+- **Never point `STATUS_BANNER_WEBHOOK` at anything but an endpoint the operator controls, and never invent
+  one to see the feature work.** Every portal page load sends the calling user's live `ns_t` to that host —
+  a working NetSapiens credential for that user, from every user who loads the portal. It must be `https`
+  for the same reason. **The operator supplies the responder; the kit has no message store**, so there is no
+  way to "just type a message" here and no default endpoint to fall back to. **If they do not already have
+  an endpoint that returns banner text, the correct configuration is to leave the setting unset** — the
+  feature is then completely inert: nothing is requested and nothing is drawn. Do not stand up a placeholder
+  service, and do not point it at a third party's webhook tester. *(This division — kit owns the surface,
+  operator owns the message — is deliberate and may change in a future version; today the responder is
+  theirs to build.)*
+- **Never widen `kit.status` to reach the console.** It accepts only `off`, `superadmin`, `super_user` or
+  `reseller`; anything lower is refused when the configuration is parsed, which makes **every route after
+  `/health` return 500** — the deploy itself succeeds, so this surfaces as a running Worker that answers
+  nothing. The fix for "I cannot open the console" is naming an account in `PORTAL_SUPERADMINS`, not
+  lowering the gate. On a deployment serving **more than one reseller**,
+  widening it to `reseller` is an actual cross-tenant disclosure: the request-time gate admits any
+  reseller-scope principal, so one reseller would see the others' domain names and settings.
 - **Never enable a write feature that was not asked for**, and never widen `RINGOTEL_WRITE_DOMAINS` to `*`
   to make a test pass.
 - **Never put the same key in both `vars` and `.dev.vars`.** The `wrangler.jsonc` value wins silently. This
@@ -162,6 +182,14 @@ Shared steps first. Where the modes differ it is marked; do not run the other br
    features are wanted, plus anything the fork/privacy decision moved out of `vars`. **Secrets are
    per-environment** — if you used `env` blocks, pass `--env <name>` or the secret lands on the wrong
    Worker and the deployment looks unconfigured for no visible reason.
+   - ***Portal: set `PORTAL_SUPERADMINS` now, with the accounts the operator named.***
+     ```bash
+     npx wrangler secret put PORTAL_SUPERADMINS --env <name>   # them@theirdomain.example
+     ```
+     This is what admits anyone to the integration console, and **unset it admits nobody** — so skipping it
+     produces a deployment that works and that no one can look inside. It is a secret, so it can be changed
+     later without a redeploy; setting it before the first deploy just means there is never a console you
+     cannot open. Reference: [SETUP.md § PORTAL_SUPERADMINS](./SETUP.md#portal-superadmins).
 
 5. **Deploy.**
    ```bash
@@ -201,11 +229,35 @@ Each rung proves something the previous one did not.
    everything else 500s, the feature configuration is wrong — not the deployment.
 4. **Standalone: render one diagram** for a real domain. This is the first step that exercises the token,
    its NetSapiens scope, and `ALLOWED_DOMAINS`.
-5. **Portal: a real portal page load, by a real user.** Nothing synthetic exercises the injection, the
+5. **Portal: open the integration console, as a superadmin.** Sign in to the Manager Portal as an account
+   named in `PORTAL_SUPERADMINS` and look for a bold **Super Portal Kit** entry. **Where it appears depends
+   on the portal, and the common case is not the obvious one:**
+   - **At the top of the signed-in user's own name dropdown** — this is where it lands on a **stock**
+     NetSapiens portal, and it is what to expect unless you know otherwise.
+   - **In the Management dropdown**, where the portal has one. That menu is **not stock** — a vendor add-on
+     supplies it — and the console prefers it when present, because an operator tool belongs among
+     administrative entries rather than among someone's personal links.
+
+   Same gate, same page either way. This is the rung that replaces reading the configuration back to
+   yourself: the **environment badge** says which deployment you are looking at, **Overview** lists whatever
+   the setup checklist still wants, **Features** and **Integrations** separate *off* from **inert** (allowed,
+   but unable to run because a setting it needs is absent — the state that looks like working configuration
+   from every other angle), and **Checks** makes live calls that prove a credential works rather than merely
+   being present.
+
+   **If it refuses you**, the refusal names which of two things is wrong — no superadmin named, or the
+   feature switched off in `PORTAL_FEATURES`. It will not name who *is* admitted; that would leak the
+   account list to whoever asked. Walkthrough:
+   [SETUP.md § The first five minutes](./SETUP.md#first-five-minutes).
+
+   **The console reports configuration and reachability, not whether the portal is actually loading the
+   script.** That is the next rung, and nothing here substitutes for it.
+
+6. **Portal: a real portal page load, by a real user.** Nothing synthetic exercises the injection, the
    `ns_t` the portal stored, or the feature gating. Check the browser console is clean, then confirm a
    feature the caller is actually entitled to appears — and that one they are not entitled to does not.
    That second half is the only check that proves gating rather than assuming it.
-6. **Subscriptions, if enabled: change a real user in NetSapiens and watch it arrive.** Rename a test user
+7. **Subscriptions, if enabled: change a real user in NetSapiens and watch it arrive.** Rename a test user
    in the Manager Portal, then confirm the new name reaches the app directory without anyone touching this
    Worker's UI. That is the whole feature; nothing short of it proves the subscription is registered, the
    callback reachable, and the credential sufficient. Then confirm the reconcile job has run at least once
@@ -219,6 +271,11 @@ Each rung proves something the previous one did not.
   into many NetSapiens calls and can exceed it, so the diagram fails to render on Free while small domains
   work perfectly. That is the clearest single reason to move to the $5 plan
   ([SETUP.md § Cloudflare plan](./SETUP.md#cloudflare-plan-free-or-paid-5)).
+- **A status-banner endpoint that answers 200 with the wrong shape draws nothing at all.** The kit accepts
+  plain text, or JSON carrying `message`, `banner_message`, `text` or `banner`. Anything else is a
+  *successful* request that renders no banner — indistinguishable, from inside the portal, from the feature
+  being switched off. If a banner does not appear, check the body the endpoint returns before you check
+  anything in this Worker.
 - **Soft exclusions are creation-only.** `RINGOTEL_EXCLUDE_*` decides whether an app account may be
   *created*; it never hides a user who already has one. Do not use it as a way to hide people.
 - **System/service users and non-3-4-digit extensions can never be activated**, by anyone, including a

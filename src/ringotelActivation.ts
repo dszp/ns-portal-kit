@@ -242,9 +242,13 @@ export async function activate(opts: ActivationOpts): Promise<ActivationResult> 
     // the directory carried. `email` is sent FAITHFULLY, blank included (see ActivationOpts.email) —
     // only a failed read (`undefined`) leaves the directory value alone. `name` still guards on truthy:
     // NS always has a display name, so blank there means "we didn't get one", not "it was removed".
+    //
+    // The `emailDiffers` gate does not weaken that faithfulness: it skips the key only when the stored
+    // primary ALREADY equals the NS value, so the end state is identical. What it buys is that a
+    // reactivation no longer flattens a user's extra addresses for no reason — see `emailDiffers`.
     const changes: Rec = { status: 1, username, authname: username, password };
     if (opts.name) changes.name = opts.name;
-    if (opts.email !== undefined) changes.email = opts.email;
+    if (opts.email !== undefined && emailDiffers(existing, opts.email)) changes.email = opts.email;
     await opts.rtWrite.updateUser(id, opts.orgid, changes);
     result = { action: 'updated', rtUserId: id };
   } else {
@@ -283,7 +287,7 @@ export async function deactivate(opts: ActivationOpts): Promise<ActivationResult
     // though deactivateUser overwrites the visible name.
     const changes: Rec = {};
     if (opts.name) changes.name = opts.name;
-    if (opts.email !== undefined) changes.email = opts.email;
+    if (opts.email !== undefined && emailDiffers(existing, opts.email)) changes.email = opts.email;
     if (Object.keys(changes).length) await opts.rtWrite.updateUser(rtUserId!, opts.orgid, changes);
     await opts.rtWrite.deactivateUser(rtUserId!, opts.orgid);
     // Only now — after the canonical is deactivated — best-effort clean up any siblings.
@@ -320,7 +324,10 @@ export async function resetPassword(opts: ActivationOpts): Promise<ActivationRes
   const { password } = await ensureDevice(opts.nsWrite, opts.domain, opts.ext, deviceName);
   const changes: Rec = { username: deviceName, authname: deviceName, password };
   if (opts.name) changes.name = opts.name;
-  if (opts.email !== undefined) changes.email = opts.email;
+  // Gated, but the "mail goes to the CURRENT address" property above is preserved exactly: the gate only
+  // skips the write when the stored primary already IS the NS value, which is the state the write was
+  // trying to reach. See `emailDiffers` for why writing unconditionally is not free.
+  if (opts.email !== undefined && emailDiffers(existing, opts.email)) changes.email = opts.email;
   await opts.rtWrite.updateUser(id, opts.orgid, changes);
   await opts.rtWrite.resetUserPassword(id, opts.orgid);
   // Only now — after the canonical's password is reset — best-effort clean up any siblings.
@@ -333,29 +340,78 @@ export interface SyncIdentityResult {
   action: 'synced' | 'no-change' | 'absent';
   rtUserId?: string;
   changed: string[];
+  /**
+   * Set only when the email write collapsed a multi-value `info.email` — the number of values the record
+   * held before. Irreversible (see `emailDiffers`), so it is reported for the log rather than prevented.
+   */
+  flattenedEmails?: number;
 }
 
 /**
- * Read the Ringotel-side email. **It lives at `info.email`, NOT at the top level** — `getUsers` returns no
- * top-level `email`, so reading `user.email` yields `undefined` for every user, which is indistinguishable
- * from "nobody has an address". A comparison written the obvious way therefore sees a difference on every
- * event and writes forever, turning at-least-once delivery into an amplifier.
+ * Every value of the Ringotel-side email, **in app order**.
  *
- * ⚠️ **`info.email` is `string | string[]`** (live-verified 2026-08-06). Every `info` field holds a plain
- * string at one value and becomes an ARRAY the moment the user adds a second one in the app — the desktop
- * client offers extra Email and Phone rows, so this is a normal thing for a user to do, not an edge case.
+ * Two vendor facts this exists to absorb:
  *
- * The `typeof === 'string'` fallback below is therefore NOT safe as written: given an array it returns '',
- * `syncIdentity` concludes the address differs, and writes the NS address back as a flat string —
- * collapsing the array and destroying the second address the user entered. TODO: normalize instead, e.g.
- * take element 0 for the comparison and preserve the remainder on write. Left as-is pending that fix so
- * the behaviour is recorded rather than silently half-changed.
+ * 1. **It lives at `info.email`, NOT at the top level** — `getUsers` returns no top-level `email`, so
+ *    reading `user.email` yields `undefined` for every user, which is indistinguishable from "nobody has
+ *    an address". A comparison written the obvious way sees a difference on every event and writes
+ *    forever, turning at-least-once delivery into an amplifier.
+ * 2. **Every `info` field is `string | string[]`** (live-verified 2026-08-06). A field holds a plain
+ *    string at one value and becomes an ARRAY the moment the user adds a second one in the app — the
+ *    desktop client offers extra Email and Phone rows, so this is a normal thing for a user to do, not an
+ *    edge case.
+ *
+ * Non-strings map to `''` rather than being filtered out, so **index 0 stays index 0**: this list is
+ * consumed positionally, and compacting it would silently promote element [1] into the slot NetSapiens
+ * owns.
  */
-function rtEmailOf(u: User): string {
+function rtEmailValues(u: User): string[] {
   const info = (u as Rec)['info'];
   const nested = info && typeof info === 'object' ? (info as Rec)['email'] : undefined;
   const val = nested ?? (u as Rec)['email'];
-  return typeof val === 'string' ? val.trim() : '';
+  if (Array.isArray(val)) return val.map((v) => (typeof v === 'string' ? v.trim() : ''));
+  return typeof val === 'string' ? [val.trim()] : [];
+}
+
+/**
+ * The Ringotel-side email **NetSapiens owns: element [0]**, the app's main Email field.
+ *
+ * Element 0 and not "does the NS address appear anywhere in the list", because a stale value sitting in
+ * the primary slot is precisely the failure that matters — Ringotel mails app credentials to the stored
+ * address, so leaving the previous occupant's address in front is how a reassigned extension sends the
+ * new user's password to the old one. NS wins the first slot; the user keeps the rest.
+ */
+function rtEmailOf(u: User): string {
+  return rtEmailValues(u)[0] ?? '';
+}
+
+/**
+ * Whether a flat `email` write is warranted — the single gate in front of **every** email write here.
+ *
+ * ⚠️ **A flat write COLLAPSES a multi-value field irreversibly** (live-verified 2026-08-07). Only the app
+ * can create an array; `updateUser` with one is a hard 500 (`class java.util.ArrayList cannot be cast to
+ * class java.lang.String`), so there is no API call that can put element [1] back. The fix therefore
+ * cannot be lossless — it can only ensure a write fires on a REAL change instead of on every event.
+ *
+ * That distinction is the whole bug: reading an array as `''` made `syncIdentity` see a difference every
+ * time, so a user who entered a second address in the app lost it at the next subscriber event — and then
+ * kept losing it, forever, for reasons invisible from their side.
+ *
+ * Callers pass the raw NS value; `undefined` (a failed read) must be filtered out by the caller, since
+ * "we don't know" and "it was removed" are different states — see `ActivationOpts.email`.
+ *
+ * ⚠️ **A REMOVAL (`''`) is asymmetric: it must clear EVERY stored value, not just slot [0].** "The user
+ * keeps the rest" is a rule about which address NetSapiens owns while the user HAS one — it is not a
+ * licence to leave a departed occupant's address in the directory after NetSapiens says there is none.
+ * Comparing only slot [0] made `['', 'old@x']` vs `''` look settled, so `old@x` would have survived
+ * forever: no later event could ever produce a difference. Clearing writes `''` flat, after which slot
+ * [0] is `''` and the next event is a genuine no-op, so this still converges in one step.
+ */
+function emailDiffers(existing: User, email: string): boolean {
+  const want = email.trim();
+  const stored = rtEmailValues(existing);
+  if (want === '') return stored.some((v) => v !== '');
+  return want !== (stored[0] ?? '');
 }
 
 const rtNameOf = (u: User): string => {
@@ -405,14 +461,20 @@ export async function syncIdentity(opts: ActivationOpts): Promise<SyncIdentityRe
   }
   // `email` honours the three-state contract: undefined = don't know, touch nothing; '' = a real removal.
   // Both sides normalize undefined/absent to '' so "no address either side" is correctly a no-op.
-  if (opts.email !== undefined && opts.email.trim() !== rtEmailOf(existing)) {
+  let flattenedEmails: number | undefined;
+  if (opts.email !== undefined && emailDiffers(existing, opts.email)) {
     changes.email = opts.email;
     changed.push('email');
+    // The address really did change, so the write is correct — but if the app was holding extra values
+    // they are about to be destroyed with no way back (see `emailDiffers`). Surface it: this path is
+    // unattended, so an unexplained line in a log is the only trace the user's data ever had of it.
+    const stored = rtEmailValues(existing);
+    if (stored.length > 1) flattenedEmails = stored.length;
   }
 
   if (changed.length === 0) return { action: 'no-change', rtUserId: id, changed };
   await opts.rtWrite.updateUser(id, opts.orgid, changes);
-  return { action: 'synced', rtUserId: id, changed };
+  return { action: 'synced', rtUserId: id, changed, ...(flattenedEmails ? { flattenedEmails } : {}) };
 }
 
 /** What the narrow offboarding action did. `rtUserIds` names every record it deactivated. */

@@ -34,6 +34,19 @@ export class NsIdentityError extends Error {
 }
 
 /**
+ * Whether {@link getServiceToken} could mint a token for this identity WITHOUT a network call — i.e.
+ * every precondition it throws on locally is satisfied. An `'api'` identity is always usable (the token
+ * IS the credential, nothing further to check). An `'admin'` identity additionally needs the OAuth
+ * client pair — mirrored here from `getServiceToken`'s own `if (!clientId || !clientSecret) throw`
+ * rather than only inside it, so a diagnostic surface (the integration console) can ask "would this actually
+ * work" without attempting a live token mint.
+ */
+export function identityUsable(identity: NsWriteIdentity, env: NsIdentityEnv): boolean {
+  if (identity.kind === 'api') return true;
+  return (env.NS_OAUTH_CLIENT_ID ?? '').trim().length > 0 && (env.NS_OAUTH_CLIENT_SECRET ?? '').trim().length > 0;
+}
+
+/**
  * Resolve the bearer token for the service identity.
  *
  * No caching: the SSO worker mints per invocation too, and the cron runs on a slow cadence, so a token

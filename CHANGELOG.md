@@ -20,6 +20,789 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [0.2.47] — 2026-08-09
+
+### Fixed
+
+- **`domains` was the only targeting axis whose in-axis `"*"` did nothing.** `users`, `scopes` and `app`
+  each fall back to their own `"*"`; `domains` did not. So
+  `{"domains": {"*": ["A"], "acme.example": []}}` — the "change everywhere except some" shape the
+  documentation describes and the console's own examples teach — validated green and then matched nothing,
+  anywhere. A rule that silently never fires is the exact failure every other axis throws a startup error
+  to prevent. The workaround (a top-level `"*"` with domain exceptions) still works and is unchanged.
+
+- **The menu builder could delete a working configuration.** Menu names are matched case-insensitively at
+  runtime, so `{"Apps": {…}}` is valid config that genuinely applies — but the builder seeded itself from
+  the raw key while looking the menu up by its canonical lowercase name, found nothing, and emitted an
+  empty menu. Since the builder emits the *complete* configuration rather than a diff, pasting that output
+  removed the running config. It now normalises keys the same way the code that acts on them does.
+
+- **Two operator URLs failed silently instead of loudly.** A non-`https` `STATUS_BANNER_WEBHOOK` was
+  dropped when the bundle was built, so the banner read as configured and simply never appeared;
+  `PORTAL_RELEASE_NOTES_URL` was not validated at all, though it becomes an `href` in the portal footer and
+  the console header. Both are now startup errors, matching how every other operator URL here already
+  behaved.
+
+### Changed
+
+- **The Checks tab shows only the checks that mean something in this deployment's mode.** Cloudflare Access
+  is a standalone-mode control — a portal-backend Worker stores no credential for it to protect, and an
+  Access gate in front of one would refuse the plain `<script src>` that loads the injected primary — so
+  that row no longer appears in portal mode. It is unchanged in standalone. This is the other half of the
+  0.2.31 change that removed the Access *settings* from the Config tab for the same reason.
+
+- **A new check for the status-banner endpoint**, in portal mode, on the button with the others. It makes
+  the same call the injected code makes and separates the four outcomes that matter: unreachable, a non-2xx
+  reply, a 2xx reply carrying no field the parser accepts (it names the accepted fields), and a usable
+  message, which it shows. The third is why this exists — an endpoint that answers 200 with the wrong shape
+  draws nothing and reports nothing, and from inside the portal that is indistinguishable from the feature
+  being switched off.
+
+- **The status banner's feature card described a renderer that was replaced before release.** It said the
+  reply was inserted as text and could not carry markup, while the settings list and the code both allow
+  simple HTML through an allow-list. The card overstated a safety property; it now describes what the code
+  does.
+
+### Documentation
+
+- **Nine corrections, the important ones where a document overstated something.** `access.ts` is not
+  merely inactive without its two variables — it is inert in portal mode by construction, and saying only
+  the former implied a perimeter a portal deployment does not have. Portal mode was described as storing
+  "no credential at all" without the event-subscriptions exception. `RINGOTEL_EXCLUDE_NAMES` documented
+  three defaults where there are ten, and they are case-insensitive *substring* matchers including bare
+  `VOICEMAIL` and `ROUTING`. The paid subrequest ceiling is 1,000, not 10,000. And `kit.status` levels
+  were said to be "refused at deploy time" with the Worker refusing to start; in fact the deploy succeeds
+  and every route after `/health` returns 500 — a different thing to look for.
+
+- **`PORTAL_HANDOFF_URL` is documented as the portal-mode blocker it is.** Leaving it out holds `/health`
+  at `configured:false`; absent and `""` look identical in a config file and mean opposite things here.
+  Both states are now in a table with the reason the distinction exists.
+
+### Testing
+
+- **`pnpm test` runs every offline suite**, not five of eighteen. It previously skipped every gating
+  suite — features, menus, kit, eligibility and the console — while `AGENTS.md` told contributors to run
+  it. `test:worker` is included and needs no arguments: it falls back to the fictional snapshot shipped in
+  `test/snapshots`, and the note claiming it required customer data was wrong.
+
+- **Two long-standing call-flow failures are fixed, and were not what they appeared to be.** They compared
+  a graph resolved from a raw fixture against one the Worker assembled through `fetchDomainSnapshot`, then
+  attributed the difference to the route. Both graphs held the same nodes; the assembled one carried two
+  additional edges because the graph builder collapses an edge whose target is an ancestor on its current
+  traversal path, which makes the rendered edge set depend on the order the input arrived in. The
+  assertion now holds the input constant and varies only the delivery path, which is what it was for.
+
+## [0.2.46] — 2026-08-09
+
+### Fixed
+
+- **The footer version line could appear twice, and one of the two was a ghost.** What looked like a
+  duplicate was one real entry plus a *fossil* of an earlier one. The kit appends its entry to the portal's
+  version row; a vendor add-on may then rebuild that row from its text content, which inlines the kit's
+  entry into the add-on's own link as plain characters and destroys the element around it. The text survives
+  with
+  nothing marking them, so the de-duplication could not see them — it found no entry at all and correctly
+  added a fresh one to the row that now existed, leaving both on screen.
+
+  The kit now removes that fossil before deciding where to write, matching its own product name and version
+  and taking the separator with it. Since it only ever removes text this kit put there, and since
+  clean-then-ensure is idempotent, an early write is now safe to correct rather than something to avoid —
+  which matters on a portal where no vendor add-on loads at all, where waiting would have meant showing
+  nothing.
+
+  Two smaller parts of the same fix: the version line is re-checked on a few late passes that outlive the
+  8-second mutation observer, because a footer rebuilt after that window used to stay wrong until reload;
+  and pages rendered by older versions heal on their next load, because both the old and new separators are
+  matched.
+
+- **The separator now matches the portal's own, byte for byte** — non-breaking space, pipe, non-breaking
+  space. It previously used a box-drawing bar with ordinary spaces, which rendered as a taller, heavier
+  line beside the platform's own thin pipe in the same row. An entry added to someone else's row should not
+  be identifiable as a guest.
+
+### Documentation
+
+- **Every setting has a stable link into SETUP.md now.** All 66 keys the console lists — plus each section
+  — carry an explicit anchor, so `SETUP.md#RINGOTEL_WRITE_DOMAINS` keeps working when a heading is reworded.
+- **Five settings that had never been documented** are now covered: `JWT_RATE_LIMITER`,
+  `NS_EVENTS_PREFERRED_SERVER`, `NS_OAUTH_SERVER`, `PORTAL_RELEASE_NOTES_URL` and `RINGOTEL_APP_BASE_URL`.
+  Worker bindings get a section of their own, and the release-notes URL is documented beside the status
+  banner.
+- **`AGENTS.md` covers the console, the banner and menus.** It had not been updated since 0.2.20, so an
+  agent deploying from it never named a superadmin — and with `PORTAL_SUPERADMINS` unset nobody can open the
+  integration console at all. It now asks for those accounts, sets them, and walks the operator to the page,
+  including where the menu entry appears on a stock portal versus one with a vendor add-on.
+- **Menu changes: try them on one account first.** SETUP now says plainly that any rule can be scoped with
+  `users` or `domains` and widened afterwards, which is the whole preview mechanism on a live portal.
+- **The 0.2.45 entry below described behaviour that did not ship.** It said the banner reply was rendered as
+  text and not markup, while also saying HTML was supported four paragraphs later. HTML is supported; the
+  entry now says so once, correctly.
+
+## [0.2.45] — 2026-08-08
+
+### Added
+
+- **A status banner across the top of the portal**, with the message supplied by an endpoint you host. One
+  setting turns it on: **`STATUS_BANNER_WEBHOOK`**. Unset, the feature is inert — nothing requested, nothing
+  drawn, no half-configured state.
+
+  **The kit stores no messages and decides nobody's eligibility.** It posts the caller's identity to your
+  endpoint on each portal page load and shows whatever comes back, or nothing. That keeps the kit stateless —
+  no database, no binding to provision — while letting you post and pull a notice without a redeploy. Write
+  the logic you want behind that URL; a notice board, a maintenance schedule, per-customer messaging.
+
+  Two deliberate constraints, both narrower than a hand-rolled banner:
+
+  - **Simple HTML is supported, and it is rebuilt rather than inserted.** A welcome or support notice
+    usually needs a link, bold, italics and `<br>`, so the reply may contain them. What it may not do is
+    reach the page as markup: the response is parsed in an inert document and then copied across tag by
+    tag and attribute by attribute, from an allow-list. `<script>`, event handlers, and `href`s that are
+    not `https:` or `mailto:` are dropped whatever the endpoint returns, and an unknown tag is *unwrapped*
+    rather than deleted, so a message never silently loses half a sentence to a stray `<div>`. Nothing
+    script-bearing is ever copied, which makes the guarantee structural rather than a rule someone has to
+    remember. Verified against a live `<img onerror>` payload: it does not execute.
+
+    This is a backstop against a mistake, not a substitute for trusting the endpoint. It renders into
+    every signed-in user's portal, so return only messages you trust.
+  - **The endpoint must be https**, because the request carries the signed-in user's live `ns_t` so your
+    side can decide what that person should see. Point it only at something you control: anything named
+    there receives a working portal credential from every user who loads the portal.
+
+  A plain-text reply works, as does JSON with a `message`, `banner_message`, `text` or `banner` field — the
+  simplest endpoint someone can write should not be the unsupported one.
+
+  **Placement adapts to the width, because the space it wants is not always there.** Measured on a real
+  portal: above roughly 700px there is a ~30px strip between the top menu row and the button grid, and the
+  banner overlays it so nothing on the page moves. Below that the menu row wraps onto its own line and the
+  strip disappears entirely — so the banner takes a row of its own above the buttons instead of striking
+  through them. It re-measures on resize and switches back. HTML in the message is supported (links, bold,
+  italics) and is rebuilt from an allow-list rather than inserted as markup.
+
+## [0.2.44] — 2026-08-08
+
+### Changed
+
+- **The builder now shows targeted menu rules instead of only naming them.** A rule that varies by scope,
+  domain, account or app state still cannot be edited there — a flat tick-list cannot express targeting, and
+  flattening it would quietly narrow it to one audience — but "not editable here" on its own told you a rule
+  existed while hiding what it said, which is the worst of both: you could neither change it nor read it
+  without leaving the tab. Each rung is now listed read-only, per axis and per key.
+
+  An empty rung is named as `(nothing — an exemption)` rather than rendered blank, because an empty list is
+  the "everyone except these" idiom and a blank line there reads as a bug.
+
+## [0.2.43] — 2026-08-08
+
+### Documented
+
+- **§5a — a safe first deploy, when your portal is already live.** Most operators cannot experiment on
+  production, and this kit injects into the portal every one of their customers uses. Every lever needed to
+  start small already shipped; nobody had written the recipe. Restrict the deployment with `ALLOWED_DOMAINS`,
+  name your own account on the two delivery gates so nobody else is served a bundle at all, point the portal
+  at the Worker, then widen one axis at a time.
+
+  It also states plainly what your other users experience in the meantime, rather than leaving it to be
+  discovered: they still load the injected primary — it is public by design — and it is refused the gated
+  bundles and injects nothing. "Everyone loads a small script that does nothing" is the honest description,
+  not "nothing reaches them". If even that is unacceptable, the browser-local test harness changes no portal
+  configuration at all.
+
+## [0.2.42] — 2026-08-08
+
+### Added
+
+- **Menus can be targeted by account.** A new `users` axis alongside `domains`, `scopes` and `app`:
+  `{"users": {"someone@example.com": [...]}}`. It is the **most specific** axis, so naming an account beats
+  naming their domain — which is the only reason to name one, since it is how you carve an exception out of
+  a domain-wide rule. Same rules as every other axis: case-insensitive keys, `*` is a default that never
+  beats a rule naming you, an empty list exempts, and a key that is not a `user@domain` is a startup error
+  rather than a rule that silently never matches. It uses the same "is this an account" test as
+  `PORTAL_SUPERADMINS` and `PORTAL_FEATURES`, so three settings that name accounts cannot disagree about
+  what an account is.
+
+- **A secondary can be gated to named accounts too.** `PORTAL_SECONDARIES[].auth` now accepts any gate the
+  feature vocabulary accepts — a level, a list of levels, or `{"levels": [...], "users": [...]}` — not only
+  a level string. The gate resolver always supported it; this parse did not, so a *feature* could be granted
+  to named accounts and a *script* could not. That asymmetry was an accident, not a decision.
+
+### Fixed
+
+- **The public primary no longer carries each secondary's gate.** It shipped the `auth` value into an
+  unauthenticated script, which was merely unnecessary when a gate was a level like `reseller` and would
+  have published an account list now that a gate can name accounts. The client's only question is whether an
+  entry needs a token, so that is the only thing it receives: one boolean.
+
+## [0.2.41] — 2026-08-08
+
+### Documented
+
+- **`PORTAL_MENUS` never said what you may actually write on the app axis.** Its description offered
+  "targetable by … which app is active", which is true and unusable: the keys there are a fixed set — an app
+  name, `none` for a domain with no app active, and `*` for any state — and anything else is a startup error.
+  The description now names them, states the precedence (domain, then app, then `*`), and points at the Menus
+  tab. The **example** now demonstrates the app axis too, instead of the bare add-a-link case that nobody
+  needs help with. A test asserts the prose lists exactly the keys the parser accepts, so the two cannot
+  drift apart.
+
+## [0.2.40] — 2026-08-08
+
+### Fixed
+
+- **Opened outside the portal, the console no longer implies work is in progress.** Everything live on the
+  page — the checks, the observed-page block, the builder's menu read — is a round-trip to the portal window
+  that hosts it. Rendered anywhere else those messages go nowhere, and the page sat on **"Running…"** and
+  **"Asking the portal page…"** indefinitely: states that assert something is in flight when nothing is. It
+  now detects that it has no host and says so, the Run button is disabled with a reason instead of being
+  left to fail, and the builder still loads your configured menus — the half that needs no portal.
+
+## [0.2.39] — 2026-08-08
+
+### Fixed
+
+- **The menu builder's output would have deleted config you did not touch.** It emitted only the entries you
+  edited in that session, and `PORTAL_MENUS` is replaced wholesale — so pasting it removed every menu you had
+  not opened. It now **starts from the config your deployment is running** and always emits the complete
+  thing, with untouched menus carried through exactly as they are.
+
+### Added
+
+- **A menu whose config is targeted** (by domain, scope or app state) is now **passed through untouched** and
+  marked not-editable in the builder. A flat tick-list cannot express targeting, and flattening it to
+  whatever applies at one rung would quietly narrow it to a single audience.
+- **Entries you have already added are editable in place** — same row as a new one, rather than read-only
+  text above the editor.
+- **Hide an entry by name.** Ticking what is on the page cannot be the only route: the account menu relabels
+  itself by context (`My Account` in one, `Profile` in another), and other injected code can add entries this
+  page load never showed. Hides for labels that are not on this page stay visible, listed separately, rather
+  than disappearing from the builder.
+- **Reset to the running config** — discards the session's edits. Not "reset to empty": empty is a config
+  too, and a destructive one.
+- Each menu now says **who can normally see it**, including that the Management menu is not part of a stock
+  portal.
+
+## [0.2.38] — 2026-08-08
+
+### Fixed
+
+- **The footer version line could appear twice.** It attached to "the last paragraph in the footer", and a
+  vendor add-on appends its own version row *asynchronously* — so that rule resolved to the "Powered by" line
+  when the kit ran first and to the version row when it ran second. One rule, two destinations, decided by
+  load order.
+
+  It now targets **the row that carries a version**, identified by containing one rather than by position,
+  and waits for that row instead of settling for another paragraph. The guard is also self-healing: it
+  removes any stray copy and inserts exactly one, because the previous guard could only decline to add a
+  second — and a second appeared anyway. Verified against the exact sequence that produced it.
+
+## [0.2.37] — 2026-08-08
+
+### Added
+
+- **A Menus tab, with a builder.** Menu customization is the one capability that works with no other
+  integration, so it is where most deployments start — and its config is the most annoying to hand-write,
+  because `wrangler.jsonc` wants the JSON embedded as an escaped string.
+
+  **The builder reads the menus off the portal page you opened the console from.** You tick real entries
+  instead of typing labels and hoping they match — which matters because hiding a stock entry means naming
+  a label only your portal knows, so a drawn mock-up would be wrong for every deployment but the one it was
+  drawn against. Entries this kit added itself are excluded: offering to hide your own addition would
+  compose a config that contradicts itself, and the hide would not work anyway, since hides run before adds.
+
+  It emits both forms — readable JSON and the escaped `wrangler.jsonc` line — each copyable. The escaped one
+  is derived by stringifying the string rather than hand-escaped, so it cannot disagree with what the file
+  will parse.
+
+  **The result is checked by your deployment's own validator, not by a second copy of the rules.** The
+  builder round-trips the candidate to a new `GET /kit/menus/check` (gated on `kit.status`, reads no config,
+  writes nothing) and reports what `menuConfigError` actually says. The rules it enforces include a phishing
+  guard — no `{variable}` in a URL's host — and a browser-side copy of that is a copy that can drift.
+  "Could not check" is a third outcome, never rendered as valid.
+
+  The tab also shows **what your config does now**, per menu, server-rendered. A menu whose config is
+  targeted by domain, scope or app state says so: one rung is not "the config" when other users get others.
+
+### Fixed
+
+- **The console had no entry point on a portal without a Management menu.** That menu is found by its
+  toggle's label — it carries no id and no href — so the match misses a portal that renames it, one that
+  does not have it, and any scope the portal hides it from. In all three cases the bundle shipped, the
+  routes answered, and there was nothing to click. It now falls back to the account menu, which is found by
+  its sign-out entry plus the user's own profile link rather than by a name. Same gate either way, so which
+  menu carries the entry changes nothing about who can open it.
+
+### Documented
+
+- **Where the console entry actually appears, corrected.** `SETUP.md` told you to open it from
+  **Management → Super Portal Kit**. That menu is **not stock** — verified against a portal running no
+  add-ons at all, which has no Management menu — so on a default NetSapiens portal the entry appears at the
+  top of your **own name dropdown** instead. Same gate, same page. The old instruction was wrong for exactly
+  the reader least able to work out why.
+- **The `account` menu's entries change with the view, and a hide matches labels exactly.** A reseller sees
+  `My Account` and `Messages` while managing a domain, and `Profile` in the top-level view — one menu, not
+  two. Hiding one label does nothing in the view that uses the other, so list every label an entry goes by.
+  A hide that matches nothing changes nothing, which makes that safe advice.
+
+### Changed
+
+- **The builder says out loud that it sees one page, as one person.** Portal menus vary by page, by scope,
+  and by whether you are viewing a domain or your own profile — so the entries it lists may not be all there
+  are. Without saying so it quietly implies its list is complete, which is the kind of wrong a builder makes
+  confidently.
+- The console's Management entry is now marked internally, so anything walking that menu can tell this kit's
+  own entry from the portal's. Nothing visible changes.
+
+## [0.2.36] — 2026-08-08
+
+### Changed
+
+- **Setting both `PORTAL_APPS_HIDE` and `PORTAL_MENUS["apps"].hide` no longer breaks the deployment — the two
+  hide lists merge.** It used to be a fatal config error, and that error ran *before routing*: two overlapping
+  cosmetic settings returned 500 on every route except `/health` and the console, **including the injected
+  primary**, so the entire portal add-on went dark for every user. A hide list should not have the largest
+  blast radius of any setting in the kit.
+
+  The risk the error was guarding against was real — two places to look for one answer is how a menu ends up
+  wrong with nobody able to say why — but the remedy was aimed at the wrong thing. What actually addresses it
+  is making the answer visible: the console now shows the effective list with **each entry attributed to the
+  setting it came from**, and the setup checklist raises a warning (not a blocker) when both are set. A
+  precedence rule was the other candidate and is worse — it silently discards a setting somebody wrote, which
+  is the failure mode hardest to debug.
+
+  Hiding is idempotent and commutative, so a union is the only merge with no order dependence and no lost
+  information. A label named by both is hidden once, case-insensitively, and per-domain/per-scope/per-app
+  targeting on the `PORTAL_MENUS` half is unaffected.
+
+### Documented
+
+- **Hides are applied before adds**, and that order is now part of the documented contract rather than an
+  accident of two statements in one function. A hide names a *stock* entry, so it acts on the menu as the
+  portal shipped it — which is what keeps the two lists independent: a hide can never remove one of your own
+  additions, and neither list's meaning depends on the other. There is now a test asserting it.
+
+## [0.2.35] — 2026-08-08
+
+### Added
+
+- **A version line in the portal footer** — `<your brand> Portal Kit: <version>`, appended to the platform's
+  own version row with the same separator it already uses, so anyone looking at a portal can tell which
+  version of this kit is behind it without the footer growing a line. **Reseller scope and above get it linked** to that version's release notes; everyone
+  else gets the same words as plain text, with no link in the page at all rather than a disabled one. Gated by
+  the new registry key **`portal.versionLine`** (default `all`), and off in one line if you don't want it.
+  It reuses `PORTAL_RELEASE_NOTES_URL`, so setting that to empty removes the link from both the footer and the
+  console header at once.
+- **`FeatureDef.deliveredBy`** — a feature now *declares* which injected bundle carries it, rather than having
+  it inferred from a `me.` prefix in its name. Two features already needed the self bundle's reach without
+  being about the reader's own account; the second one is what made the inference untenable. `SETUP.md` now
+  says which those two are, because turning `portal.self` off also turns them off — the one surprise in that
+  switch.
+
+- **The Backend tab now says what the portal page actually loaded**, under the configured addresses: whether
+  the vendor hand-off is really on the page, whether this kit is what put it there or found it already
+  present, and which hosts the page's scripts come from. Chain loading was never unverifiable — it was
+  unverifiable *from inside the sandboxed iframe*, and the console's own bundle runs in the portal page,
+  where it can simply look. It costs no network call and fills itself on open.
+
+### Changed
+
+- **"Status Console" is now "Integration Console"**, in the modal frame, the page heading and the browser tab.
+  The name was accurate for a page that reported configuration; it is about to describe cross-system matching
+  too, and renaming it before that arrives is cheaper than renaming it after.
+
+## [0.2.34] — 2026-08-08
+
+### Added
+
+- **The version number in the console header links to that version's release notes**, so "what am I running"
+  and "what changed, and am I behind" are one click apart. It points at the release list anchored to your
+  version rather than the single-release page — the list also carries a version sidebar and a compare control,
+  so it answers the second question too, and if the anchor ever stops matching you still land somewhere that
+  says which version it is showing.
+- **`PORTAL_RELEASE_NOTES_URL`** to override that, with `{version}` substituted anywhere it appears — for a
+  fork, or your own documentation. Three states, the same shape `PORTAL_HANDOFF_URL` uses: absent takes the
+  default, a value is yours, and **present-but-empty means never link at all**, which is how you keep the
+  version visible while switching the link off.
+
+## [0.2.33] — 2026-08-08
+
+### Added
+
+- The status console's title now reads **"… Portal Kit - Status Console"** in the modal frame, the page
+  heading and the browser tab, which previously carried three different wordings for one thing.
+- **A clear button in the Config filter**, so you no longer select-and-delete to get back to the full list.
+  Escape clears it too. Drawn rather than left to the browser: `type="search"` gives some browsers a clear
+  button and others nothing, which would mean the control existed for some readers and not others.
+- **Every modal the kit opens now has an accessible name.** The iframe had none, so a screen reader announced
+  it as "frame" — this covers the call-flow diagrams as well as the console.
+
+- **A copy-ready `wrangler.jsonc` line for the value a setting holds now**, beside the readable form. A var's
+  value is a JSON *string*, so an object-valued setting has to be embedded with every quote escaped — and the
+  console was showing you a pretty-printed value and a generic escaped *example*, which is useful right up
+  until you have a real value. After that it left you hand-escaping your own edit, which is where a stray
+  quote silently breaks a deploy.
+- **A first-five-minutes section in `SETUP.md`**, which did not exist before: name a superadmin, check
+  `/health` reports the version you deployed, then open the console and work through the badge, the setup
+  issues, anything reading *inert*, the addresses and the checks. Plus what the console cannot tell you —
+  serving the injected primary and being loaded by a portal are different facts.
+
+### Changed
+
+- The vendor hand-off card no longer claims more than it can see. Declaring no hand-off means *this Worker*
+  chain-loads nothing — the vendor router may still be loaded by a static loader or by other code that is not
+  this kit, which is a normal arrangement. The card said "this deployment is the only script in the chain",
+  which contradicted its own "unverifiable from here" marking.
+- `PORTAL_SUPERADMINS` is now listed among the settings you actually need for a portal deployment, rather than
+  under gating. With nobody named, the status console admits nobody — including you.
+- `PORTAL_APPS_HIDE` is grouped with the other menu setting instead of with app access. It was filed by where
+  it originated; what it does is hide menu entries, and setting it *and* `PORTAL_MENUS`' apps hide list is an
+  error you can only notice if the two are adjacent.
+- Both menu settings now say what "configuration error" actually costs here: every route except `/health` and
+  the console returns 500 until it is fixed, including the injected primary — so the whole add-on goes dark,
+  not just the menus.
+- `PORTAL_APPS_HIDE` is no longer described as "legacy". It is older and terser and fully supported; the
+  release that introduced `PORTAL_MENUS` said so explicitly. Its one real advantage is the comma-separated
+  form, which needs no escaping — its JSON form has no advantage over `PORTAL_MENUS` at all.
+- The `SETUP.md` "not sure if you're done?" instruction no longer points at `/` unconditionally: that is a
+  deliberate 404 in portal backend mode.
+
+## [0.2.32] — 2026-08-08
+
+### Added
+
+- **Every card on the Backend tab now explains why it exists**, the same treatment the Integrations cards got.
+  Authentication covers the two modes and, more usefully, what does *not* change between them: a valid token
+  always yields a policy-gated principal, so there is no authenticated-but-ungated path. The domain lists
+  explain why there are two and when each is the right one. The cache namespace explains what actually goes
+  wrong without a distinct value. Injection explains why the first script is public and neutral while the rest
+  are gated per role — and why that lets a feature's bytes be withheld rather than merely hidden. Rate limiting
+  explains what it protects and why the binding is optional but worth having.
+- The longer Integrations cards gained subheadings too, so a card with five paragraphs reads as sections
+  rather than as a wall.
+
+### Changed
+
+- **Backend cards are full width, one per row**, now that each carries several paragraphs — and they show
+  their requirements inline for the same reason, since at that width the settings list is shorter than the
+  control that would hide it.
+- **The explanatory prose stops shouting.** It had been using ALL-CAPS for emphasis — and in several places to
+  do a heading's job. Long cards now use small subheadings, and the remaining emphasis is carried by the
+  sentences. A test guards against the habit returning, with an allowlist for genuine acronyms and literal
+  setting names.
+
+## [0.2.31] — 2026-08-08
+
+### Added
+
+- **An Addresses block on the Backend tab.** The console reported which settings were *set* and never what
+  they compose into, so an operator had to assemble scheme + hostname + basename + `.js` in their head to get
+  the one string they actually paste into a portal. It now shows that string, the vendor hand-off it
+  chain-loads, where the gated bundles live, and the change-event callback origin — each marked *serves* or
+  *calls*, and marked **unverifiable from here** where this Worker genuinely cannot confirm it. Serving the
+  injected primary says nothing about whether a portal is loading it, and the page says so rather than
+  implying otherwise.
+- Setting links show a short current value inline where there is one, so a card answers "what is it set to"
+  without a trip to the Config tab. Never for secrets, and long values are omitted rather than truncated.
+
+### Changed
+
+- **The Deployment tab is now "Backend", and sits after Config.** The old name read as a noun about the act
+  of deploying; the tab is about this Worker — the backend half of the injected add-on. Its position now
+  matches its value: worth keeping, least often needed.
+- **Cloudflare Access and the service-token exposure gate are no longer shown at all on a portal-backend
+  deployment** — not dimmed, not present, whether or not they happen to be configured. Neither can do
+  anything there: every caller supplies their own `ns_t`, no stored token is ever read, and an Access gate
+  would refuse the plain `<script src>` that loads the injected primary. Their settings are gone from the
+  Config tab for the same reason. **A standalone deployment is unaffected** and still shows both, where
+  Access is the only thing in front of a stored token's full NetSapiens scope.
+- **`NS_API_TOKEN` and `NS_API_KEY` now explain themselves on both rows, and the difference between them.**
+  They are mechanically the same kind of value — both are NetSapiens bearer tokens, sent as-is — so the names
+  imply a technical distinction that does not exist while hiding the one that does. `NS_API_TOKEN` is the
+  standalone deployment's read credential and is never read in portal mode; `NS_API_KEY` is the background
+  service identity, used where work runs with no signed-in caller. There is deliberately no fallback between
+  them, and `NS_API_KEY`'s row now says outright that setting `NS_API_TOKEN` will not satisfy it.
+- The background-identity card names the four operations that cannot run without it — creating subscriptions,
+  renewing them, removing them when the feature is switched off, and the NetSapiens writes the event handler
+  makes (adding and removing a user's softphone device, and deactivating an app record on deletion) — plus why
+  a stored credential is the only way to do any of them: background work has no session to borrow.
+
+## [0.2.30] — 2026-08-08
+
+### Added
+
+- **Portal menu customization now explains itself properly**, and sits first on the Features tab. It is one
+  of the few capabilities here that is useful on its own — it needs no other integration — and it had a
+  one-line description. The card now covers which three menus can be targeted and why they are addressed by name rather
+  than by CSS selector, the three conditional axes (domain, scope, and whether your app is active), the shape
+  of the value, the fact that setting both this and the older `PORTAL_APPS_HIDE` is a loud error rather than a
+  merge, and the one thing it is not: hiding a menu entry is cosmetic, and must never be used to lock a
+  feature.
+- Feature cards can carry that kind of explanation; ones that do span the full width and sort first, so the
+  capability someone came for is the first thing on the tab.
+
+### Changed
+
+- **Portal menu customization is no longer filed as self-service.** It is operator configuration applied to
+  every user — nothing about it concerns the reader's own account — so describing it as self-service sent an
+  operator looking for a per-user setting that does not exist.
+- An integration's parts start expanded while only one integration has any, since a collapsed group nobody
+  knows exists is undiscoverable. They collapse and behave as an accordion once a second integration has parts.
+- Prose may contain inline `code`, which was previously rendering as literal backtick characters.
+
+## [0.2.29] — 2026-08-08
+
+### Changed
+
+- **The single-sign-on card now says what it does NOT do.** Naming the SSO service makes this portal *claim*
+  SSO — it does not make single sign-on function, and an operator who set it expecting otherwise would have a
+  portal confidently telling users about a sign-in method that fails for them. The card now spells out the
+  three separate things that must all be true, and which one this kit is responsible for: a separate SSO
+  Worker deployment that this kit cannot see; enablement on the app platform's side by their support, pointed
+  at that Worker, possibly as a licensed capability, which nothing here can verify; and the portal-side
+  surface — indicators, settings and user lifecycle handling — which is the part this setting switches on.
+  The `RINGOTEL_SSO_SERVICE` and `SSO_AUTO_ACTIVATE` rows on the Config tab carry the same warning, since a
+  reader who arrives there by filtering never sees the card.
+- **The Config tab's sections collapse, and it opens as an index.** 64 settings across 12 sections was too
+  long to be useful flat. Opening one section closes the others; the filter opens every section it matched
+  and restores the index when cleared; and following a setting link from another tab opens the section it
+  lands in rather than scrolling to a closed box.
+- **"Back to top" goes to the top of the page**, not the top of the panel. The header and tab bar sit above
+  every panel, so the previous behaviour left them off-screen — which defeated the purpose, since the usual
+  reason to go back up is to switch tabs.
+
+## [0.2.28] — 2026-08-08
+
+### Changed
+
+- **An integration's parts are collapsed by default, with their states on the toggle.** Now that every card
+  carries several paragraphs, an all-expanded tab was thousands of words before the second integration. The
+  toggle shows how many parts there are and how many are on, inert or off — which is what you scan an
+  integration for, so collapsing costs nothing you were using; the prose is what you open it for. Built with
+  `<details>`, so it behaves identically with JavaScript unavailable.
+- **Requirements and settings are always visible on the full-width cards**, rather than behind a disclosure.
+  At that width the settings list is one or two wrapped lines — shorter than the control that hid it — and
+  what a card is *missing* is the actionable part, so a card reading INERT now says what is absent without
+  being asked. The three-across cards on the Deployment tab keep their disclosure, where the same list wraps
+  to five or six lines and hiding it still earns its place.
+- Every card carries a small "top" control, since a card with prose can now be taller than the screen on its
+  own.
+- The two unwired integrations no longer repeat "nothing to configure" three times on one card — their
+  description, their prose and a note all said it, and the note was the least informative of the three.
+
+## [0.2.27] — 2026-08-08
+
+### Added
+
+- **Each integration now explains why it exists**, not just what it is. Every card on the Integrations tab
+  carries a few paragraphs above its settings covering the two questions a one-line description cannot: why
+  this exists at all, and — the one nothing here addressed before — **why there are several options**. A
+  reader looking at three independent exclusion mechanisms, or two ways to supply one credential, cannot tell
+  from the names whether those are alternatives, layers, or historical accident; two of those three readings
+  lead to configuring it wrong. So the app integration explains what a read-only connection buys and why its
+  eight parts are drawn underneath it rather than beside it; the eligibility rules explain why not every
+  extension is a person and why three overlapping mechanisms are needed rather than one; the write rail
+  explains why it is separate from the feature gate that already decides who may write, and why it is the one
+  setting in the kit that refuses everything when left empty; the change-event subsystem explains what drifts
+  without it; and the background identity explains why it is deliberately not the same credential as the
+  read token, and why there are two ways to provide it.
+- The unwired integrations now say what they are **intended** to do and that they are unofficial, rather than
+  only that they are absent.
+
+### Changed
+
+- Integration prose may contain a link, and the Integrations tab links out to the third-party products it
+  names. Links are restricted to `https://` by a whitelist, escaped on both halves, and always opened with
+  `noopener noreferrer` — a page embedded in a portal must not hand its opener to a new tab.
+
+## [0.2.26] — 2026-08-08
+
+### Changed
+
+- **An integration's parts are laid out full width, one per row**, instead of three across. They are aspects
+  of one thing in a deliberate order, not a grid of peers to scan, and three-across made them read as
+  unrelated boxes. It also resolves the expansion complaint: at full width a card's settings list fits on one
+  or two lines rather than five, so opening one grows it by about a line.
+
+## [0.2.25] — 2026-08-08
+
+### Added
+
+- **Worked examples of every gate shape** on the Permissions tab. The two emitted `PORTAL_FEATURES` blocks
+  are derived from your deployment, so they can only show you what you are already doing — three of the four
+  gate shapes stay invisible on a typical config, including the one nobody finds by accident (a level plus
+  named accounts). Every example is checked against this deployment's own validator before it is shown.
+- **Per-cell override marks on the permissions matrix.** A ring around the mark shows which *cell* your
+  configuration changed, and in which direction — solid where it granted access, dashed where it took access
+  away. The row badge only said the feature was configured; this says what the configuration did. A gating
+  change on a feature that cannot run either way is deliberately not marked, since it crosses no boundary you
+  can act on.
+- **An audience divider on the matrix**, so administrative features and self-service ones are visibly two
+  groups. "App sign-in details on profile" and "My app sign-in details" are one letter of intent apart, and
+  the names alone were not carrying it. Rows are now sorted by audience rather than happening to be adjacent.
+- **Jump links on the long tabs** (Config, Features, Integrations), with a back-to-top on each heading.
+  Config is 64 settings across 12 sections, and nothing on screen said what the sections were once you had
+  scrolled past the first.
+- **A way back after jumping to a setting.** Following a setting link from a card crosses tabs, and there is
+  no browser history to return through, so there is now an explicit "back to …" control that restores the
+  card you came from, not just the tab.
+- **Setting descriptions on hover.** Every setting link carries its one-line description as a tooltip, so
+  the common question — what is this setting? — no longer requires leaving the card at all.
+
+### Changed
+
+- **The "Named in gate" column now appears only when some gate actually names an account.** It was
+  introduced in 0.2.24 to show that being named directly is not a bypass, but `users:` grants are the
+  exception rather than the rule, so on most deployments it was a column of dashes — the same
+  nothing-to-say row that was removed from the feature cards in the same release. Same rule, applied
+  consistently.
+- The `PORTAL_FEATURES` block on the Permissions tab opens by default when you have overrides configured.
+  It was there before, collapsed, and therefore easy to miss.
+
+## [0.2.24] — 2026-08-08
+
+### Added
+
+- **A Permissions tab on the status console** — the matrix the rest of the console was working around.
+  One row per feature, one column per NetSapiens scope, plus two columns for the account-based axes
+  (an account listed in `PORTAL_SUPERADMINS`, and an account a feature's own gate names directly). Each
+  cell answers three questions at once, in the order the Worker actually applies them: does the gate admit
+  this person, do they receive the bundle that carries the feature, and can the feature run as configured.
+  "Allowed" and "works" are different answers, and the marks distinguish them.
+  - A **scope picker** highlights one column and summarises it in a sentence. It re-reads the verdicts
+    already rendered rather than re-deciding anything, so it cannot disagree with the table above it.
+  - Where a gate has an `allowedLevels` floor, the levels it puts out of reach render as **unavailable**
+    rather than merely un-granted — otherwise the rule is something you learn by trying it and getting a
+    startup error.
+- **Copy-pasteable `PORTAL_FEATURES`.** The console still writes nothing (a Worker cannot change its own
+  environment), but it can hand you the exact text, in two forms with their consequences stated:
+  *overrides only* (round-trips, keeps built-in defaults for everything else — the one to prefer) and
+  *fully explicit* (unambiguous, but pins every feature, so a later release that changes a default will
+  not reach you). Both are validated against this deployment's own parser before being offered.
+- **A Deployment tab**, so features, external integrations, and how-the-Worker-runs are three things
+  rather than two. Authentication, the Access gate, the exposure gate, injection, menus, branding, domain
+  limits, cache namespace, device enrichment and rate limiting live there.
+- **Jump-to-setting.** Every setting named on a feature or integration card is now a link that switches to
+  the Config tab and highlights that row, instead of a bare name to memorise and go find.
+
+### Changed
+
+- **Cloudflare Access is now ignored in portal-backend mode** rather than honoured. It could never work
+  there: the Manager Portal loads the injected primary with a plain `<script src>`, which cannot complete
+  an Access login, so setting `ACCESS_AUD` + `ACCESS_TEAM_DOMAIN` on a portal deployment would take the
+  whole injection down — while there is nothing for it to protect, since portal mode never reads a stored
+  `NS_API_TOKEN` (every caller supplies their own `ns_t`, and that is the gate). The setting is now inert
+  there, in one place, so every consumer inherits it; the console reports it as *configured but ignored
+  here, and why*, and the setup checklist no longer asks you to "finish" configuring it. **Unchanged for
+  standalone deployments**, where Access remains required and is the only thing in front of a stored
+  token.
+- **Integrations now own their own parts.** Activation rules, the write rail, self-service app access, SSO,
+  change events, offboarding and the background service identity are shown nested under the app
+  integration they belong to, instead of as sibling cards with no indication they are related. "Everything
+  below here is off because the API key is unset" is now one visible fact rather than nine repetitions.
+- **The Features tab is split by audience.** Administrative features (what you do to other people's
+  accounts) are separated from self-service ones (what a signed-in user sees about their own account),
+  because the second kind is about *your users*, not about you.
+- **The word "Gate" is gone from the interface**, along with the per-card "you pass this gate" row. That
+  row was true on almost every card for anyone who can open the console at all, so it carried no
+  information; a card now says *who* it is available to, and only mentions your own access when the answer
+  is no. Who-can-do-what lives on the Permissions tab.
+- **The Config tab is grouped, ordered and annotated.** Sections by area rather than one flat list of 64;
+  ordered by consequence within each; a real default value shown inline where one exists (distinct from
+  what happens when a setting is absent, which is a different fact); JSON values pretty-printed, falling
+  back to the raw string when they do not parse, because a malformed value is when you most need to see it;
+  a literal example of the line to type; and settings that are behind an unconfigured gate, or that cannot
+  apply in this deployment's mode, dimmed with the reason stated. The "why can't I edit this here"
+  explanation is now stated once at the top of the tab instead of on all 64 rows.
+- The Overview tab drops two rows that could only ever say one thing, relabels "Access granted by" (the
+  value is a rule, not a person), and carries authorship and licence information.
+
+## [0.2.23] — 2026-08-07
+
+### Added
+
+- **The Super Portal Kit status console.** A read-only page, reached from a **"Super Portal Kit"** entry
+  in the Manager Portal's Management dropdown, that reports how this deployment is actually configured:
+  which features are on, off, or gated-but-unmet; which subsystems (Ringotel, event subscriptions, the
+  Access gate, and the rest) are wired up; every setting this deployment reads, its current state, and
+  what it affects; and a set of live checks (NetSapiens reachability, Ringotel reachability,
+  event-subscription state, and more), with a **Run Checks Again** button to re-run them any time.
+  Secrets are reported by **presence only** — never a value, a prefix, or a fingerprint of one; the page
+  can say `NS_API_TOKEN` is set without ever being able to say what it's set to.
+
+  Served by two new routes: `GET /kit/status` (the data) and `GET /kit/spk.js` (the gated bundle that
+  opens it). Both are gated by a new feature key, **`kit.status`**, which defaults to `superadmin` — so
+  an unset `PORTAL_SUPERADMINS` means nobody sees this page, not everybody. Widening it via
+  `PORTAL_FEATURES` is deliberately floored: it may name no level broader than `reseller`, refused as a
+  configuration error at deploy time if you try. That floor is only half the gate — independently, at
+  request time, the console additionally requires reseller scope or a listed superadmin account, because
+  the page can report other customers' domain names. Naming a domain-locked account under `users:` does
+  not open it.
+
+  The console is served ahead of most of this Worker's own config validators, on purpose: a
+  misconfigured deployment can still open this page and read why, instead of only getting an opaque
+  error from the route it actually needed.
+
+### Changed
+
+- **The Checks tab now runs its live checks once, automatically, the first time you open the tab in a
+  given console session** — not on every load of the console, and not again if you switch away and back.
+  Opening the console at all already requires the superadmin gate, so the original on-demand rationale
+  (checks cost upstream calls) still holds for the console as a whole; asking a second time, for the tab
+  itself, was friction without added consent. The **Run Checks** button becomes **Run Checks Again** once
+  results exist, and re-runs the same checks with the same per-row cost disclosure at any time.
+
+- **The console's own refusal now explains itself when nobody at all is let in.** If `kit.status` is
+  switched off, or `PORTAL_SUPERADMINS` is unset so the default gate admits no one, the 403 says which
+  setting to fix instead of the same bare "Not authorized" a merely-unqualified caller would also get.
+
+- **A routine "not entitled" refusal of the console bundle is now a quiet 204, not a 403.** `GET
+  /kit/spk.js` is fetched speculatively on every page load, for every signed-in user, so a non-superadmin
+  being turned away is the normal, permanent state — not something worth a loud error status. It now
+  answers with an empty `204 No Content` instead. A misconfiguration that stops *anyone at all* from
+  opening the console — `kit.status` switched off, or no `PORTAL_SUPERADMINS` named — is unaffected and
+  still answers `403` naming the setting to fix, and `GET /kit/status` (the page itself, only ever
+  requested after the menu entry was already shown) keeps its `403` and message for every refusal.
+
+### Fixed
+
+- **The Checks tab's intro no longer contradicts the results below it.** A live run happens entirely in
+  the browser — results are injected into the tab without a new page load — so the "Nothing has been run
+  yet" intro used to sit there, unchanged and now false, directly above a completed run's rows. It now
+  updates in place to describe results being present, tied to the same rendering the initial page uses so
+  the two cannot drift apart again.
+- **The event-subscriptions check no longer says "not armed" twice in one sentence.** One of its inputs
+  already reads as a complete "not armed" sentence; the check was unconditionally prefixing its own copy
+  of the same phrase onto it.
+- **The service-identity check no longer reports an unused credential as "ready to use."** For an API-key
+  identity this check makes no network call at all — its own stated cost says so — so a pass only ever
+  proved the key was configured, never that NetSapiens would accept it. The wording now says exactly
+  that, and keeps the admin-credential path (which does make a real call) visibly more verified than the
+  API-key path.
+
+## [0.2.22] — 2026-08-07
+
+### Fixed
+
+- **A user's extra email addresses are no longer destroyed by the identity sync.** The app lets a user
+  add a second Email row to their profile, which turns that field into a list. The sync read the field
+  as a single value, so a list read as *empty* — the stored address never matched the one in the phone
+  system, and every user-change event rewrote it as a single value, discarding the extra addresses. The
+  next event did it again.
+
+  The sync now compares against the **first** address, which is the one the phone system owns and the
+  one the app shows as the main Email. A matching address is a no-op, so a user who keeps extra
+  addresses keeps them. Activation, deactivation and password reset use the same rule and no longer
+  rewrite an address that already matches.
+
+  **Removing an address is deliberately not symmetric**: when the phone system has no address for a
+  user, every stored value is cleared, not just the first. Leaving a previous occupant's address behind
+  is what the removal exists to prevent — app credentials are mailed to the stored address.
+
+  This cannot be made lossless: the API rejects a list outright, so only the app can create one and no
+  call can put a discarded address back. When a genuine change does collapse a list, the sync log line
+  reports how many values were stored, so the loss is visible rather than silent.
+
+  **Scope:** this covers the writes this service makes. If you also run a sign-in repair service against
+  the same directory, it writes the address on every login and is not yet covered.
+
 ## [0.2.21] — 2026-08-07
 
 ### Added

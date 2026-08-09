@@ -7,9 +7,10 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveFlow, NsApiError, type Snapshot } from '@dszp/netsapiens-lib';
+import { resolveFlow, fetchDomainSnapshot, NsClient, NsApiError, can, toPrincipal, type Snapshot } from '@dszp/netsapiens-lib';
 import { indexRefreshLockKey, orgParamsKey, scopeOf } from './ringotel.js';
-import { authorisesDeactivation, emailForWrite, nsEventLimitDecision, nsEventsMissingRingotelKey, readNsUser, processNsEventUsers } from './worker.js';
+import { authorisesDeactivation, emailForWrite, nsEventLimitDecision, nsEventsMissingRingotelKey, readNsUser, processNsEventUsers, ROUTES } from './worker.js';
+import { resolveFeaturePolicies } from './features.js';
 import type { Principal } from '@dszp/netsapiens-lib';
 import type { NsEventsConfig } from './nsEvents.js';
 
@@ -184,12 +185,29 @@ const ok = (c: boolean, m: string) => {
   const ctx = { waitUntil() {}, passThroughOnException() {} } as any;
   const kind = raw.callqueues?.length ? 'queue' : 'user';
   const ref = raw.callqueues?.length ? String(raw.callqueues[0]!.callqueue) : String(raw.users?.[0]?.user ?? '');
-  // Expected graph = resolve the snapshot as-is (embedded attendantDetailsByUser + per-AA dialplans are
-  // what the Worker's fetchDomainSnapshot reconstructs). Only inject the sidecar attendants/ dir when a
-  // fixture actually ships one (legacy shape); modern backups embed it.
-  const expected = JSON.parse(
-    JSON.stringify(resolveFlow(Object.keys(aaByExt).length ? ({ ...raw, attendantDetails: aaByExt } as any) : (raw as any), { kind, ref } as any)),
+  // Expected graph = the SAME assembly the Worker performs, resolved directly. Hold the input constant and
+  // vary only the delivery path, because that is what this assertion is for: it proves the HTTP route does
+  // not alter the graph, not that two different snapshot assemblies agree.
+  //
+  // It used to resolve the raw fixture object instead, and that compared two things at once. The graph
+  // builder is TRAVERSAL-ORDER DEPENDENT by design -- `Builder.edge()` collapses an edge whose target is
+  // an ancestor on the DFS path into a `↩` reference leaf -- so an input assembled in a different order
+  // yields a different, equally valid edge set. The raw fixture and `fetchDomainSnapshot`'s reassembly
+  // (embedded attendantDetailsByUser + each AA's own {domain}_{ext} dialplan, in the API's order) differ
+  // exactly that way, which produced a two-edge mismatch that read as a route bug and was recorded for
+  // months as "fixture drift" against a library commit that had nothing to do with it.
+  //
+  // ⚠️ THE COST, AND IT IS DELIBERATE: this no longer cross-checks the assembly, so it no longer surfaces
+  // that ordering property at all. The property is real and undecided -- see
+  // `tools/roadmaps/netsapiens-lib.md` → "the flow graph depends on how the snapshot ARRIVED". The
+  // assembly's own coverage belongs in the library, against a known fixture, not here where it fails
+  // looking like a Worker fault.
+  const expectedSnap = await fetchDomainSnapshot(
+    new NsClient({ server: 'mock.local', token: mkTok({ user_scope: 'Reseller' }) }),
+    domain,
+    { includeDialrules: true },
   );
+  const expected = JSON.parse(JSON.stringify(resolveFlow(expectedSnap as any, { kind, ref } as any)));
   const stripMmd = (g: any) => {
     const { __mermaid, ...rest } = g;
     return rest;
@@ -1189,6 +1207,238 @@ const ok = (c: boolean, m: string) => {
     ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: '   ' }, 3) === true, '[nsEventsMissingRingotelKey] armed batch, whitespace-only key → true (matches the trim() the config parser itself uses)');
     ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: 'rt_live_abc' }, 3) === false, '[nsEventsMissingRingotelKey] armed batch, real key present → false');
     ok(nsEventsMissingRingotelKey({ RINGOTEL_API_KEY: undefined }, 0) === false, '[nsEventsMissingRingotelKey] no key, but an EMPTY batch → false, nothing is about to fail so nothing to warn about');
+  }
+
+  // ================= /kit/status — the operator console document =================
+  // The gate is `superadmin` by default, so a RESELLER must be refused: that is the whole security
+  // property. `boss@…` is a superadmin here; the reseller token's sub is not.
+  //
+  // Read a body as JSON WITHOUT killing the run when the response is not JSON. `await r.json()` right
+  // after a status assertion is a trap: when that assertion fails, the body is the HTML success page,
+  // `json()` throws SyntaxError, the process dies on an unhandled rejection, and ~50 later assertions
+  // never run and no summary prints — the report is truncated exactly when someone is reading it to find
+  // out what broke. Observed on the requireFleetRead and requireAccess mutations.
+  const jbody = async (r: Response): Promise<any> => {
+    const t = await r.text();
+    try { return JSON.parse(t); } catch { return { __notJson: t.slice(0, 120) }; }
+  };
+  {
+    const kEnv = {
+      NS_SERVER: 'mock.local', PORTAL_MODE: '1', NS_PORTAL_ISS: ISS,
+      ALLOWED_ORIGINS: 'https://portal.example.com',
+      PORTAL_SUPERADMINS: 'boss@mock.local', PORTAL_HANDOFF_URL: '',
+    };
+    const bossTok = mkTok({ user_scope: 'Super User', sub: 'boss@mock.local', user: 'boss', domain: 'mock.local' });
+    const resTok = mkTok({ user_scope: 'Reseller' });
+    const kcall = (p: string, tok: string, e: any = kEnv) =>
+      worker.fetch(new Request(`https://w.dev${p}`, { headers: { Authorization: `Bearer ${tok}`, Origin: 'https://portal.example.com' } }), e as any, ctx);
+
+    const rh = await kcall('/kit/status', bossTok);
+    ok(rh.status === 200, '[spk] superadmin GET /kit/status → 200');
+    ok((rh.headers.get('content-type') || '').includes('text/html'), '[spk] default format is HTML for the iframe');
+    ok((rh.headers.get('Cache-Control') || '') === 'no-store', '[spk] the config document is never cached');
+    ok((rh.headers.get('Vary') || '').includes('Authorization'), '[spk] Vary carries Authorization');
+    const html = await rh.text();
+    // Pin the console's own control, not the product name: the first disjunct was DEAD (productName({}) is
+    // "NS Portal Kit") and the second held from <title> alone, so this passed on any page with that title.
+    ok(html.includes('id="spkRunChecks"') && html.includes('id="spkpanel-config"'),
+      '[spk] the page renders — its own Checks button and Config panel are present, not just a title');
+
+    const rj = await kcall('/kit/status?format=json', bossTok);
+    ok(rj.status === 200, '[spk] format=json → 200');
+    const doc = await jbody(rj);
+    ok(!!doc.deployment && Array.isArray(doc.features) && Array.isArray(doc.settings),
+      '[spk] the JSON document carries deployment + features + settings');
+    ok(doc.probes === null, '[spk] no probes unless asked');
+    ok(doc.features.some((f: any) => f.key === 'kit.status'), '[spk] the console describes itself');
+
+    // /kit/status stays 403 no matter what — it is only ever requested by someone who already got the
+    // bundle and clicked the menu item, so a denial there is genuinely actionable and must stay loud.
+    // This also proves the 204 below does NOT leak across routes: same principal, same kEnv (someone —
+    // boss@mock.local — IS admitted), yet /kit/status still refuses loudly.
+    ok((await kcall('/kit/status', resTok)).status === 403,
+      '[spk] a RESELLER is refused under the default superadmin gate');
+    // /kit/spk.js, by contrast, is fetched speculatively on EVERY page load for EVERY authenticated
+    // user — a non-superadmin being refused here is the steady state, not an incident. kEnv names a
+    // superadmin (boss@mock.local), this reseller just isn't them (kitStatusLockedReason(env) is null,
+    // the policy admits someone), so the routine case: 204, no body, not the loud 403 /kit/status kept
+    // one line up.
+    {
+      const rBundle = await kcall('/kit/spk.js', resTok);
+      ok(rBundle.status === 204, '[spk] the bundle route answers a routine not-entitled refusal with a quiet 204, not 403');
+      ok((await rBundle.text()) === '', '[spk] and the 204 body is empty');
+    }
+
+    // kEnv DOES name a superadmin (boss@mock.local) — this reseller just isn't them. Someone IS
+    // admitted, so the 403 must stay terse: appending a reason here would tell an unauthorized caller
+    // who else passes, which is exactly the leak kitStatusLockedReason is designed to avoid.
+    {
+      const resBody = await jbody(await kcall('/kit/status', resTok));
+      ok(resBody.error === 'Not authorized: kit.status',
+        `[spk] admits-someone refusal stays terse, no reason appended (got: ${resBody.error})`);
+      ok(!/PORTAL_SUPERADMINS/.test(resBody.error || ''),
+        '[spk] and in particular does not name PORTAL_SUPERADMINS — that would leak who is on the list');
+    }
+
+    // No superadmin configured AT ALL ⇒ the default gate admits nobody, not just "not this caller". The
+    // refusal must say so and name PORTAL_SUPERADMINS as the setting to fix — the actionable case this
+    // whole helper exists for (found live: an operator deployed to dev with the var unset and got a bare
+    // 403 with no idea why). Actionable ⇒ kitStatusLockedReason(env) is non-null ⇒ BOTH routes stay a
+    // loud 403 — this is the one case where /kit/spk.js does NOT get the quiet-204 treatment above.
+    {
+      const noSupersEnv = { ...kEnv, PORTAL_SUPERADMINS: '' };
+      const r = await kcall('/kit/status', resTok, noSupersEnv);
+      ok(r.status === 403, '[spk] no superadmin configured → still 403');
+      const body = await jbody(r);
+      ok(/PORTAL_SUPERADMINS/.test(body.error || ''),
+        `[spk] and the refusal now names PORTAL_SUPERADMINS as the setting to fix (got: ${body.error})`);
+      const rBundle = await kcall('/kit/spk.js', resTok, noSupersEnv);
+      ok(rBundle.status === 403, '[spk] the bundle route shares the same actionable refusal — no superadmin');
+      const bundleBody = await jbody(rBundle);
+      ok(/PORTAL_SUPERADMINS/.test(bundleBody.error || ''),
+        '[spk] /kit/spk.js names PORTAL_SUPERADMINS too — both routes share the one check');
+    }
+
+    // The SECOND gate: a `users:` grant names an account at any scope, so the floor alone cannot keep a
+    // domain-locked principal out. requireFleetRead must refuse them even though the policy admits them.
+    // This is Fable's 2026-08-07 MEDIUM finding — without it, one customer sees the whole fleet's domains.
+    {
+      const omTok = mkTok({ user_scope: 'Office Manager', sub: 'om@customer.example', user: 'om', domain: 'customer.example' });
+      const grantEnv = { ...kEnv, PORTAL_FEATURES: JSON.stringify({ 'kit.status': { users: ['om@customer.example'] } }) };
+      const pol = resolveFeaturePolicies(grantEnv);
+      ok(can(toPrincipal({ user: 'om', domain: 'customer.example', sub: 'om@customer.example', user_scope: 'Office Manager' } as any), 'kit.status', pol),
+        '[spk] the users: grant DOES admit the named account at the policy layer (so the 403 below is the second gate, not the first)');
+      const r = await kcall('/kit/status', omTok, grantEnv);
+      ok(r.status === 403, '[spk] a domain-locked account named in users: is STILL refused (requireFleetRead)');
+      // Refusals are always JSON (the catch-block shape), regardless of ?format. Anchor on "own domain"
+      // specifically, not "reseller"/"superadmin" too — the SUCCESS page legitimately contains both
+      // words (kit.status's own feature card renders its gate as "resellers and above" / names
+      // superadmins), so an OR across all three would pass against either outcome and prove nothing.
+      const body = await jbody(r);
+      ok(/own domain/i.test(body.error || ''), '[spk] and the refusal says what is required (requireFleetRead\'s own message, not a phrase the success page also uses)');
+      ok((await kcall('/kit/spk.js', omTok, grantEnv)).status === 403,
+        '[spk] the bundle is refused on the same gate — bytes never ship to a domain-locked account');
+    }
+
+    // A reseller named in a users: grant DOES get in — the escape hatch still works for its real purpose.
+    {
+      const grantEnv = { ...kEnv, PORTAL_FEATURES: JSON.stringify({ 'kit.status': { users: ['r@mock.local'] } }) };
+      const rTok = mkTok({ user_scope: 'Reseller', sub: 'r@mock.local', user: 'r', domain: 'mock.local' });
+      ok((await kcall('/kit/status', rTok, grantEnv)).status === 200,
+        '[spk] a RESELLER named in users: is admitted (fleet-read scope satisfies the second gate)');
+    }
+
+    // Not portal mode ⇒ not served at all, so dia/standalone gains no console.
+    const sEnv2 = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, PORTAL_SUPERADMINS: 'boss@mock.local' };
+    // `!== 200` was satisfied by any incidental 500. Outside portal mode the path is not routed at all, so
+    // the honest expectation is a 404 — a 500 here would mean something threw, which is a different bug.
+    ok((await kcall('/kit/status', bossTok, sEnv2)).status === 404,
+      '[spk] outside portal mode the console is not served — 404, not merely non-200');
+
+    // Cloudflare Access and portal-backend mode are mutually exclusive, in opposite directions, and this
+    // block asserts BOTH halves — because getting either wrong is a live failure and they are one line
+    // apart in `accessConfig`.
+    //
+    // PORTAL MODE: Access must be IGNORED. Honouring it there is not defence in depth, it is an outage:
+    // the Manager Portal loads the injected primary with a plain `<script src>`, which cannot complete an
+    // Access login, so the injection dies at step one and every gated route below it is unreachable —
+    // while there is nothing for Access to protect, since portal mode never reads a stored NS_API_TOKEN.
+    // A previous version of this test asserted the opposite (403), which is how the belief that Access
+    // "applies in portal mode" survived: the code path DOES run, so the test passed; the resulting
+    // deployment simply could not function.
+    {
+      const accessEnv = { ...kEnv, ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' };
+      const rNoAccess = await kcall('/kit/status', bossTok, accessEnv);
+      ok(rNoAccess.status === 200,
+        '[spk] portal mode + Access vars set + NO Cf-Access-Jwt-Assertion → still 200: Access is ignored here, not honoured');
+      // Not merely a 200 from somewhere: the real page. A blank or error body with a 200 would pass a bare
+      // status check while the console was in fact broken.
+      ok((await rNoAccess.text()).includes('id="spkRunChecks"'),
+        '[spk] and it is the real console, not an empty 200');
+      // The injection path itself — the thing an Access gate would actually kill.
+      ok((await kcall(`/${'p'}.js`, bossTok, accessEnv)).status === 200,
+        '[spk] and the public primary still serves with Access vars set — the <script src> that could never pass Access');
+
+      // Same request shape with Access simply unconfigured, so the 200 above is not just "everything 200s".
+      ok((await kcall('/kit/status', bossTok, kEnv)).status === 200,
+        '[spk] Access unconfigured (the common case) → console 200s, as before');
+
+      // STANDALONE MODE: the gate is a real security control and must still refuse. This is the half that
+      // protects ambient authority — a stored NS_API_TOKEN answers ANY request that reaches the Worker with
+      // that token's full NetSapiens scope, and Access is the only thing in front of it. Making the
+      // gauntlet's catch swallow (the 356e6d8 fail-open, re-typed) must not leave the suite green.
+      // verifyAccessRequest returns 403 for a missing token WITHOUT any network call (readAccessToken finds
+      // nothing before the JWKS fetch), so this needs no extra stubbing.
+      const standaloneAccessEnv = {
+        NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, NS_API_TOKEN: 'tok',
+        ACCESS_AUD: 'aud', ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com',
+      };
+      const rStandalone = await kcall('/domains', bossTok, standaloneAccessEnv);
+      ok(rStandalone.status === 403,
+        'standalone + Access configured + no Access token → the GLOBAL gauntlet call site refuses');
+      // Anchored on the JSON refusal shape (error + reason), NOT a body substring: several pages here
+      // legitimately contain the words "Cloudflare Access", so a substring match passes against a success
+      // page as readily as a refusal and proves nothing.
+      const rStandaloneBody = await jbody(rStandalone);
+      ok(rStandaloneBody.error === 'Cloudflare Access required' && rStandaloneBody.reason === 'no Cloudflare Access token',
+        'and says why — the specific JSON refusal shape');
+      // And that the refusal is Access's, not the exposure gate's or a missing-config 500: the same env
+      // WITHOUT the Access vars must get past this point (the exposure gate then refuses the stored token
+      // for its own, different reason — a 403 whose body is the exposure page, not this JSON shape).
+      const rNoAccessVars = await kcall('/domains', bossTok, { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, NS_API_TOKEN: 'tok' });
+      const rNoAccessVarsBody = await jbody(rNoAccessVars);
+      ok(rNoAccessVarsBody.error !== 'Cloudflare Access required',
+        'while the same request with no Access vars is not refused BY ACCESS — proving the 403 above is this gate, not another');
+    }
+
+    // Classification is a compile-time contract, but assert it: `read` would reintroduce the revocation gap.
+    ok(ROUTES['/kit/status'].sensitivity === 'sensitive', '[spk] /kit/status is classified sensitive');
+
+    // A deployment broken in one of the five reportable ways must STILL serve the console, and the console
+    // must say what is wrong. This is the whole point of the reordering.
+    {
+      const brokenEnv = { ...kEnv, PORTAL_MENUS: '{not json' };
+      const r = await kcall('/kit/status?format=json', bossTok, brokenEnv);
+      ok(r.status === 200, '[spk] a broken PORTAL_MENUS still serves the console');
+      const doc = await jbody(r);
+      ok(doc.configErrors.length > 0, '[spk] and the console reports the config error');
+      ok(doc.configErrors.some((e: any) => /menu/i.test(e.subsystem)), '[spk] naming the right subsystem');
+      ok(doc.features.some((f: any) => f.state === 'misconfigured'), '[spk] misconfigured is now a REACHABLE state');
+      // Every other route still refuses — the console is a diagnostic surface, not a licence to run broken.
+      ok((await kcall('/domains', bossTok, brokenEnv)).status === 500, '[spk] other routes still 500 on it');
+    }
+    // A malformed PORTAL_APP_DOWNLOADS must not make the console UNREACHABLE (fix-wave F4). /kit/spk.js is
+    // served ahead of Group 2, so appAccessConfigError has not run; wrapBundle used to call parseDownloads,
+    // which THROWS on bad JSON — a non-HttpError, so the console route's catch answered a bare
+    // {"error":"Request failed"}, the injected primary silently dropped the non-200, and the operator lost
+    // the menu entry leading to the one page that names the broken setting. Both halves must survive.
+    {
+      const dlEnv = { ...kEnv, PORTAL_APP_DOWNLOADS: '{not json' };
+      const rb = await kcall('/kit/spk.js', bossTok, dlEnv);
+      ok(rb.status === 200, '[spk] a malformed PORTAL_APP_DOWNLOADS still serves the console BUNDLE — the menu entry survives');
+      ok(!(await rb.text()).includes('not json'), '[spk] and the broken value is not echoed into the served bytes');
+      const rd = await kcall('/kit/status?format=json', bossTok, dlEnv);
+      ok(rd.status === 200, '[spk] and the document still renders');
+      const dlDoc = await jbody(rd);
+      ok((dlDoc.configErrors || []).some((e: any) => /app access/i.test(e.subsystem)),
+        '[spk] naming the app-access config error, which is the whole point of reaching the page');
+      // Every OTHER Group-2-gated route still refuses on it — the console is a diagnostic surface, not a
+      // licence to run broken.
+      ok((await kcall('/me/status', bossTok, dlEnv)).status === 500, '[spk] while an app-access route still 500s on it');
+    }
+    // But a broken PORTAL_FEATURES must still refuse: authorization itself is unavailable.
+    {
+      const noAuthzEnv = { ...kEnv, PORTAL_FEATURES: '{not json' };
+      const r = await kcall('/kit/status', bossTok, noAuthzEnv);
+      ok(r.status === 500, '[spk] a broken PORTAL_FEATURES refuses the console — we cannot authorize anyone');
+      const body = await jbody(r);
+      ok(/misconfigured/i.test(body.error || ''), '[spk] with the actionable reason, not a bare failure');
+    }
+    {
+      const badSupersEnv = { ...kEnv, PORTAL_SUPERADMINS: 'not-an-email' };
+      ok((await kcall('/kit/status', bossTok, badSupersEnv)).status === 500,
+        '[spk] a malformed PORTAL_SUPERADMINS likewise refuses — requireFleetRead cannot evaluate');
+    }
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

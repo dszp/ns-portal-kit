@@ -24,6 +24,9 @@ rest only matter if you want the feature they turn on.
 
 ---
 
+<a id="pick-a-mode"></a>
+<a id="PORTAL_MODE"></a>
+
 ## 1. Pick a mode
 
 This decides which settings you need. Everything else follows from it.
@@ -34,7 +37,7 @@ This decides which settings you need. Everything else follows from it.
 | Who authenticates | a token you store | the calling user's own `ns_t` |
 | Set | `NS_API_TOKEN` | `PORTAL_MODE=1` |
 | Reads run as | that token — its NetSapiens scope is the boundary | that user — NetSapiens enforces their scope |
-| Stored NetSapiens credential | **yes** | **none**, unless you enable [event subscriptions](#netsapiens-event-subscriptions) |
+| Stored NetSapiens credential | **yes** | **none**, unless you enable [event subscriptions](#event-subscriptions) |
 | Needs injected JavaScript | no | **yes — but it's Worker-served now** |
 | Ready to use today | **yes** | **yes** — point your portal at the Worker's primary (or compose it into a script you already inject) |
 
@@ -55,17 +58,22 @@ Until you do, the Worker refuses to use the token at all rather than answer an u
 simplest you point your Manager Portal's injected-script slot at the Worker's primary and the built-in
 features appear, no hand-written script needed. That's not the only way in, though: you can also **compose**
 the primary into a script you already inject, or **add your own gated scripts** (`PORTAL_SECONDARIES` —
-external or served privately from R2). See [section 4](#4-portal-backend-mode-what-it-actually-is) for all
+external or served privately from R2). See [section 4](#portal-backend-mode) for all
 three ways to wire it. **Portal backend mode holds no NetSapiens credential for user traffic.** Each request carries the caller's `ns_t`, which
 is passed through to NetSapiens as-is; the platform validates it and enforces that user's own scope.
-(The single exception is [event subscriptions](#netsapiens-event-subscriptions), which are off unless
+(The single exception is [event subscriptions](#event-subscriptions), which are off unless
 configured: an event arrives with no caller, so that path — and only that path — uses a stored service
 credential.)
 There's no SPA — it's a backend for JS **you** inject into the Manager Portal. **[How that actually
-works, with a diagram →](#4-portal-backend-mode-what-it-actually-is)**
+works, with a diagram →](#portal-backend-mode)**
 
 **You can run both**, and that's the usual end state — they're two Workers, not two phases. See
-[Running both](#5-running-both-the-usual-end-state).
+[Running both](#running-both).
+
+<a id="required-settings"></a>
+<a id="NS_API_TOKEN"></a>
+<a id="NS_PORTAL_ISS"></a>
+<a id="NS_SERVER"></a>
 
 ## 2. The three you actually need
 
@@ -74,6 +82,7 @@ works, with a diagram →](#4-portal-backend-mode-what-it-actually-is)**
 | **`NS_SERVER`** | `vars` in `wrangler.jsonc` | `api.yourprovider.com` |
 | **`NS_PORTAL_ISS`** | `vars` in `wrangler.jsonc` | `manage.yourcompany.com` |
 | **`NS_API_TOKEN`** *(standalone mode)* | secret | a NetSapiens API token |
+| **`PORTAL_SUPERADMINS`** *(portal backend mode)* | secret | `you@yourdomain.example` |
 
 `NS_SERVER` — your NetSapiens API host, no scheme, no path. Requests go to
 `https://{NS_SERVER}/ns-api/v2`. Ships as `api.example.com`, which is a placeholder, not a default.
@@ -87,23 +96,50 @@ nothing).
 
 `NS_API_TOKEN` — standalone mode only. **Leave blank in portal backend mode.**
 
-**Not sure if you're done?** Open `/`. If anything required is missing it lists exactly what, with the
-fix. `GET /health` reports `{"ok":true,"configured":false}`. Both say only *whether* a value is set,
-never what it is.
+`PORTAL_SUPERADMINS` — portal backend mode. Comma-separated `user@domain` accounts that pass every gate
+regardless of their NetSapiens scope. Listed here rather than under optional settings because of one
+consequence people hit: the **integration console defaults to superadmin-only**, and with nobody named it admits
+nobody — including you. It refuses with a message that says so, but you will have deployed a console you
+cannot open. Set it before you deploy.
+
+**Not sure if you're done?** `GET /health` reports `{"ok":true,"configured":false}` in either mode. In
+**standalone** mode, opening `/` also lists exactly what is missing, with the fix. In **portal backend**
+mode `/` is deliberately a 404 — there is no UI there — so use `/health`, and once you are deployed use the
+integration console (below), which is the fuller answer. All of them say only *whether* a value is set, never
+what it is.
+
+<a id="optional-settings"></a>
 
 ## 3. Optional — each turns on one thing
 
 Everything below is off unless set. Blank/absent is always a safe answer.
 
+<a id="protect-a-stored-token"></a>
+<a id="ACCESS_AUD"></a>
+<a id="ACCESS_TEAM_DOMAIN"></a>
+
 ### Protect a stored token
 
 | Setting | Value | Meaning |
 |---|---|---|
-| `ACCESS_AUD` | Access application AUD tag | Half of the Access switch — **needs `ACCESS_TEAM_DOMAIN` too**. On its own it turns nothing on. |
+| `ACCESS_AUD` | Access application AUD tag | Half of the Access switch — **needs `ACCESS_TEAM_DOMAIN` too**. On its own it turns nothing on. **Standalone only** — see the note below. |
 | `ACCESS_TEAM_DOMAIN` | `yourteam.cloudflareaccess.com` | Your Zero Trust team domain. **Both** vars together turn on the in-Worker Access check (it fails closed). Setting only one is refused, not served: with a stored `NS_API_TOKEN` and nothing verifiable in front of it, the Worker declines to use the token and tells you which var is missing. |
 
 Strongly recommended for standalone mode. Without it, anyone who reaches the Worker gets whatever the
 stored token can read. Both values are public identifiers — safe in `vars`.
+
+> **These two settings apply to standalone deployments only, and are IGNORED when `PORTAL_MODE=1`.**
+> Not a limitation — putting an Access gate in front of a portal backend cannot work. The Manager Portal
+> loads the injected primary with a plain `<script src="…">`, and a script tag cannot complete an Access
+> login: there is no redirect for it to follow and no cookie for it to present. The injection would die at
+> step one, and every gated route behind it with it. Nor is there anything for Access to protect there:
+> portal mode never uses a stored `NS_API_TOKEN` at all — every caller supplies their own `ns_t`, and that
+> verification *is* the gate. So setting these on a portal deployment is harmless and does nothing; the
+> integration console reports them as configured-but-ignored, with this reason.
+
+<a id="limit-domains"></a>
+<a id="ALLOWED_DOMAINS"></a>
+<a id="BLOCKED_DOMAINS"></a>
 
 ### Limit which domains are visible
 
@@ -116,7 +152,25 @@ Comma-separated NetSapiens domain names, exactly as NetSapiens has them. A domai
 or carry a territory suffix (`acme.12345.service`) — use whichever form is real for you. These are an
 app-layer bound *on top of* the token's own scope, not a replacement for it.
 
+<a id="portal-backend-mode-settings"></a>
+<a id="ALLOWED_ORIGINS"></a>
+
 ### Portal backend mode
+
+⚠️ **`PORTAL_HANDOFF_URL` has no safe default, and leaving it out blocks the deployment.** In portal mode
+an *absent* value is treated as a misconfiguration: `GET /health` reports `configured:false` until you set
+it, which is the first thing this document tells you to check. It has three states and the difference
+matters:
+
+| Value | Meaning |
+|---|---|
+| **absent** | ⚠️ unconfigured — `/health` reports `configured:false` |
+| **`""`** (present, empty) | deliberate "no hand-off", and the right answer when you are **not** running a vendor add-on alongside this kit |
+| a URL | the vendor bundle-router your primary should chain-load, so the add-on keeps working |
+
+If you have no vendor add-on, set it to `""` rather than leaving it out. Absent and empty look the same
+in a config file and mean opposite things here — that is deliberate, so that "I have not decided yet" is
+never silently treated as "I decided no".
 
 | Setting | Value | Meaning |
 |---|---|---|
@@ -124,6 +178,9 @@ app-layer bound *on top of* the token's own scope, not a replacement for it.
 | `ALLOWED_ORIGINS` | `https://manage.yourcompany.com` | Browser origins allowed to call it (CORS). Comma-separated, scheme included. |
 
 `ALLOWED_ORIGINS` is the origin the injected JS runs on — normally your Manager Portal.
+
+<a id="multiple-workers-one-zone"></a>
+<a id="CACHE_SCOPE"></a>
 
 ### Running more than one Worker on one zone
 
@@ -140,6 +197,11 @@ missing the setting degrades safely to its own namespace; *two* missing it quiet
 ⚠️ `env` blocks do **not** inherit top-level `vars`, so each environment needs its own `CACHE_SCOPE`
 alongside its own `NS_SERVER` and the rest.
 
+<a id="branding"></a>
+<a id="BRAND_ACCENT"></a>
+<a id="BRAND_LABEL"></a>
+<a id="BRAND_NAME"></a>
+
 ### Branding
 
 Branding is configuration, never code, so a fork ships unbranded and yours never enters the source.
@@ -149,6 +211,15 @@ Branding is configuration, never code, so a fork ships unbranded and yours never
 | `BRAND_NAME` | `Acme Voice` | Your company name. Produces `"Acme Voice Portal Kit v<version>"` and an `"Acme Voice portal"` theme. Unset ⇒ `"NS Portal Kit"` and the neutral theme. |
 | `BRAND_ACCENT` | `#1a6bb0` | Accent colour. **Must be hex** (`#rgb`/`#rrggbb`); anything else is ignored. |
 | `BRAND_LABEL` | `Acme Portal` | Override the theme's picker label. Defaults to `"<BRAND_NAME> portal"`. |
+
+<a id="app-status"></a>
+<a id="RINGOTEL_APP_BASE_URL"></a>
+<a id="RINGOTEL_API_KEY"></a>
+<a id="RINGOTEL_BASE_URL"></a>
+<a id="RINGOTEL_LABEL"></a>
+<a id="RINGOTEL_LABEL_SHORT"></a>
+<a id="RINGOTEL_OVERRIDES"></a>
+<a id="RINGOTEL_PRESENCE"></a>
 
 ### Ringotel app status
 
@@ -163,6 +234,7 @@ routes return 404, and the deployment behaves exactly as if the integration didn
 | `RINGOTEL_PRESENCE` | `1` | Show 🟢/🔴 online circles. Off by default: presence is a point-in-time snapshot (cached ≤10 min) while the rest of a diagram is static config. |
 | `RINGOTEL_BASE_URL` | `https://shell.ringotel.co` | Only if you're not on the default Ringotel endpoint. |
 | `RINGOTEL_OVERRIDES` | `{"weird.domain":"actual-branch-address"}` | JSON. Only for the rare domain whose Ringotel branch address doesn't equal its NetSapiens domain. |
+| `RINGOTEL_APP_BASE_URL` | `https://app.example.com` | Base URL for a deep link to the app dashboard, shown on the gated feature surfaces. Unset ⇒ a plain text label instead of a link. |
 
 A Ringotel branch's `address` must equal the NetSapiens domain **exactly** — that's what binds them. If
 yours match (they normally do), you need no overrides.
@@ -184,6 +256,17 @@ Two rules follow, and both fail safe:
 Activating a user who has **no** record yet is also refused on such a domain, because nothing here
 knows which branch a new user belongs to. Create the user on the intended branch first.
 
+<a id="app-activation"></a>
+<a id="RINGOTEL_ACTIVATION_SUFFIX"></a>
+<a id="RINGOTEL_EXCLUDE_EXTS"></a>
+<a id="RINGOTEL_EXCLUDE_EXTS_BY_DOMAIN"></a>
+<a id="RINGOTEL_EXCLUDE_NAMES"></a>
+<a id="RINGOTEL_EXCLUDE_NO_DEVICES"></a>
+<a id="RINGOTEL_RESELLER_OVERRIDE"></a>
+<a id="RINGOTEL_ROTATE_SIP_ON_ACTIVATE"></a>
+<a id="RINGOTEL_SSO_SERVICE"></a>
+<a id="RINGOTEL_WRITE_DOMAINS"></a>
+
 ### App activation (writes)
 
 Lets authorized roles activate/deactivate a user's app and reset its password **from the NetSapiens user
@@ -199,7 +282,7 @@ through sign-in or see why they can't yet) — all default level `office_manager
 | **`RINGOTEL_WRITE_DOMAINS`** | `acme.12345.service` (CSV), or `*` | **Safety rail. Empty ⇒ ALL writes refused (fail-closed).** Only listed domains may be mutated; `*` = every in-scope domain. Set it deliberately. |
 | `RINGOTEL_ACTIVATION_SUFFIX` | `r` | NetSapiens softphone device suffix (`ext` → `<ext><suffix>`). Default `r`. |
 | `RINGOTEL_ROTATE_SIP_ON_ACTIVATE` | `0` to disable | **Default ON.** When activating a user whose `<ext><suffix>` device *already existed*, replace its SIP password instead of reusing the stored one. See the note below. |
-| `RINGOTEL_EXCLUDE_NAMES` | `SHARED,FAX` | Name-contains matchers to soft-exclude. Default `SHARED,SHARED VOICEMAIL,FAX`. |
+| `RINGOTEL_EXCLUDE_NAMES` | `SHARED,FAX` | Name-contains matchers to soft-exclude, matched case-insensitively as **substrings**. Setting it REPLACES the default list — which is ten entries, not three: `SHARED`, `SHARED VOICEMAIL`, `VOICEMAIL`, `FAX`, `GENERAL VOICEMAIL`, `GENERAL MAILBOX`, `CONFERENCE`, `CONF RM`, `CONF ROOM`, `ROUTING`. Worth reading before you rely on it: bare `VOICEMAIL` and `ROUTING` match any name containing them. |
 | `RINGOTEL_EXCLUDE_EXTS` | `900,8*` | Extension patterns to soft-exclude (trailing `*` = prefix). Default empty. |
 | `RINGOTEL_EXCLUDE_EXTS_BY_DOMAIN` | `{"acme.x":{"remove":["900"]}}` | JSON per-domain add/remove of the exclude-exts. |
 | `RINGOTEL_EXCLUDE_NO_DEVICES` | `1` | Tightens the name matcher: a name-matched user is excluded only if it *also* has no devices. **Never excludes a no-device user on its own** — a normal-named user with no devices stays activatable (activation creates the device). Off by default. |
@@ -233,6 +316,29 @@ user who already has a working one from being shown how to sign in.
 > consumer of that library — this portal backend and any SSO integration you run beside it — reaches the
 > same verdict from the same inputs. Only the configuration above is read here.
 
+<a id="event-subscriptions"></a>
+<a id="NS_EVENTS_PREFERRED_SERVER"></a>
+<a id="NS_OAUTH_SERVER"></a>
+<a id="NS_ADMIN_PASS"></a>
+<a id="NS_ADMIN_USER"></a>
+<a id="NS_API_KEY"></a>
+<a id="NS_EVENTS"></a>
+<a id="NS_EVENTS_ALLOW_IPS"></a>
+<a id="NS_EVENTS_BASE_URL"></a>
+<a id="NS_EVENTS_DEVICE_REPAIR"></a>
+<a id="NS_EVENTS_DIAG_RAW"></a>
+<a id="NS_EVENTS_DOMAINS"></a>
+<a id="NS_EVENTS_GEO_SUPPORT"></a>
+<a id="NS_EVENTS_MAX_EVENTS"></a>
+<a id="NS_EVENTS_MODELS"></a>
+<a id="NS_EVENTS_OFFBOARD"></a>
+<a id="NS_EVENTS_PATH_SECRET"></a>
+<a id="NS_EVENTS_RENEW_HORIZON"></a>
+<a id="NS_EVENTS_SWEEP_MAX"></a>
+<a id="NS_EVENTS_TARGET_LIFETIME"></a>
+<a id="NS_OAUTH_CLIENT_ID"></a>
+<a id="NS_OAUTH_CLIENT_SECRET"></a>
+
 ### NetSapiens event subscriptions
 
 **The problem this solves:** without it, a user's name and email reach the app directory only as a *side
@@ -264,6 +370,8 @@ domain list are all present.
 | `NS_EVENTS_OFFBOARD` | `off` \| `deactivate` | A user deleted in NetSapiens has their app record deactivated — confirmed only by a 404 on re-read, never by the event payload. Fires immediately from the change event, and again on the hourly sweep, which also cleans up records orphaned before this feature shipped. Default `off`. |
 | `NS_EVENTS_DEVICE_REPAIR` | `off` \| `report` \| `heal` | Self-heal an active app user whose softphone device has gone missing. `report` logs the drift without writing; `heal` recreates the device and re-pushes its credentials. Default `off`. Costs extra requests per event — see below. |
 | `NS_EVENTS_SWEEP_MAX` | `200` | Cap on how many records the hourly sweep will touch in one run. Overflow is logged, never silent. Default `200`. |
+| `NS_EVENTS_PREFERRED_SERVER` | *(empty)* | Ask NetSapiens to deliver events from a particular node. Unset ⇒ no preference, and their own routing applies. |
+| `NS_OAUTH_SERVER` | `api.example.com` | OAuth host for the admin-credential grant, for the uncommon case where it is not the same host as `NS_SERVER`. Unset ⇒ falls back to `NS_SERVER`. |
 
 **Secrets** — `wrangler secret put <NAME>`:
 
@@ -315,6 +423,9 @@ variants are v45+ and absent on v44), and a scheduled trigger — add
 `"triggers": { "crons": ["17 * * * *"] }` to each environment that should reconcile. Hourly is deliberate:
 the job validates and repairs, it does not keep anything alive.
 
+<a id="directory-prepop"></a>
+<a id="RINGOTEL_PREPOP_INCLUDE_SOFT"></a>
+
 ### Directory pre-population (writes)
 
 Creates **inactive** app-directory entries for NetSapiens users who have none, so the directory reflects
@@ -335,6 +446,10 @@ non-numeric extensions) never are.
 owns `<ext><suffix>` is exactly what collides when an extension is later reassigned; activation fills those
 fields in afterwards.
 
+<a id="app-sign-in-details"></a>
+<a id="PORTAL_APP_DOWNLOADS"></a>
+<a id="SSO_AUTO_ACTIVATE"></a>
+
 ### App sign-in details
 
 A self-service feature (`me.appAccess`, default `all`): the Apps menu and the user's own home-page card
@@ -350,6 +465,10 @@ no create-on-login assumed, nothing hidden, no download links shown).
 | `PORTAL_APPS_HIDE` | `SNAPmobile Web` (CSV), or a JSON object keyed per domain (`"*"` = default, `[]` = hide nothing there) | Stock Apps-menu entries to hide (e.g. one you don't offer). Not conditioned on whether the domain runs your app — a domain served by another white-label app is a normal outcome. |
 | `PORTAL_APP_DOWNLOADS` | `[{"label":"Get the App","url":"https://example.com/app","title":"...","showUrl":false}]` | JSON array of download links shown in menu order. `label` and an `https://` `url` are required; `title` is an optional tooltip. A small copyable URL line is shown under each link by default; set `"showUrl": false` on an entry to hide it (e.g. a long link that won't fit). Unset ⇒ no links. |
 
+<a id="portal-menus"></a>
+<a id="PORTAL_APPS_HIDE"></a>
+<a id="PORTAL_MENUS"></a>
+
 ### Customizing portal menus (`PORTAL_MENUS`)
 
 Add and hide entries in the portal's stock menus — optionally **only where your app is active**. Gated by
@@ -357,6 +476,19 @@ Add and hide entries in the portal's stock menus — optionally **only where you
 
 > Hiding a menu entry is **cosmetic, not a security control.** It removes a link, not access to whatever
 > the link pointed at. Never use it to "lock" a feature.
+
+**Trying your first menu rule on a portal your customers are already using? Scope it to yourself, look at
+it, then widen it.** Every rule here accepts a `users` or `domains` rung, so a change can be real for one
+account — or one domain — before anyone else sees it:
+
+```json
+{ "apps": { "hide": { "users": { "you@yourdomain.example": ["SNAPmobile Web"] }, "*": [] } } }
+```
+
+That is the whole preview mechanism, and it is why there is no separate preview mode: `"*": []` means
+*change nothing for everyone else*, so the blast radius is one account until you decide otherwise. Widen it
+by moving the entries to `"*"` once you have seen the menu with your own eyes. Full precedence order:
+[How targeting works](#menu-targeting).
 
 **Which menus you can target.** Menus are referenced by name — you never supply a CSS selector, which
 would break on portal updates and would be a DOM-injection surface for anyone who can set an environment
@@ -366,7 +498,33 @@ variable:
 |---|---|---|
 | `apps` | the portal's **Apps** dropdown | appended after the stock entries |
 | `account` | the signed-in user's **own name** dropdown (My Account / Profile / Messages / sign out) | into the first group, **above** the divider and the sign-out entry |
-| `management` | the top-nav **Management** dropdown, which the portal shows to administrative scopes only | appended at the **end**, after the portal's own entries |
+| `management` | the top-nav **Management** dropdown — **not stock**, added by a vendor add-on, and shown to administrative scopes only. Targeting it on a portal that does not have it is not an error; nothing appears. | appended at the **end**, after the portal's own entries |
+
+**⚠ The `account` menu relabels itself by CONTEXT, and a hide list matches labels exactly.** It is **one
+menu** throughout — same dropdown, same anchor — but its entries depend on whether you are *managing
+something* or *inside your own account*:
+
+| Where you are | What the menu says |
+|---|---|
+| Managing a domain or organisation | `My Account` · `Messages` · `Log Out` |
+| Inside your own account | `Profile` · `Log Out` |
+
+Observed 2026-08-08 on a stock portal across three scopes. **The labels follow the context; the scope decides
+which contexts you can be in.** A Reseller and an Office Manager see both rows above and switch between them.
+A Basic User has no organisation to manage, so they are always in the second row — they see `Profile` and
+never `My Account`. (The link back out varies by scope too — `Manage Domains` for a reseller, `Manage
+Organization` for an office manager — but both are links, not menus, so nothing here targets them.)
+
+`Profile` opens a **modal**, at every level it appears on — so hiding it removes a modal launcher, not a
+link to somewhere. `My Account` navigates.
+
+The practical consequence when writing a hide: **`Profile` hits Basic Users all the time and admins only
+inside their own account, while `My Account` hits admins only, and never a Basic User at all.** If you mean
+"this entry, always, for everyone", name both.
+
+The consequence: hiding `My Account` does nothing in the context that calls it `Profile`. **If you want an
+entry gone everywhere, list every label it goes by.** Listing a label that never appears is harmless — a hide
+that matches nothing changes nothing.
 
 An unknown name is a startup error. The `account` menu carries no id and shares a generic class with other
 dropdowns, so it is located by its sign-out entry — the one item present in every variant of it. The
@@ -435,6 +593,8 @@ customer, not to the partner who administers them:
 Both menus take the same `hide` / `add` shapes and the same targeting rules, so anything below applies to
 either.
 
+<a id="menu-targeting"></a>
+
 #### How targeting works
 
 Anywhere a list of entries is accepted you may instead give an object, and **one rule covers every case: a
@@ -447,9 +607,12 @@ need one:
 | change everywhere **except** some | `{"*": ["A"], "acme.example": []}` |
 | change **only** some | `{"*": [], "acme.example": ["A"]}` |
 
-The same works on the **app** axis (`{"app": {"ringotel": [...], "none": []}}`) and the **scope** axis
+The same works on the **users** axis (`{"users": {"you@example.com": [...]}}`), the **app** axis
+(`{"app": {"ringotel": [...], "none": []}}`) and the **scope** axis
 (`{"scopes": {"Reseller": [...]}}`), and they can be combined.
-**Precedence, most specific first: `domains` → `scopes` → `app` → `"*"`.** A matching `domains` entry wins
+**Precedence, most specific first: `users` → `domains` → `scopes` → `app` → `"*"`.** Naming an account beats
+naming their domain, which is the only reason to name one — it is how you carve an exception out of a
+domain-wide rule. A matching `domains` entry wins
 outright — it is *not* merged with the app list — because otherwise "turn it off just here" would be
 inexpressible. A `"*"` **inside** an axis is a default, so an exact match on any axis still beats it.
 
@@ -502,9 +665,23 @@ the query string, since a portal URL's query can carry identifiers and the link 
 A variable with no value becomes empty rather than leaving a literal `{email}` in a live link, and a
 misspelled one (`{emial}`) is a startup error.
 
-**Do not set both** `PORTAL_APPS_HIDE` and `PORTAL_MENUS.apps.hide` — that is a loud error rather than a
-precedence rule, since two places to look for one answer is how a menu ends up wrong with nobody able to
-say why. Use `PORTAL_MENUS` when you outgrow the one-liner.
+**Use the builder rather than writing this by hand.** The console's **Menus** tab reads the menus off the
+portal page you opened it from, so you tick the real entries instead of typing labels and hoping they match.
+It emits both the readable JSON and the escaped `wrangler.jsonc` line, and it checks the result against your
+deployment's own validator before you paste it anywhere. The rest of this section is what the builder is
+composing — worth reading once, not worth typing.
+
+**Setting both** `PORTAL_APPS_HIDE` and `PORTAL_MENUS.apps.hide` is fine — **the two hide lists merge.**
+Neither one silently wins, a label named by both is hidden once, and the console shows the effective list
+with each entry attributed to the setting it came from, so there is still one place to look for the answer.
+Use `PORTAL_MENUS` when you outgrow the one-liner; move the old list into it if you want everything in one
+place, but nothing breaks if you don't.
+
+**Hides are applied before adds.** A hide names a *stock* entry, so it acts on the menu as the portal
+shipped it, before any of your own entries exist. That is deliberate and it is what keeps the two lists
+independent: a hide can never remove something you added, and neither list's meaning depends on the other.
+
+<a id="call-flow-diagrams"></a>
 
 ### Call-flow diagrams (portal side)
 
@@ -524,6 +701,9 @@ with a theme picker, pan/zoom, and PNG export. (Standalone mode renders the same
 directly, no injection.) Gate it elsewhere with `PORTAL_FEATURES` — e.g. `{"callflow.view":"office_manager"}`
 to widen it, or `"off"` to hide the button entirely.
 
+<a id="device-details"></a>
+<a id="NS_DEVICE_DETAILS"></a>
+
 ### NetSapiens device details
 
 **Enriches the call-flow diagrams above.** With this on, each agent line on a diagram also shows that user's
@@ -537,6 +717,8 @@ desk-phone **model + registration status** (read live per render). Independent o
 Truthy values anywhere above are `1`, `true`, `yes`, `on`.
 
 ---
+
+<a id="portal-backend-mode"></a>
 
 ## 4. Portal backend mode: what it actually is
 
@@ -611,6 +793,9 @@ The parts worth understanding:
 - **It's per-call.** Nothing is stored between requests except a short-lived cache of "was this token
   valid".
 
+<a id="primary-url"></a>
+<a id="PRIMARY_BASENAME"></a>
+
 ### Your primary URL — and who injects it
 
 The one value NetSapiens needs is the **full URL of your primary script**:
@@ -637,6 +822,11 @@ Manager Portal's origin, and the portal's Content-Security-Policy `script-src` m
   **give your provider the exact URL** and ask them to add it as the Manager Portal custom JavaScript for
   your reseller/domain(s). The URL is all they need; nothing about it is secret, and the Worker still only
   ever acts as the logged-in user (their `ns_t`, their scope).
+
+<a id="portal-secondaries"></a>
+<a id="ASSETS"></a>
+<a id="PORTAL_HANDOFF_URL"></a>
+<a id="PORTAL_SECONDARIES"></a>
 
 ### Add your own injected scripts (`PORTAL_SECONDARIES`)
 
@@ -673,12 +863,41 @@ This is the advanced path: most deployments start with the built-in bundles and 
 > `url:` script is public bytes; a gated `r2:` script keeps the *code* private but is still not a substitute
 > for server-side scoping of *data*.
 
+<a id="worker-bindings"></a>
+<a id="JWT_RATE_LIMITER"></a>
+
+### Worker bindings (`ASSETS`, `JWT_RATE_LIMITER`)
+
+Two settings are Cloudflare **bindings** rather than string values: they are declared structurally in
+`wrangler.jsonc`, never with `wrangler secret put`, and the console groups them together for that reason.
+
+**`ASSETS`** — the private R2 bucket an `r2:` secondary is served from. Covered above, under
+[Add your own injected scripts](#portal-secondaries).
+
+**`JWT_RATE_LIMITER`** — optional, and worth having in portal backend mode. It throttles the live `ns_t`
+verification calls this Worker makes to your NetSapiens core, so a flood of forged tokens is bounded before
+it reaches the platform:
+
+```jsonc
+"ratelimits": [
+  { "name": "JWT_RATE_LIMITER", "namespace_id": "1000", "simple": { "limit": 100, "period": 60 } }
+]
+```
+
+Leave it unbound and an in-isolate limiter still applies — but only *per isolate*, so a distributed flood is
+bounded once per edge location rather than once overall. That is why this is not a startup requirement: a
+deployment without it is safe, just less effective.
+
+<a id="features-and-gating"></a>
+
 ## Features & gating
 
 Portal-backend mode ships a set of features (a call-flow diagram, app-status columns, a status banner),
 each gated to a role by default. You **do not** have to touch source to change who sees what: two env
 vars, `PORTAL_FEATURES` and `PORTAL_SUPERADMINS`, override the built-in defaults over a documented
 registry. Leave them unset and behavior is exactly the defaults below.
+
+<a id="level-vocabulary"></a>
 
 ### The level vocabulary
 
@@ -713,6 +932,8 @@ call-center is exact and orthogonal.
   forms (the engine also canonicalizes `superuser`/`super-user`) — verify against your own `ns_t` if you
   gate to them, as `Advanced User` in particular isn't present on every deployment.
 
+<a id="feature-registry"></a>
+
 ### The feature registry (defaults)
 
 | Key | Feature | Default level |
@@ -734,6 +955,9 @@ call-center is exact and orthogonal.
 | `me.resetPassword` | Reset the user's **own** app password (write) | `off` |
 | `me.appAccess` | App sign-in details (mode, username, downloads) on the Apps menu and home card | `all` |
 | `me.menuConfig` | Portal menu customization (static add/hide, optionally app-conditional) | `all` |
+| `portal.versionLine` | This kit's name + version in the portal footer, linked to its release notes for reseller and above | `all` |
+| `portal.statusBanner` | A message across the top of the portal, supplied by an endpoint you host (`STATUS_BANNER_WEBHOOK`) | `all` |
+| `kit.status` | Read-only status/config console for this deployment (see below — floored, can't be widened past `reseller`) | `superadmin` |
 
 **Self-service is its own tier.** `portal.access` gates the admin bundle (admin ladder); `portal.self`
 gates a separate, minimal bundle of **own-account** features that even a Basic/Simple user receives.
@@ -742,6 +966,15 @@ signed token (via the NetSapiens `~` self-wildcard) — never from client input,
 or changes their own account. `me.devices` and `me.resetPassword` ship **off**; enable them with
 `PORTAL_FEATURES` (and, for the reset write, the domain must also be on `RINGOTEL_WRITE_DOMAINS`). Set
 `portal.self` to `off` to disable the whole self-service tier.
+
+**Two features ride that bundle without being self-service**, and it is worth knowing which so you look
+for their settings in the right place: `me.menuConfig` and `portal.versionLine` are operator configuration
+applied to everyone, so they need the self bundle's reach — every signed-in user — but neither is about
+the reader's own account. Turning `portal.self` off therefore also removes the menu customization and the
+footer version line, which is the one surprise in that switch.
+
+<a id="portal-features"></a>
+<a id="PORTAL_FEATURES"></a>
 
 ### `PORTAL_FEATURES` — override a feature's gate
 
@@ -760,6 +993,9 @@ Disambiguation is by type: `"x"` → a level · `["x","y"]` (strings) → a unio
 + forced users. An unknown key or unknown level is a **loud config error** (a `500` on every route after
 `/health`) — it never silently allows.
 
+<a id="portal-superadmins"></a>
+<a id="PORTAL_SUPERADMINS"></a>
+
 ### `PORTAL_SUPERADMINS` — an account-based top tier
 
 Comma-separated `user@domain` accounts (e.g. `x@y.example,z@y.example`). These accounts:
@@ -767,6 +1003,8 @@ Comma-separated `user@domain` accounts (e.g. `x@y.example,z@y.example`). These a
 - are unioned into **every** gate, so they see everything the admin tiers do — **except** a gate that
   targets *only* call-center levels (superadmins don't auto-get CC features);
 - can be **targeted** directly by the `superadmin` level (e.g. a future admin-only screen).
+
+<a id="gate-resolution-rules"></a>
 
 ### Resolution rules
 
@@ -781,6 +1019,145 @@ Comma-separated `user@domain` accounts (e.g. `x@y.example,z@y.example`). These a
 Secondary injected scripts (`PORTAL_SECONDARIES`, below) use the **same** level vocabulary in their
 `auth` field, plus the special value `public` (no token needed).
 
+<a id="release-notes-url"></a>
+<a id="PORTAL_RELEASE_NOTES_URL"></a>
+
+### The version line and where it links (`PORTAL_RELEASE_NOTES_URL`)
+
+Two surfaces show this kit's version: the **portal footer** (the `portal.versionLine` feature, reseller and
+above) and the **integration console's own header**. Both link that number at release notes, and one setting
+decides where it points:
+
+```jsonc
+"PORTAL_RELEASE_NOTES_URL": "https://github.com/you/your-copy/releases#release-v{version}"
+```
+
+`{version}` is replaced with the version actually running. Three states, the same shape `PORTAL_HANDOFF_URL`
+uses:
+
+| Value | Where the version links |
+|---|---|
+| **absent** | the public release list, anchored at your running version — the default, and right for an unmodified deployment |
+| **a URL** | yours: your own copy's releases, or internal notes |
+| **present but empty** | nowhere — the version is still shown, it just is not a link |
+
+Linking the release *list* rather than the single release page is deliberate: the list carries a version
+sidebar and a compare control, so it answers *am I behind* as well as *what is in mine* — and if the anchor
+ever stops matching, the reader still lands somewhere that states which version it is showing.
+
+<a id="status-banner"></a>
+<a id="STATUS_BANNER_WEBHOOK"></a>
+
+### The status banner (`portal.statusBanner`)
+
+A message across the top of the portal — maintenance notices, welcome text for new customers, anything
+time-bound. **The kit renders it; you decide what it says.** One setting turns it on:
+
+```jsonc
+"STATUS_BANNER_WEBHOOK": "https://automation.example.com/webhook/portal-banner"
+```
+
+Unset, the feature is inert: nothing is requested and nothing is drawn.
+
+On every portal page load the kit posts to that endpoint and shows whatever comes back, or nothing. The
+payload tells your side who is asking:
+
+```jsonc
+{ "validate": "<the caller's ns_t>", "path": "/portal/home",
+  "domain": "acme.example", "scope_mode": "...", "sub_scope": "...", "user": "..." }
+```
+
+Reply with plain text, or JSON carrying `message`, `banner_message`, `text` or `banner`. An empty reply shows
+nothing, which is how you take a notice down.
+
+**Why an endpoint instead of a config value.** A notice is time-bound and often per-customer; a setting would
+mean a redeploy to post one and another to remove it. This keeps the kit stateless — no database, no binding
+to provision — while your side changes the message as often as you like.
+
+⚠ **Point it only at an endpoint you control.** The request carries the signed-in user's live `ns_t`, so
+whatever is named there receives a working portal credential from every user who loads the portal. It must
+be `https` for the same reason.
+
+**Simple HTML is supported** — links, bold, italics, and `<br>` to force a break — because a welcome or
+support notice usually needs them. The markup is rebuilt from an allow-list rather than inserted as-is, so
+`<script>`, event handlers and non-`https` links are dropped whatever the endpoint returns. That is a
+backstop against a mistake, not a substitute for trusting what your endpoint says.
+
+**Placement adapts to the window.** Where there is room it overlays blank space in the header, so nothing on
+the page moves; where there is not, it takes its own row above the button grid. A long message shrinks to fit
+rather than being truncated.
+
+<a id="integration-console"></a>
+
+### The integration console (`kit.status`)
+
+A read-only "**Super Portal Kit**" entry in the Manager Portal opens a page reporting how this deployment
+is actually configured. It appears in the **Management** dropdown where that exists, and otherwise at the top
+of the user's **own name dropdown** — see step 3 of §5b for why that is the usual case. Eight tabs:
+
+| Tab | What it answers |
+|---|---|
+| **Overview** | Who you are, how you got in, and anything the setup checklist wants fixed |
+| **Features** | Each capability, who it's available to, and what it still needs — split into administrative features and self-service ones, because the second kind is about *your users*, not you |
+| **Integrations** | The external systems this deployment talks to, each owning its own parts (so "everything below here is off because the API key is unset" is one visible fact, not nine) |
+| **Permissions** | The matrix: one row per feature, one column per NetSapiens scope, plus the two account-based axes. See below |
+| **Menus** | What your menu config does now, per menu, and a builder that composes the next one from the real entries on your portal page. |
+| **Config** | Every setting this Worker reads, grouped into collapsible sections and ordered by consequence, with its current value, its real default where it has one, and a copy-ready `wrangler.jsonc` line for the value it holds now. Secrets by presence only, never a value |
+| **Backend** | This Worker itself: the addresses it serves and calls (including the exact URL to load from your portal), how it authenticates, and the limits around it |
+| **Checks** | Live checks against NetSapiens and the app API, run on demand (and once automatically when you first open the tab). Each row states what it does and what it costs before you run it |
+
+**The Permissions tab is the one worth knowing about.** Each cell answers three questions at once, in the
+order this Worker actually applies them: does the feature's gate admit this person, do they receive the
+bundle that carries it, and can the feature run as configured. *Allowed* and *works* are different
+answers and the marks distinguish them — so a feature can be granted to a scope and still show as not
+running, which is usually a missing setting rather than a gating mistake.
+
+Two columns are account axes rather than scopes: **Superadmin** (an account listed in
+`PORTAL_SUPERADMINS`) and **Named** (an account a feature's own gate names directly under `users:`). Both
+are evaluated at the lowest scope, so they isolate what being *named* buys on its own — which is how the
+tab shows you that naming someone under one feature's `users:` does nothing unless they can also receive
+the bundle (`portal.access`).
+
+The tab will also hand you a **validated, copy-pasteable `PORTAL_FEATURES`** in two forms. Nothing here
+writes to your configuration — a Worker cannot change its own environment — but knowing exactly what to
+paste was always the hard part. Prefer the *overrides only* form: it keeps built-in defaults for
+everything you have not deliberately changed, so a later release's improved default still reaches you.
+The *fully explicit* form pins every feature, which is occasionally what you want and usually not.
+
+It's gated by the registry key **`kit.status`** (default `superadmin`), so — same as any other
+superadmin-gated feature — **an unset `PORTAL_SUPERADMINS` means nobody sees this page**, not everybody.
+Name at least one account there before expecting anyone to reach it.
+
+**Two independent gates decide who actually gets in, and they are not the same rule:**
+
+1. `PORTAL_FEATURES["kit.status"]` may name only `off`, `superadmin`, `super_user`, or `reseller` — never
+   a lower level. Naming one is a **configuration error refused when the configuration is parsed**, which
+   means **every route after `/health` returns 500** until you fix it. Note what that is and is not: the
+   deploy itself succeeds and the Worker starts, so this shows up as a running deployment that answers
+   nothing rather than as a failed release. `/health` still responds, and still reports the version, which
+   is why it is the first thing to check.
+2. Independently, **at request time**, the console additionally requires the caller to hold reseller
+   scope or be a listed superadmin account. Naming a domain-locked account under `kit.status`'s `users:`
+   grants that account nothing here — it gets a 403 explaining why.
+
+The floor in (1) is not the whole safety story by itself — **it constrains which *levels* may be
+granted, not which *named accounts* are**. An operator who reads it as "the floor alone makes this page
+safe" could name one customer's office manager under `users:` and believe that's a smaller grant than it
+is; it isn't a grant at all, because of gate (2) above. Why the page is defended this hard: it names
+other customers' domains and settings, and every scope below reseller is domain-locked everywhere else
+in this kit.
+
+**Multi-reseller caveat.** Widening `kit.status` to `reseller` is justified in the design by "a reseller
+principal can already enumerate the whole fleet via `/domains`" — which is true, but only **on a
+deployment with exactly one reseller**. If your deployment serves **several independent resellers**,
+this does not hold: the request-time gate (`requireFleetRead`) admits *any* reseller-scope principal, so
+Reseller A widened to `reseller` would also see Reseller B's domain names and settings — an actual
+cross-tenant disclosure, not a hypothetical one. If that's your topology, **leave `kit.status` at its
+`superadmin` default** and grant access to specific trusted accounts via `PORTAL_SUPERADMINS`, rather
+than widening the level.
+
+<a id="running-both"></a>
+
 ## 5. Running both (the usual end state)
 
 **One Worker is one mode.** `PORTAL_MODE=1` turns the service path *off* on that Worker: no stored-token
@@ -788,6 +1165,8 @@ fallback, and `/` returns 404 rather than serving an internal tool surface on a 
 
 So the normal setup is **two deployments** — an internal viewer for your team, and a portal backend for
 your users. Pick whichever path suits you; none of them requires you to have both from day one.
+
+<a id="deploy-button-twice"></a>
 
 ### A. Click the deploy button twice (no terminal)
 
@@ -805,12 +1184,16 @@ You get two Workers. The button clones the repo into **your** account each time,
 copies there — the project itself stays one repo. The cost is keeping both copies current; if that
 bothers you, use B or C below, which run both Workers from a single repo.
 
+<a id="two-workers-dashboard"></a>
+
 ### B. One repo, two Workers, from the dashboard (no terminal)
 
 Deploy once with the button, then in the dashboard: **Workers & Pages → Create → connect the same
 repository**, and set that Worker's **deploy command** to `npx wrangler deploy --env portal`. Add an
 `env.portal` block to `wrangler.jsonc` (below) by editing the file **on github.com** — no local tooling
 needed; committing triggers a build.
+
+<a id="two-environments-wrangler"></a>
 
 ### C. One repo, two environments, using wrangler
 
@@ -886,6 +1269,8 @@ The portal Worker gets no token at all — that's the point of portal backend mo
   the next build overwrites `vars` from `wrangler.jsonc`. Edit the file, not the dashboard. (Secrets are
   not overwritten.)
 
+<a id="cloudflare-plan"></a>
+
 ### Cloudflare plan: free or paid ($5)?
 
 Most small deployments run fine on the **Workers Free** plan. Whether you'll want **Workers Paid** ($5/mo)
@@ -895,7 +1280,7 @@ comes down to **how busy your portal is and how many Worker calls it makes** —
   gated bundle(s), and each feature's data fetch). A handful of admins browsing stays well under; a busy
   portal with many active users can cross 100k/day → Paid (**10 million requests/month included**, then
   $0.30 per additional million).
-- **Subrequests — Free caps 50 per request, Paid 10,000.** Resolving a **large** domain's call-flow diagram
+- **Subrequests — Free caps 50 per request, Paid 1,000.** Resolving a **large** domain's call-flow diagram
   fans out into many NetSapiens API calls (users, queues, attendants, dial-plans, per-user answer rules…),
   and a big domain can exceed **50 subrequests** on Free and fail to render. That's the single clearest
   reason to move to Paid. (CPU time is capped tighter on Free too — 10 ms/request vs 30 s — which a large
@@ -904,6 +1289,107 @@ comes down to **how busy your portal is and how many Worker calls it makes** —
 **Overages on Paid are minor:** past the (generous) included amounts it's $0.30 per million requests and
 $0.02 per million CPU-ms — cents, not dollars, for a moderately busy portal. Rule of thumb: **start on Free;
 move to the $5 plan once the portal gets busy or you diagram large domains.**
+
+<a id="safe-first-deploy"></a>
+
+## 5a. A safe first deploy, when your portal is already live
+
+Most operators cannot experiment on production, and this kit injects into the portal every one of their
+customers uses. So do not start by turning it on for everyone — start by turning it on for **one domain and
+one account**, which needs no extra tooling because both levers already exist.
+
+**Step 1 — restrict the deployment to a domain you can afford to break.**
+
+```jsonc
+"ALLOWED_DOMAINS": "yourtest.example"
+```
+
+Any other domain is refused outright, even one your token could otherwise read. This is the outer boundary,
+and it is the one worth setting first because it bounds every mistake that follows.
+
+**Step 2 — gate every feature to yourself.**
+
+```jsonc
+"PORTAL_FEATURES": "{\"portal.access\":{\"users\":[\"you@example.com\"]},\"portal.self\":{\"users\":[\"you@example.com\"]}}"
+```
+
+Those two are the delivery gates: with both named to your account, nobody else is served a feature bundle at
+all. You do not need to list every key — gating the two entry points is sufficient, and it is one line.
+
+**Step 3 — point the portal at the Worker**, and confirm from the console (§5b) that the environment badge,
+your identity and the gates read the way you expect.
+
+**Step 4 — widen deliberately**, one axis at a time: more domains in `ALLOWED_DOMAINS`, then a level instead
+of a user list on one feature, then the rest.
+
+**What your other users experience during step 2**, stated plainly rather than left to be discovered: they
+still load the injected primary, because it is public and unauthenticated by design. It is a few kilobytes,
+it requests the gated bundles, it is refused, and it injects nothing. So the honest description is "everyone
+loads a small script that does nothing", not "nothing reaches them". If even that is unacceptable, do not
+point the portal at the Worker yet — use the test harness instead, which is browser-local and changes no
+portal configuration at all.
+
+<a id="first-five-minutes"></a>
+
+## 5b. The first five minutes after you deploy
+
+This section did not exist until the integration console did. The rest of this document tells you what to set;
+this tells you how to confirm it took, in the order that finds problems fastest.
+
+**1. Name a superadmin, before you deploy if you can.**
+
+```bash
+wrangler secret put PORTAL_SUPERADMINS --env portal   # you@yourdomain.example
+```
+
+The console defaults to superadmin-only, and with nobody named it admits nobody. Setting the secret does not
+require a redeploy — but doing it first means you never have a console you cannot open.
+
+**2. Check it is running the code you think.**
+
+```bash
+curl https://your-worker-host/health
+# {"ok":true,"configured":true,"version":"0.2.45","scope":"..."}
+```
+
+`configured:false` means something required is still missing. `version` should match the release you
+deployed — if it does not, the deploy did not land.
+
+**3. Open the console.** In the Manager Portal, look for a bold **Super Portal Kit** entry. **Where it is
+depends on your portal:**
+
+- **Your own name dropdown**, at the top of it — this is where it lands on a **stock** NetSapiens portal,
+  and it is the case to expect unless you know otherwise.
+- **The Management dropdown**, if your portal has one. That menu is **not stock** — it is added by a vendor
+  add-on (verified 2026-08-08 against a portal with no add-ons: no Management menu). Where it exists, the
+  console prefers it, because an operator tool belongs among administrative entries rather than among
+  someone's own account links.
+
+Either way it is one gate (`kit.status`) and the same page. This is the step that replaces reading your own
+configuration back to yourself:
+
+- **Check the environment badge first.** It reads PROD, DEV or LOCAL, derived from the hostname and cache
+  namespace. If you run more than one deployment, this is what stops you making changes against the wrong one.
+- **Overview** — anything the setup checklist still wants fixed, and why you personally can see the page.
+- **Features** and **Integrations** — what is on, what is off, and what is *inert*: allowed but unable to run
+  because a setting it needs is absent. Inert is the state worth hunting for; it looks like working
+  configuration from every other angle.
+- **Backend → Addresses** — the exact URL to load from your portal, and what this deployment calls.
+- **Permissions** — which of your users get what, before any of them find out for you.
+- **Checks** — live calls against NetSapiens and your app platform, run once automatically the first time you
+  open the tab. This is the only part that proves a credential actually works rather than merely being present.
+
+**4. If the console refuses you**, the refusal says which of two things is wrong: no superadmin is named
+(fix: step 1), or the feature has been switched off in `PORTAL_FEATURES`. It will not tell you *who is*
+admitted — that would leak the account list to whoever asked.
+
+**A note on what the console cannot tell you.** It reports configuration and reachability, not whether your
+portal is actually loading the script. Serving the injected primary and being loaded by a portal are
+different facts, and the Addresses block marks which is which. The end-to-end check is still: open your
+portal and look.
+
+<a id="service-token-gate"></a>
+<a id="ALLOW_UNGATED_SERVICE_TOKEN"></a>
 
 ## 6. The service-token gate
 
@@ -921,6 +1407,8 @@ for anyone who finds it, so the token stays unused until one of these is true:
 | **You protect it yourself** | `ALLOW_UNGATED_SERVICE_TOKEN=1` — a deliberate opt-out for mTLS, a WAF, or an authenticating proxy. You own the consequences. |
 
 Local `wrangler dev` is exempt: it isn't internet-reachable.
+
+<a id="getting-updates"></a>
 
 ## 7. Getting updates later
 
@@ -943,6 +1431,8 @@ likely to move here. Your `vars` are yours — keep them.
 If you'd rather not track this repo at all, that's fine too; nothing here phones home, and a deployment
 that works will keep working.
 
+
+<a id="where-each-value-goes"></a>
 
 ## 8. Where each value goes
 

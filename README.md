@@ -17,7 +17,8 @@ Objects), so it deploys clean.
 
 **Two modes, one form.** Leave `PORTAL_MODE` blank for an internal tool for your team (needs
 `NS_API_TOKEN`) — **start here**. Set it to `1` for a Manager Portal add-on backend, where every request
-carries the calling user's own login token and no credential is stored at all. Want both? Click the
+carries the calling user's own login token and no credential is stored — until you turn on event
+subscriptions, which is the one feature that needs a stored service credential of its own. Want both? Click the
 button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
 
 > **Portal backend mode serves its own injection.** It's the backend half — nothing runs until JS inside
@@ -45,7 +46,7 @@ button twice — two Workers from this one repo. See **[SETUP.md](./SETUP.md)**.
   administrator's menu. Added links
   are static (label + `https://` or `mailto:`) and can interpolate the signed-in user's own details plus
   the page they are on, which makes a "get help" link arrive already identified. *Portal backend mode
-  only.* See [SETUP.md](./SETUP.md#customizing-portal-menus-portal_menus).
+  only.* See [SETUP.md](./SETUP.md#portal-menus).
 - **Enrichment on the diagrams** — app presence and desk-phone model/registration shown inline on agent
   lines. *Both modes, optional.*
 
@@ -129,7 +130,7 @@ rather than by us. Your JS then updates the live page with what comes back.
 (`https://<your-worker>/<PRIMARY_BASENAME>.js`); it fetches the gated feature bundles (admin + self-service)
 and injects them. You can also compose it into a script you already inject, or add your own gated
 secondaries (`PORTAL_SECONDARIES`, external or private-R2). Standalone mode needs nothing extra.
-[The full flow, with a diagram →](./SETUP.md#4-portal-backend-mode-what-it-actually-is)
+[The full flow, with a diagram →](./SETUP.md#portal-backend-mode)
 
 ## Configuration
 
@@ -168,8 +169,8 @@ Both are Node-free and run unchanged in a Worker, in Node, or the browser.
 ```
 pnpm install
 pnpm typecheck
-pnpm test                      # offline suites; no credentials needed
-pnpm test:worker <snapshot.json>   # needs a real domain snapshot (not in this repo)
+pnpm test                      # every offline suite; no credentials, no snapshot needed
+pnpm test:worker <snapshot.json>   # optional: run it against a snapshot of your own
 pnpm flow <snapshot.json> gallery  # offline CLI -> out/*.gallery.html
 ```
 

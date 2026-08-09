@@ -3,7 +3,7 @@
  * plus specific overrides — expresses all four intents (everywhere / all-except / only-these / nothing) on
  * both axes, and that precedence is domain → app → "*". pnpm test:menus
  */
-import { resolveMenus, menuConfigError, MenuConfigError, resolveTargeted, MENU_NAMES, type MenuItem } from './menus.js';
+import { resolveMenus, menuConfigError, MenuConfigError, resolveTargeted, MENU_NAMES, appsHideSources, bothAppsHideSet, type MenuItem } from './menus.js';
 
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => { c ? pass++ : fail++; console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); };
@@ -92,8 +92,97 @@ const M = (o: unknown) => ({ PORTAL_MENUS: JSON.stringify(o) });
   ok(threw(() => apps(M({ apps: { nope: ['X'] } }), ACME, 'none')), 'an unknown key inside a menu is a config error');
   ok(threw(() => apps({ PORTAL_MENUS: 'not json' }, ACME, 'none')), 'malformed JSON is a config error');
   ok(threw(() => apps(M({ apps: { hide: { [ACME]: 'X' } } }), ACME, 'none')), 'a rung that is not an array is a config error');
-  ok(threw(() => resolveMenus({ PORTAL_APPS_HIDE: 'X', PORTAL_MENUS: JSON.stringify({ apps: { hide: ['Y'] } }) }, { domain: ACME, app: 'none' })),
-    'setting BOTH PORTAL_APPS_HIDE and PORTAL_MENUS.apps.hide is an error, not a silent precedence rule');
+}
+
+// ── the `users` axis (2026-08-08) ──────────────────────────────────────────
+// Added to match the per-user grants PORTAL_FEATURES already has: "gate this by user" should mean one
+// thing across the kit. It is the MOST specific axis, because naming an account is only ever worth doing
+// to carve an exception out of a broader rule.
+{
+  const ME = 'boss@acme.example';
+  const at = (env: Record<string, string>, over: Record<string, unknown> = {}) =>
+    resolveMenus(env, { domain: ACME, app: 'none', user: ME, ...over } as never).apps;
+
+  const byUser = M({ apps: { hide: { users: { [ME]: ['X'] } } } });
+  ok(at(byUser).hide.join() === 'X', '[users] a rule naming your account matches');
+  ok(at(byUser, { user: 'someone@else.example' }).hide.length === 0, '[users] and nobody else');
+  ok(at(byUser, { user: undefined }).hide.length === 0, '[users] no account in context ⇒ falls through, never throws');
+  ok(at(M({ apps: { hide: { users: { 'BOSS@Acme.Example': ['X'] } } } })).hide.join() === 'X',
+    '[users] account keys match case-insensitively, like every other axis');
+
+  // Most specific WINS. Without this an account key could never carve an exception out of a domain rule,
+  // which is the only reason to write one.
+  const both = M({ apps: { hide: { users: { [ME]: ['USER'] }, domains: { [ACME]: ['DOM'] } } } });
+  ok(at(both).hide.join() === 'USER', '[users] account beats domain');
+  ok(at(both, { user: 'other@acme.example' }).hide.join() === 'DOM', '[users] and the domain rule still covers everyone else');
+  // The empty-override idiom has to work here too: "everyone in this domain except me".
+  const except = M({ apps: { hide: { domains: { [ACME]: ['X'] }, users: { [ME]: [] } } } });
+  ok(at(except).hide.length === 0, '[users] an empty account rung exempts that one account');
+  ok(at(except, { user: 'other@acme.example' }).hide.join() === 'X', '[users] while the domain rule stands for the rest');
+
+  // A star on this axis is a DEFAULT, so it must not beat an exact match on a less specific axis.
+  const star = M({ apps: { hide: { users: { '*': ['ANY'] }, domains: { [ACME]: ['DOM'] } } } });
+  ok(at(star).hide.join() === 'DOM', '[users] a users "*" is a default and loses to a domain that names you');
+
+  // Loud on a key that can never match — same standard as the scope and app axes.
+  ok(threw(() => apps(M({ apps: { hide: { users: { 'not-an-account': ['X'] } } } }), ACME, 'none')),
+    '[users] a key that is not user@domain is a config error, not a silent never-match');
+  ok(threw(() => apps(M({ apps: { hide: { users: ['X'] } } }), ACME, 'none')), '[users] and the axis must be an object');
+  // The startup probe must EXERCISE this axis, or a malformed key ships.
+  ok(menuConfigError(M({ apps: { hide: { users: { bad: ['X'] } } } })) !== null,
+    '[users] menuConfigError catches it at startup, not on the one request that matches');
+  ok(menuConfigError(M({ apps: { hide: { users: { [ME]: ['X'] } } } })) === null, '[users] and accepts a good one');
+
+  // Works on add as well as hide — one targeting engine, not two.
+  const addByUser = M({ apps: { add: { users: { [ME]: [{ label: 'Mine', url: 'https://e.example' }] } } } });
+  ok(at(addByUser).add.length === 1 && at(addByUser, { user: 'x@y.example' }).add.length === 0,
+    '[users] add is targeted by account the same way hide is');
+}
+
+// ── The two apps-menu hide settings MERGE (2026-08-08) ─────────────────────
+// This used to be a fatal config error. The risk it named was real — two places to look for one answer —
+// but the cost landed on the wrong thing: `menuConfigError` runs before routing, so two overlapping
+// COSMETIC settings returned 500 on every route including the injected primary, and the entire add-on went
+// dark for every user. The answer is to make the merged result visible, not to make the combination
+// illegal. Precedence was the alternative and is worse: it silently discards a setting somebody wrote.
+{
+  const both = { PORTAL_APPS_HIDE: 'X', PORTAL_MENUS: JSON.stringify({ apps: { hide: ['Y'] } }) };
+  const ctx = { domain: ACME, app: 'none' };
+  ok(menuConfigError(both) === null, '[merge] setting both is no longer a config error');
+  const plan = resolveMenus(both, ctx).apps;
+  ok(plan.hide.includes('X') && plan.hide.includes('Y'),
+    `[merge] and BOTH lists take effect (${plan.hide.join(', ')})`);
+  // Neither setting silently wins. That is the whole difference from a precedence rule, and the property
+  // most likely to be lost in a refactor that "simplifies" the merge.
+  ok(resolveMenus({ PORTAL_APPS_HIDE: 'X' }, ctx).apps.hide.join() === 'X', '[merge] legacy alone still works');
+  ok(resolveMenus({ PORTAL_MENUS: JSON.stringify({ apps: { hide: ['Y'] } }) }, ctx).apps.hide.join() === 'Y',
+    '[merge] and PORTAL_MENUS alone still works');
+
+  // De-duplicated case-insensitively: the same entry named in both settings is one hide, not two, and
+  // hiding twice must not depend on matching the operator's capitalisation.
+  const dupe = { PORTAL_APPS_HIDE: 'Voicemail', PORTAL_MENUS: JSON.stringify({ apps: { hide: ['voicemail'] } }) };
+  ok(resolveMenus(dupe, ctx).apps.hide.length === 1, '[merge] a label named in both appears once');
+
+  // Provenance is what makes two settings safe rather than confusing — the console shows one effective
+  // list AND which setting each label came from, so there is still one place to look for the answer.
+  const src = appsHideSources(both, ctx);
+  ok(src.legacy.join() === 'X' && src.menus.join() === 'Y', '[merge] each source is reported separately');
+  ok(src.effective.length === 2, '[merge] alongside the effective union');
+  ok(bothAppsHideSet(both) && !bothAppsHideSet({ PORTAL_APPS_HIDE: 'X' }),
+    '[merge] and the both-are-set condition is reportable without being fatal');
+  // TOTAL: setupIssues calls this, and setupIssues exists to REPORT what is wrong. A predicate that threw
+  // on malformed PORTAL_MENUS took down the console for the one deployment that needed it — caught by the
+  // suite, but only because buildStatus happens to be tested with a malformed value.
+  let threwOnGarbage = false;
+  try { bothAppsHideSet({ PORTAL_APPS_HIDE: 'X', PORTAL_MENUS: 'not json' }); } catch { threwOnGarbage = true; }
+  ok(!threwOnGarbage, '[merge] and it never throws — malformed JSON is menuConfigError\'s to report, not this');
+
+  // Targeting still applies to the PORTAL_MENUS half after the merge — a merge that flattened away the
+  // per-domain rungs would hide entries for domains that never asked.
+  const targeted = { PORTAL_APPS_HIDE: 'X', PORTAL_MENUS: JSON.stringify({ apps: { hide: { [ACME]: ['Y'], '*': [] } } }) };
+  ok(resolveMenus(targeted, ctx).apps.hide.join() === 'Y,X', '[merge] the targeted rung applies for its domain');
+  ok(resolveMenus(targeted, { domain: 'other.example', app: 'none' }).apps.hide.join() === 'X',
+    '[merge] and another domain gets only the legacy list');
 }
 
 // ── Back-compat: PORTAL_APPS_HIDE keeps working, unchanged ─────────────────
@@ -279,6 +368,23 @@ const M = (o: unknown) => ({ PORTAL_MENUS: JSON.stringify(o) });
     if (typeof v !== 'string') throw new MenuConfigError(`${p} bad`); return v;
   });
   ok(got.length === 1 && got[0] === 'A', 'resolveTargeted works standalone');
+}
+
+// ── the domains axis has an in-axis default, like every other axis (Fable review, 2026-08-09) ──────────
+// It was the only axis that did not pick up its own "*", so the shape this module's contract documents --
+// "change everywhere EXCEPT some" -- validated green and matched nothing anywhere. Asserted per axis
+// rather than once, because the bug was an omission in one branch of four that otherwise agree.
+{
+  const cfg = M({ apps: { hide: { domains: { '*': ['Everywhere'], [ACME]: [] } } } });
+  ok(hideOf(cfg, OTHER, 'none').join(',') === 'Everywhere',
+    'domains: an in-axis "*" applies where no domain entry matches');
+  ok(hideOf(cfg, ACME, 'none').length === 0,
+    'and an explicit domain entry still wins outright over it');
+
+  // Precedence is unchanged: the FIRST axis to supply a default wins, users before domains.
+  const both = M({ apps: { hide: { users: { '*': ['FromUsers'] }, domains: { '*': ['FromDomains'] } } } });
+  ok(resolveMenus(both, { domain: OTHER, app: 'none', user: 'u@x.example' }).apps.hide.join(',') === 'FromUsers',
+    "and users' default still outranks the domains default, as the documented order says");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

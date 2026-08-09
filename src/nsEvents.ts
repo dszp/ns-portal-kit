@@ -88,6 +88,27 @@ export class NsEventsConfigError extends Error {
 /** How the service identity authenticates to NetSapiens. Mirrors the SSO worker so config transfers. */
 export type NsWriteIdentity = { kind: 'api'; token: string } | { kind: 'admin'; user: string; pass: string };
 
+/**
+ * Resolve the background-write identity from raw presence — admin credentials win when BOTH are set,
+ * matching the SSO worker's precedence, else the API key, else none. Extracted so a diagnostic surface
+ * (the integration console) can ask "what identity would this resolve to" without re-deriving the precedence
+ * itself — a second copy of "admin wins over api" is exactly the kind of drift this function exists to
+ * prevent. Pure presence-only and NEVER throws: whether an 'admin' identity can actually MINT a token
+ * additionally needs `NS_OAUTH_CLIENT_ID`/`NS_OAUTH_CLIENT_SECRET`, which is `nsIdentity.ts`'s
+ * `getServiceToken` precondition (see its `identityUsable`) — a different, later question than "which
+ * credential was configured".
+ */
+export function resolveWriteIdentity(env: Pick<NsEventsEnv, 'NS_API_KEY' | 'NS_ADMIN_USER' | 'NS_ADMIN_PASS'>): NsWriteIdentity | undefined {
+  const apiKey = (env.NS_API_KEY ?? '').trim();
+  const adminUser = (env.NS_ADMIN_USER ?? '').trim();
+  const adminPass = (env.NS_ADMIN_PASS ?? '').trim();
+  return adminUser && adminPass
+    ? { kind: 'admin', user: adminUser, pass: adminPass }
+    : apiKey
+      ? { kind: 'api', token: apiKey }
+      : undefined;
+}
+
 export type NsEventsIntent = 'auto' | 'on' | 'off';
 
 export interface NsEventsConfig {
@@ -256,12 +277,7 @@ export function parseNsEventsConfig(env: NsEventsEnv): NsEventsConfig {
   const maxEvents = Math.max(1, intOr(env.NS_EVENTS_MAX_EVENTS, 40, 'NS_EVENTS_MAX_EVENTS', 'count'));
   const preferredServer = (env.NS_EVENTS_PREFERRED_SERVER ?? '').trim();
 
-  // Identity: admin wins when both are set, matching the SSO worker.
-  const apiKey = (env.NS_API_KEY ?? '').trim();
-  const adminUser = (env.NS_ADMIN_USER ?? '').trim();
-  const adminPass = (env.NS_ADMIN_PASS ?? '').trim();
-  const identity: NsWriteIdentity | undefined =
-    adminUser && adminPass ? { kind: 'admin', user: adminUser, pass: adminPass } : apiKey ? { kind: 'api', token: apiKey } : undefined;
+  const identity = resolveWriteIdentity(env);
 
   const base: Omit<NsEventsConfig, 'armed' | 'inertReason'> = {
     intent,

@@ -76,9 +76,10 @@
     // ns_t.
     //
     // NOT A STARTING POINT YET. Portal backend mode is only half of a feature: it does nothing until JS you
-    // inject into your Manager Portal calls it. A reference injection script is planned but NOT
-    // published, so today this means writing that yourself. Leave blank unless that's what you're
-    // doing. See SETUP.md.
+    // inject into your Manager Portal calls it. The Worker SERVES that script itself — hand your
+    // portal https://<your-worker-host>/p.js (the basename is PRIMARY_BASENAME, default "p"); there
+    // is nothing for you to write. Leave PORTAL_MODE blank unless you are running that mode.
+    // See SETUP.md.
     "PORTAL_MODE": "",
     // Portal backend mode only: the browser origin your injected JS runs on — normally your Manager Portal.
     "ALLOWED_ORIGINS": ""

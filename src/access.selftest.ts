@@ -3,7 +3,7 @@
  * RSA key, sign real Access-shaped tokens, and check the pure `verifyAccessToken` accepts the good one
  * and rejects tampering / wrong aud / wrong issuer / expiry / bad kid. Run: `pnpm test:access`.
  */
-import { verifyAccessToken, type AccessJwk } from './access.js';
+import { accessConfig, verifyAccessToken, type AccessJwk } from './access.js';
 
 // A deliberately-fake 64-hex placeholder. The self-test only needs the AUD to be self-consistent
 // (mint with it, verify against it) — never a real one. Do NOT paste a deployment's real Access AUD
@@ -92,6 +92,34 @@ async function main() {
   check('malformed token rejected', !(await verifyAccessToken('not.a.jwt.at.all', jwks, { aud: AUD, issuer: ISS, now })).ok);
   check('alg none rejected', !(await verifyAccessToken(
     await makeToken(privateKey, good, { alg: 'none', kid: KID }), jwks, { aud: AUD, issuer: ISS, now })).ok);
+
+  // ── accessConfig: WHEN the gate is live at all ──────────────────────────────────────────────────
+  //
+  // The predicate, not the crypto. Two independent reasons to return null, and the second one is the whole
+  // of UX-spec item 11: in portal-backend mode an Access gate is not redundant, it is an outage — the
+  // Manager Portal loads the injected primary with a plain `<script src>`, which cannot complete an Access
+  // login. Enforced in ONE place so every consumer (requireAccess, the global gate, setupIssues'
+  // half-configured warning, the exposure gate, the integration console's Access card) inherits it; scattering
+  // `portalMode` checks across each call site is how the original confusion survived a code read.
+  const bothVars = { ACCESS_AUD: AUD, ACCESS_TEAM_DOMAIN: 'yourteam.cloudflareaccess.com' };
+  check('accessConfig: both vars set (standalone) → live', accessConfig(bothVars) !== null);
+  check('accessConfig: AUD alone → null (the 356e6d8 fail-open shape — never trust AUD on its own)',
+    accessConfig({ ACCESS_AUD: AUD }) === null);
+  check('accessConfig: team domain alone → null', accessConfig({ ACCESS_TEAM_DOMAIN: 'yourteam.cloudflareaccess.com' }) === null);
+  check('accessConfig: neither → null', accessConfig({}) === null);
+  // Each of the recognized truthy forms, because portalMode() accepts all of them and honouring Access
+  // under any one of them breaks that deployment. Tested individually rather than via one representative:
+  // a regression that only re-read "1" would otherwise pass.
+  for (const v of ['1', 'true', 'yes', 'on', 'ON', ' 1 ']) {
+    check(`accessConfig: PORTAL_MODE=${JSON.stringify(v)} → null even with BOTH vars set (Access is ignored, not honoured)`,
+      accessConfig({ ...bothVars, PORTAL_MODE: v }) === null);
+  }
+  // And the negative: a falsy/absent PORTAL_MODE must NOT suppress the gate, or the standalone deployment
+  // whose only protection this is would be serving its ambient-authority token unguarded.
+  for (const v of ['0', 'false', 'no', 'off', '', undefined]) {
+    check(`accessConfig: PORTAL_MODE=${JSON.stringify(v)} (standalone) → still live`,
+      accessConfig({ ...bothVars, PORTAL_MODE: v }) !== null);
+  }
 
   console.log(`\naccess.selftest: ${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);

@@ -17,7 +17,9 @@
 import { isAllowed, type Principal } from '@dszp/netsapiens-lib';
 import { resolveGate, FeaturesConfigError, type Gate } from './features.js';
 import { parseDownloads } from './appAccess.js';
-import { VERSION } from './brand.js';
+import { VERSION, productName, releaseNotesUrl } from './brand.js';
+import { portalMode } from './setup.js';
+import { SPK_BRIDGE } from './spkBridge.js';
 
 /** The subset of the Worker `Env` the kit helpers read. Structural, so worker.ts's `Env` satisfies it. */
 export interface KitEnv {
@@ -35,6 +37,19 @@ export interface KitEnv {
   RINGOTEL_APP_BASE_URL?: string;
   /** JSON array of app-download links rendered in the stock Apps menu. Self bundle only. Unset ⇒ []. */
   PORTAL_APP_DOWNLOADS?: string;
+  /** Company name for the footer version line's product name (`productName`). Unset ⇒ unbranded. */
+  BRAND_NAME?: string;
+  /** Where the footer version line links, `{version}` substituted. Empty ⇒ never link (`releaseNotesUrl`). */
+  PORTAL_RELEASE_NOTES_URL?: string;
+  /** Endpoint returning the status-banner message for the caller. Unset ⇒ the feature is inert.
+   *  Receives the caller's live ns_t, so it must be an endpoint the operator controls. */
+  STATUS_BANNER_WEBHOOK?: string;
+  /** Whether portal backend mode is on — `kitConfigError` only applies below (the injection surface is
+   *  portal-mode-only); read via `portalMode()` (src/setup.ts) so the parse can't drift from the flag
+   *  that actually gates portal mode elsewhere. */
+  PORTAL_MODE?: string;
+  /** Structural for `kitConfigError`'s ASSETS-binding check; see the Worker `Env`'s own doc comment. */
+  ASSETS?: { get(key: string): Promise<{ text(): Promise<string> } | null> };
 }
 
 /** Loud, distinct error for a bad kit config value so the caller can map it to a 500 (fail closed). */
@@ -73,14 +88,22 @@ export const FEATURE_KEYS = [
 /** All policy keys a principal is tested against for the bundle (in registry order). */
 export const featurePolicyKeys = (): string[] => FEATURE_KEYS.map((f) => f.key);
 
-/** The self-service (`me.*`) flag↔key map — drives the SELF bundle's `_AF` (registry order). Kept apart
- * from FEATURE_KEYS so the admin bundle is unaffected; each key MUST exist in FEATURE_REGISTRY. */
+/** The SELF bundle's flag↔key map — drives its `_AF` (registry order). Kept apart from FEATURE_KEYS so the
+ * admin bundle is unaffected.
+ *
+ * WHICH keys belong here is not a judgement call: it is every registry key whose `deliveredBy` resolves to
+ * `self`, and `kit.selftest.ts` asserts exactly that set. So a new self-delivered feature that forgets its
+ * entry here fails the tests instead of shipping a flag the bundle never sees. What is NOT derivable is the
+ * `flag` — those are bundle-local short names (`resetPassword` means `me.resetPassword` here and
+ * `ringotel.resetPassword` in the admin bundle), so they stay written down. */
 export const SELF_FEATURE_KEYS = [
   { flag: 'appStatus', key: 'me.appStatus' },
   { flag: 'devices', key: 'me.devices' },
   { flag: 'resetPassword', key: 'me.resetPassword' },
   { flag: 'appAccess', key: 'me.appAccess' },
   { flag: 'menuConfig', key: 'me.menuConfig' },
+  { flag: 'statusBanner', key: 'portal.statusBanner' },
+  { flag: 'versionLine', key: 'portal.versionLine' },
 ] as const;
 
 /** The self bundle's policy keys, in order. */
@@ -99,9 +122,12 @@ export interface ManifestEntry {
   /** Served at `/kit/asset/<name>.js` (r2) or loaded direct (url). `^[a-z0-9_-]+$`. */
   name: string;
   from: string;
-  /** `public` (no token) or a gating level from the vocabulary (`all`/`reseller`/`office_manager`/… —
-   *  see src/features.ts `resolveGate`), resolved the same way as a feature gate. Ignored for url:. */
-  auth: string;
+  /**
+   * `public` (no token), or ANY gate the feature vocabulary accepts — a level, a list of levels, or
+   * `{levels, users}` to name accounts. Resolved by the same `resolveGate` a feature gate uses, so
+   * "gate this by user" means one thing across the kit rather than two. Ignored for url: entries.
+   */
+  auth: Gate;
 }
 
 /** True for `r2:` entries — the ones the Worker serves from the ASSETS binding at `/kit/asset/<name>.js`. */
@@ -130,7 +156,11 @@ export function parseManifest(env: KitEnv): ManifestEntry[] {
     const e = raw0 as Record<string, unknown>;
     const name = typeof e?.name === 'string' ? e.name.trim() : '';
     const from = typeof e?.from === 'string' ? e.from.trim() : '';
-    const auth = typeof e?.auth === 'string' ? e.auth.trim() : '';
+    // A STRING OR A GATE OBJECT. It was string-only, which refused `{"users": [...]}` even though
+    // resolveGate has always accepted it — so a secondary could be gated to a level but never to named
+    // accounts, while a feature could. The asymmetry was an accident of this parse, not a decision.
+    const rawAuth = (e as { auth?: unknown } | null)?.auth;
+    const auth: Gate = typeof rawAuth === 'string' ? rawAuth.trim() : (rawAuth as Gate);
     if (!BASENAME_RE.test(name)) throw new KitConfigError(`PORTAL_SECONDARIES[${i}].name must match ^[a-z0-9_-]+$`);
     if (seen.has(name)) throw new KitConfigError(`PORTAL_SECONDARIES[${i}].name is duplicated: ${name}`);
     seen.add(name);
@@ -147,18 +177,65 @@ export function parseManifest(env: KitEnv): ManifestEntry[] {
     // presets, now dropped) is a loud, actionable deploy-time 500 (uniform, pre-auth via kitConfigError),
     // not a silent per-request throw for authenticated callers only. url: entries ignore auth at serve
     // time, but a coherent manifest still validates it.
-    if (!auth) throw new KitConfigError(`PORTAL_SECONDARIES[${i}].auth is required`);
+    if (auth === undefined || auth === null || auth === '') throw new KitConfigError(`PORTAL_SECONDARIES[${i}].auth is required`);
     if (auth !== 'public') {
       try {
         resolveGate(auth, []);
       } catch (e) {
         if (e instanceof FeaturesConfigError)
-          throw new KitConfigError(`PORTAL_SECONDARIES[${i}].auth ${e.message} — use "public" or a gating level (all/super_user/reseller/office_manager/site_manager/advanced_user/basic_user/call_center_agent/call_center_supervisor/superadmin/off)`);
+          throw new KitConfigError(`PORTAL_SECONDARIES[${i}].auth ${e.message} — use "public", a gating level (all/super_user/reseller/office_manager/site_manager/advanced_user/basic_user/call_center_agent/call_center_supervisor/superadmin/off), or {"levels": [...], "users": [...]}`);
         throw e;
       }
     }
     return { name, from, auth };
   });
+}
+
+/**
+ * Loud, fail-closed validation of the static injection config (portal-mode-only). A malformed
+ * PRIMARY_BASENAME / PORTAL_SECONDARIES / PORTAL_HANDOFF_URL is a deploy-time mistake: surface it as a
+ * 500 with an actionable reason on every request (after /health), rather than throwing deep in a route.
+ * Returns null when off (non-portal) or valid. The single check — worker.ts calls this rather than
+ * re-validating the same manifest/basename/handoff shape itself.
+ */
+export function kitConfigError(env: KitEnv): string | null {
+  if (!portalMode(env)) return null;
+  try {
+    primaryBasename(env);
+    parseManifest(env);
+  } catch (e) {
+    if (e instanceof KitConfigError) return e.message;
+    throw e;
+  }
+  const h = env.PORTAL_HANDOFF_URL;
+  if (h !== undefined && h.trim() !== '' && !/^https:\/\/\S+$/i.test(h.trim()))
+    return 'PORTAL_HANDOFF_URL must be an https URL (or unset for a loud no-handoff signal, or "" for an intentional none)';
+  // RINGOTEL_APP_BASE_URL becomes an <a href> in the gated bundle — require https (buildKitBundle also
+  // drops a non-https value defensively, but fail loud so the operator fixes it rather than silently
+  // losing the app-dashboard links).
+  const ab = env.RINGOTEL_APP_BASE_URL;
+  if (ab !== undefined && ab.trim() !== '' && !/^https:\/\/\S+$/i.test(ab.trim()))
+    return 'RINGOTEL_APP_BASE_URL must be an https URL (it becomes an app-dashboard link href), or unset';
+  // STATUS_BANNER_WEBHOOK receives the caller's live ns_t, so wrapBundle refuses to emit a non-https
+  // value. That refusal is SILENT from the operator's side: the feature reads as configured and on, and
+  // simply never draws anything -- the same shape as the endpoint returning an unrecognised body, which
+  // is the failure this whole feature has proven hardest to diagnose. Fail loud here instead.
+  const bw = env.STATUS_BANNER_WEBHOOK;
+  if (bw !== undefined && bw.trim() !== '' && !/^https:\/\/\S+$/i.test(bw.trim()))
+    return 'STATUS_BANNER_WEBHOOK must be an https URL (it receives the caller\'s live ns_t), or unset to turn the banner off';
+  // PORTAL_RELEASE_NOTES_URL becomes an <a href> in the portal footer and the console header. Escaping
+  // does not neutralise a javascript: value in an href position, and this was the one operator URL
+  // rendered that way with no scheme check -- the others above have had one since they shipped. '' is a
+  // deliberate "never link", so only a non-empty value is checked.
+  const rn = env.PORTAL_RELEASE_NOTES_URL;
+  if (rn !== undefined && rn.trim() !== '' && !/^https:\/\/\S+$/i.test(rn.trim()))
+    return 'PORTAL_RELEASE_NOTES_URL must be an https URL (it becomes the version link href), "" to never link, or unset for the default';
+  // An r2: secondary with no ASSETS binding is a broken deploy — surface it uniformly here (loud, every
+  // route) rather than as a per-name 500 on the asset route (which would disclose config to an
+  // unauthenticated caller before the gate). parseManifest already validated above, so it won't throw.
+  if (!env.ASSETS && parseManifest(env).some(isR2Entry))
+    return 'A PORTAL_SECONDARIES entry uses r2: but no ASSETS R2 binding is bound';
+  return null;
 }
 
 /**
@@ -178,7 +255,7 @@ export function kitGateAllows(auth: Gate, principal: Principal | null, superadmi
 }
 
 /** True when the level needs a valid ns_t (everything except `public`). Drives 401-vs-serve on the route. */
-export const secondaryNeedsAuth = (auth: string): boolean => auth !== 'public';
+export const secondaryNeedsAuth = (auth: Gate): boolean => auth !== 'public';
 
 // ── Cache tiering ────────────────────────────────────────────────────────────────────────────────
 // A "tier" is the exact allowed-key set. Two principals with the same set get byte-identical bundles,
@@ -213,7 +290,11 @@ export function primaryJs(env: KitEnv): string {
   // Absent (undefined) is distinct from "" — the primary can't tell them apart from `H` alone (both are
   // ""), so inject the "missing" signal explicitly. Absent ⇒ loud reseller nag; "" ⇒ intentional silence.
   const HM = JSON.stringify(env.PORTAL_HANDOFF_URL === undefined);
-  const M = JSON.stringify(manifest.map((e) => ({ name: e.name, from: e.from, auth: e.auth })));
+  // `pub`, not the gate. The client's only question is "fetch this with a token, or load it plainly?" —
+  // one boolean. This used to ship the gate value itself into the PUBLIC, unauthenticated primary, which
+  // was merely needless when a gate was a level like "reseller" and becomes a real disclosure now that a
+  // gate can name accounts. The narrowest thing the consumer needs is the only thing it gets.
+  const M = JSON.stringify(manifest.map((e) => ({ name: e.name, from: e.from, pub: e.auth === 'public' })));
   const V = JSON.stringify(VERSION);
   return `(function(){
 "use strict";
@@ -224,18 +305,21 @@ if(!base){console.error("[kit] no base");return;}
 window.__kitCfg=window.__kitCfg||{};window.__kitCfg.base=base;
 if(window.__kitCfg.loaded)return;window.__kitCfg.loaded=1;
 var HANDOFF=${H},HANDOFF_MISSING=${HM},MANIFEST=${M},V=${V};
-if(HANDOFF){var hl=false;try{var hs=document.getElementsByTagName("script");for(var hi=0;hi<hs.length;hi++){if(hs[hi].src===HANDOFF){hl=true;break;}}}catch(e){}if(!hl){var s=document.createElement("script");s.async=true;s.src=HANDOFF;(document.head||document.documentElement).appendChild(s);}}
+var HO={u:HANDOFF,m:HANDOFF_MISSING,pre:false,add:false};
+if(HANDOFF){try{var hs=document.getElementsByTagName("script");for(var hi=0;hi<hs.length;hi++){if(hs[hi].src===HANDOFF){HO.pre=true;break;}}}catch(e){}if(!HO.pre){var s=document.createElement("script");s.async=true;s.src=HANDOFF;(document.head||document.documentElement).appendChild(s);HO.add=true;}}
 else if(HANDOFF_MISSING){console.error("[kit] handoff not configured");kitNag();}
+window.__kitCfg.ho=HO;
 function tok(){try{return localStorage.getItem("ns_t")||"";}catch(e){return "";}}
 function inject(code){try{var b=new Blob([code],{type:"text/javascript"});var u=URL.createObjectURL(b);var s=document.createElement("script");s.src=u;s.onload=function(){URL.revokeObjectURL(u);};(document.head||document.documentElement).appendChild(s);}catch(e){var s2=document.createElement("script");s2.textContent=code;(document.head||document.documentElement).appendChild(s2);}}
 function fetchInject(path){var t=tok();if(!t)return;fetch(base+path+"?v="+encodeURIComponent(V),{headers:{Authorization:"Bearer "+t}}).then(function(r){return r.status===200?r.text():null;}).then(function(c){if(c)inject(c);}).catch(function(){});}
 fetchInject("/kit/portal.js");
 fetchInject("/kit/self.js");
+fetchInject("/kit/spk.js");
 function ext(src){var s=document.createElement("script");s.src=src;(document.head||document.documentElement).appendChild(s);}
 for(var i=0;i<MANIFEST.length;i++){(function(e){
 if(e.from.indexOf("url:")===0){ext(e.from.slice(4));return;}
 if(e.from.indexOf("r2:")!==0)return;
-if(e.auth==="public"){ext(base+"/kit/asset/"+e.name+".js?v="+encodeURIComponent(V));}
+if(e.pub){ext(base+"/kit/asset/"+e.name+".js?v="+encodeURIComponent(V));}
 else{fetchInject("/kit/asset/"+e.name+".js");}
 })(MANIFEST[i]);}
 function _scope(){try{var t=tok();if(!t)return "";var p=t.split(".")[1];if(!p)return "";var j=JSON.parse(decodeURIComponent(escape(atob(p.replace(/-/g,"+").replace(/_/g,"/")))));return ""+(j.user_scope||j.scope||"");}catch(e){return "";}}
@@ -263,6 +347,12 @@ function dom(){return(typeof window.current_domain!=='undefined'&&window.current
 function masq(){try{return !!(document.querySelector('.mask-bar')||document.querySelector('a[href*="endMasquerade"]'))}catch(e){return false}}
 function jget(p){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw new Error(x.status);return x.json()})}
 function jpost(p,body){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{method:'POST',headers:{Authorization:'Bearer '+j,'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(x){if(!x.ok)throw new Error(x.status);return x.json()})}
+// Reseller-or-above, decoded from the caller's own ns_t. Lives here in COMMON rather than in one bundle
+// because both need it now: the admin body gates the force-activate override on it, and the self body
+// decides whether the footer version line is a link. Two copies of a scope decoder is the shape of bug
+// this repo has already shipped four times.
+function _kscope(){try{var t=tok();if(!t)return '';var p=t.split('.')[1];if(!p)return '';var j=JSON.parse(decodeURIComponent(escape(atob(p.replace(/-/g,'+').replace(/_/g,'/')))));return ''+(j.user_scope||j.scope||'')}catch(e){return ''}}
+function _isRes(){var s=_kscope().toLowerCase();return s==='reseller'||s==='super user'||s==='superuser'||s==='super-user'}
 // ── Shared app-access sign-in rendering — the SINGLE source of the sign-in verbiage/decision, used by
 // the Apps menu, the home card, AND the admin profile block, so the wording can never fork. ──
 function copyBtn(v,name){var b=document.createElement('button');b.type='button';b.title='Click to copy';b.setAttribute('aria-label','Copy'+(name?' '+name:''));
@@ -326,9 +416,6 @@ if(d.showUrl!==false)col.appendChild(aaUrlLine(d.url,true));target.appendChild(c
 else{var li=document.createElement('li');var a2=document.createElement('a');a2.textContent=d.label;a2.href=d.url;a2.target='_blank';a2.rel='noopener noreferrer';if(d.title)a2.title=d.title;li.appendChild(a2);target.appendChild(li);
 if(d.showUrl!==false)target.appendChild(aaUrlLine(d.url,false))}
 })}
-`;
-
-const KIT_ADMIN_BODY = String.raw`
 function box(t,src,note){
 var p=document.getElementById('_svx');if(p)p.remove();
 var o=document.createElement('div');o.id='_svx';
@@ -345,13 +432,61 @@ var x=document.createElement('button');x.textContent='✕';
 x.style.cssText='border:0;background:transparent;font-size:18px;cursor:pointer;line-height:1';
 x.addEventListener('click',close);
 h.appendChild(s);h.appendChild(x);
-var f=document.createElement('iframe');f.style.cssText='flex:1;border:0;width:100%';f.sandbox='allow-scripts allow-popups';f.srcdoc=src;
+var f=document.createElement('iframe');f.style.cssText='flex:1;border:0;width:100%';f.sandbox='allow-scripts allow-popups';f.title=t;f.srcdoc=src;
 f.addEventListener('load',function(){try{f.contentDocument.addEventListener('keydown',key)}catch(e){}});
 b.appendChild(h);b.appendChild(f);o.appendChild(b);
 o.addEventListener('click',function(e){if(e.target===o)close()});
 document.addEventListener('keydown',key);
 document.body.appendChild(o);
 }
+// The top-nav Management dropdown (administrative scopes only). It has no id, and its toggle carries no
+// href either -- the ONLY anchor is the toggle's own label, so a portal that renames the menu simply does
+// not match and the entry is absent. That is the honest failure: nothing breaks, nothing lands elsewhere.
+// The toggle's text is read from the TOGGLE, never from a container, for the same reason the account menu
+// is tested per item. Its caret is an empty <i>, so trimmed textContent is the label alone.
+// is exactly why neither anchor may be an item we expect to be present.
+// Does this menu have a sign-out entry? Tested PER ITEM, never against the <ul>'s textContent: that
+// concatenates children with no separator ("Some Entry"+"Log Out" -> "Some EntryLog Out"), which makes
+// any word-boundary test fail and matched nothing at all. Anchoring on the item also stops a label like
+// "Log Outbound Calls" from counting.
+function hasSignOut(ul){var ch=ul.children;
+for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim()))return true}
+return false}
+function acctUl(){
+var scopes=[document.querySelector('ul.user-toolbar'),document];
+for(var s=0;s<scopes.length;s++){var root=scopes[s];if(!root)continue;
+// Log Out is the one entry present in every variant of this menu, so it is the primary anchor.
+// Prefer a menu carrying BOTH signals — a sign-out entry AND this user's own profile link. Either
+// alone can appear on some other dropdown; together they identify the account menu. Sign-out alone is
+// the fallback (some variants show no profile link), and the profile link alone is the last resort.
+var ls=root.querySelectorAll('ul.dropdown-menu'),soOnly=null;
+for(var i=0;i<ls.length;i++){var u=ls[i];
+if(u.id==='app-menu-list'||!hasSignOut(u))continue;
+if(u.querySelector('a[href*="/portal/users/edit/profile/"]'))return u;
+if(!soOnly)soOnly=u}
+if(soOnly)return soOnly;
+var a=root.querySelector('ul.dropdown-menu a[href*="/portal/users/edit/profile/"]');
+var ul=a&&a.closest('ul.dropdown-menu');if(ul)return ul}
+return null}
+// The apps dropdown is the one menu with a stable id.
+function appsUl(){return document.getElementById('app-menu-list')}
+// MENU_NAMES (src/menus.ts) -> the element, in ONE place. The three appliers in the self bundle and the
+// builder in the console bundle now resolve a menu the same way; two finders for one menu is how the
+// builder would end up offering to hide an entry from an element nothing else touches.
+function menuUl(n){return n==='apps'?appsUl():n==='account'?acctUl():n==='management'?mgmtUl():null}
+function mgmtUl(){
+var ts=document.querySelectorAll('a.dropdown-toggle[data-toggle="dropdown"]');
+for(var i=0;i<ts.length;i++){var t=ts[i];
+if(!/^management$/i.test((t.textContent||'').replace(/\s+/g,' ').trim()))continue;
+// Bootstrap puts the menu either directly after the toggle or beside it inside the same <li>. Accept
+// both rather than assume one: this markup is the vendor's, and it has changed before.
+var n=t.nextElementSibling;
+if(n&&n.tagName&&n.tagName.toLowerCase()==='ul'&&/dropdown-menu/.test(n.className||''))return n;
+var li=t.closest&&t.closest('li');var u=li&&li.querySelector('ul.dropdown-menu');if(u)return u}
+return null}
+`;
+
+const KIT_ADMIN_BODY = String.raw`
 function get(k,r,d){
 var j=tok();if(!j)return Promise.reject(new Error('auth'));
 return fetch(B+'/flow?domain='+encodeURIComponent(d)+'&kind='+k+'&ref='+encodeURIComponent(r)+'&format=html',{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw new Error(x.status);return x.text()});
@@ -552,8 +687,6 @@ else if(/^\/portal\/users\/?($|index)/.test(location.pathname)){if(_AF.userStatu
 }catch(x){}
 },true);
 }
-function _kscope(){try{var t=tok();if(!t)return '';var p=t.split('.')[1];if(!p)return '';var j=JSON.parse(decodeURIComponent(escape(atob(p.replace(/-/g,'+').replace(/_/g,'/')))));return ''+(j.user_scope||j.scope||'')}catch(e){return ''}}
-function _isRes(){var s=_kscope().toLowerCase();return s==='reseller'||s==='super user'||s==='superuser'||s==='super-user'}
 // Pending-change flag: set when WE trigger an activate/deactivate (Save or force); consumed once on the
 // reloaded page so it polls-until-flip. Keyed to this ext/domain and expires in 30s.
 // NB: this portal patches Date.now() to return a Date-like (JSON-serialized as an ISO string), so use
@@ -815,31 +948,7 @@ function sep(){var li=document.createElement('li');li.className='divider _svxrow
 // The user's own name dropdown in the toolbar. Unlike the Apps menu it has NO id and wears a generic
 // Bootstrap class (dropdown-menu pull-right) that other dropdowns share, so it is identified by CONTENT:
 // the toolbar dropdown holding the profile link, or failing that a Log Out entry. Its items vary by scope
-// and mode (My Account / Profile / Messages, plus a vendor-injected Vendor Entry for resellers), which
-// is exactly why neither anchor may be an item we expect to be present.
-// Does this menu have a sign-out entry? Tested PER ITEM, never against the <ul>'s textContent: that
-// concatenates children with no separator ("Vendor Entry"+"Log Out" -> "EntryLog Out"), which makes
-// any word-boundary test fail and matched nothing at all. Anchoring on the item also stops a label like
-// "Log Outbound Calls" from counting.
-function hasSignOut(ul){var ch=ul.children;
-for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim()))return true}
-return false}
-function acctUl(){
-var scopes=[document.querySelector('ul.user-toolbar'),document];
-for(var s=0;s<scopes.length;s++){var root=scopes[s];if(!root)continue;
-// Log Out is the one entry present in every variant of this menu, so it is the primary anchor.
-// Prefer a menu carrying BOTH signals — a sign-out entry AND this user's own profile link. Either
-// alone can appear on some other dropdown; together they identify the account menu. Sign-out alone is
-// the fallback (some variants show no profile link), and the profile link alone is the last resort.
-var ls=root.querySelectorAll('ul.dropdown-menu'),soOnly=null;
-for(var i=0;i<ls.length;i++){var u=ls[i];
-if(u.id==='app-menu-list'||!hasSignOut(u))continue;
-if(u.querySelector('a[href*="/portal/users/edit/profile/"]'))return u;
-if(!soOnly)soOnly=u}
-if(soOnly)return soOnly;
-var a=root.querySelector('ul.dropdown-menu a[href*="/portal/users/edit/profile/"]');
-var ul=a&&a.closest('ul.dropdown-menu');if(ul)return ul}
-return null}
+// and mode (My Account / Profile / Messages, plus whatever a vendor add-on injects for admins), which
 function accountMenu(){
 if(!_AF.menuConfig)return;
 var ul=acctUl();if(!ul||ul.dataset.svxacct)return;
@@ -847,27 +956,20 @@ aaFetch(function(r){
 var plan=r&&r.menus&&r.menus.account;if(!plan)return;
 if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
 var u=acctUl();if(!u||u.dataset.svxacct)return;u.dataset.svxacct='1';
+// KNOWN LIMITATION (found 2026-08-08, not yet fixed): this guard makes the whole pass one-shot, hides
+// included. The account menu is filled by several sources — stock entries, the vendor add-on (it adds
+// its own entries), and this kit — and every one of them loads async, so an entry that arrives AFTER this
+// pass is never hidden. That is load-order-dependent, which means it can work in testing and fail
+// intermittently in production. The fix is to split the guard the way the model already splits the lists:
+// adds stay one-shot (repeating them would duplicate entries), hides re-run on mutation (they are
+// idempotent — setting display:none twice is setting it once). Deliberately not done in the same pass that
+// discovered it; see item 37 in the open-items index.
 // Insert into the FIRST group — above the divider that precedes Log Out — rather than after it.
 var lo=null,ch=u.children;
 for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim())){lo=ch[i];break}}
 var before=lo;
 if(before&&before.previousElementSibling&&/divider/.test(before.previousElementSibling.className||''))before=before.previousElementSibling;
 menuApply(u,plan,before)})}
-// The top-nav Management dropdown (administrative scopes only). It has no id, and its toggle carries no
-// href either -- the ONLY anchor is the toggle's own label, so a portal that renames the menu simply does
-// not match and the entry is absent. That is the honest failure: nothing breaks, nothing lands elsewhere.
-// The toggle's text is read from the TOGGLE, never from a container, for the same reason the account menu
-// is tested per item. Its caret is an empty <i>, so trimmed textContent is the label alone.
-function mgmtUl(){
-var ts=document.querySelectorAll('a.dropdown-toggle[data-toggle="dropdown"]');
-for(var i=0;i<ts.length;i++){var t=ts[i];
-if(!/^management$/i.test((t.textContent||'').replace(/\s+/g,' ').trim()))continue;
-// Bootstrap puts the menu either directly after the toggle or beside it inside the same <li>. Accept
-// both rather than assume one: this markup is the vendor's, and it has changed before.
-var n=t.nextElementSibling;
-if(n&&n.tagName&&n.tagName.toLowerCase()==='ul'&&/dropdown-menu/.test(n.className||''))return n;
-var li=t.closest&&t.closest('li');var u=li&&li.querySelector('ul.dropdown-menu');if(u)return u}
-return null}
 function managementMenu(){
 if(!_AF.menuConfig)return;
 var ul=mgmtUl();if(!ul||ul.dataset.svxmgmt)return;
@@ -882,7 +984,7 @@ function appsMenu(){
 // Two independent surfaces share this menu: menu customization (menuConfig) and the sign-in panel
 // (appAccess). Either alone is a reason to touch the menu.
 if(!_AF.appAccess&&!_AF.menuConfig)return;
-var ul=document.getElementById('app-menu-list');if(!ul||ul.dataset.svx)return;
+var ul=appsUl();if(!ul||ul.dataset.svx)return;
 aaFetch(function(r){
 if(!ul||ul.dataset.svx)return;ul.dataset.svx='1';
 // ONE guard on the <ul>, not per row. Bootstrap's dropdown closes on a document-level click, and a
@@ -913,15 +1015,336 @@ var mdl=aaModel(r,L);
 if(mdl.signable){mdl.fields.forEach(function(f){ul.appendChild(row(f.k,f.v,null,f.copy));ul.appendChild(note(f.hint,f.warn))})}
 else{ul.appendChild(note(mdl.advisory.t,true))}
 })}
+// ── The status banner (portal.statusBanner) ──
+// The message comes from an endpoint the OPERATOR hosts, asked once per page load. The kit holds no
+// message store and makes no eligibility decision — it sends who is asking and shows what comes back.
+//
+// TEXT, never markup. The content is remote and it renders for every signed-in user, which is the exact
+// shape where an innerHTML would be an injection vector reachable by whoever controls (or compromises) that
+// endpoint. No sanitizer is as safe as not parsing HTML at all, and this repo already forbids innerHTML in
+// injected code. A banner that cannot be bold is a fair price.
+//
+// The request carries the caller's own ns_t so the endpoint can decide what this person should see. That is
+// a live credential leaving for a configured URL, which is why the Worker refuses a non-https endpoint and
+// why the setting's documentation says to point it only at something you control.
+// Render a status message that MAY contain HTML, without ever handing markup to innerHTML.
+//
+// The operator controls this endpoint, so the content is as trusted as their own config — that is David's
+// argument and it holds. But his own code already sanitized rather than trusting the response raw, and this
+// is the better version of that instinct: parse in an INERT document, then copy across only the tags and
+// attributes a support message needs. Script cannot execute because nothing script-bearing is ever copied,
+// which makes the guarantee structural rather than a matter of everyone remembering the rule.
+//
+// DOMParser does not run scripts and does not fire load handlers, so the parse itself is safe; the danger
+// would be adopting parsed nodes wholesale, since an onerror attribute becomes live the moment its node
+// enters the document. Copying attribute-by-attribute is what avoids that.
+var BAN_TAGS={A:1,B:1,STRONG:1,I:1,EM:1,U:1,BR:1,SPAN:1,P:1,SMALL:1,CODE:1};
+function bannerHtml(host,html){
+var doc=null;try{doc=new DOMParser().parseFromString(String(html),'text/html')}catch(e){}
+if(!doc||!doc.body){host.textContent=String(html);return}
+(function copy(from,to){
+for(var n=from.firstChild;n;n=n.nextSibling){
+if(n.nodeType===3){to.appendChild(document.createTextNode(n.nodeValue));continue}
+if(n.nodeType!==1)continue;
+if(!BAN_TAGS[n.tagName]){
+// An unknown tag is UNWRAPPED, not dropped: the words inside it are the message, and silently losing
+// half a sentence is worse than losing its formatting.
+copy(n,to);continue}
+var el=document.createElement(n.tagName.toLowerCase());
+if(n.tagName==='A'){
+var href=n.getAttribute('href')||'';
+// Same scheme rule the menu entries use — https or mailto, nothing else can be an href here.
+if(/^(https:\/\/|mailto:)/i.test(href)){el.setAttribute('href',href);el.setAttribute('target','_blank');el.setAttribute('rel','noopener noreferrer')}}
+var ttl=n.getAttribute&&n.getAttribute('title');if(ttl)el.setAttribute('title',ttl);
+copy(n,el);to.appendChild(el)}
+}(doc.body,host))}
+function statusBanner(){
+if(!_KC.bw)return;
+if(document.getElementById('_svxbanner'))return;
+var t=tok();if(!t)return;
+// Guarded once per page: this is a network call on every portal page, and a re-entrant observer pass
+// would multiply it. The element check above cannot cover the in-flight window.
+if(window.__svxBannerAsked)return;window.__svxBannerAsked=1;
+var body={validate:t,path:location.pathname,
+domain:(typeof window.current_domain!=='undefined'&&window.current_domain)||null,
+scope_mode:(typeof window.scope_mode!=='undefined'&&window.scope_mode)||null,
+sub_scope:(typeof window.sub_scope!=='undefined'&&window.sub_scope)||null,
+user:(typeof window.sub_user!=='undefined'&&window.sub_user)||null};
+fetch(_KC.bw,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+.then(function(r){return r.ok?r.text():''})
+.then(function(raw){
+if(!raw)return;
+var msg='';
+// Accept either a bare string or {message|text|banner}. An endpoint returning plain text is the
+// simplest thing an operator can write, and refusing it would make the easy case the unsupported one.
+// banner_message is in this list because a real endpoint returns it — accepting only the keys that
+// seemed obvious meant a working webhook produced a blank banner and no error anywhere. (No backticks in
+// this file's injected bodies: they live inside a template literal and one ends it.)
+try{var j=JSON.parse(raw);msg=(j&&(j.message||j.banner_message||j.text||j.banner))||(typeof j==='string'?j:'')}catch(e){msg=raw}
+msg=String(msg||'').trim();if(!msg)return;
+if(document.getElementById('_svxbanner'))return;
+var d=document.createElement('div');d.id='_svxbanner';
+// Inside the portal's own header when there is one: that band is where a notice belongs on this portal,
+// and pinning it to the top of <body> instead pushed the whole page down and read as a browser chrome bar.
+// Normal flow rather than absolute positioning — a hand-tuned coordinate is a layout that breaks on the
+// next portal change, and centred text in the header reads the same without the arithmetic.
+// WHERE it goes — OVERLAID in the header, not inserted into the flow.
+//
+// Normal flow was the first attempt and it was wrong for a concrete reason: it adds height, so every page
+// shifts down by the banner. That is worse than the arithmetic it avoided, and it is why this portal's own
+// banner is absolutely positioned. The header already contains a blank strip; using it costs no layout.
+//
+// ONE measurement, not five. The portal's own version computes against the logo, the user menu, the nav and
+// its first and last items to centre between them; centring across the full width lands in the same place
+// to the eye and needs only the logo's lower edge. Fewer rects is fewer things that move under us.
+//
+// If the header is missing entirely — a portal shaped differently — fall back to a normal-flow bar at the
+// top of the page. Shifting a page we do not recognise is better than overlaying something unknown.
+var head=document.getElementById('header');
+if(head){
+if(getComputedStyle(head).position==='static')head.style.position='relative';
+// No line clamp and no max-height: those truncate at two lines, which would fire before the shrink loop
+// below ever got a chance. Shrinking to fit beats clipping a sentence.
+d.style.cssText='position:absolute;z-index:2;padding:0 12px;font-weight:700;font-size:14px;line-height:1.2;color:#a11d2f;text-align:center;pointer-events:auto';
+bannerHtml(d,msg);
+head.appendChild(d);
+// TWO PLACEMENTS, chosen by measurement, because the blank strip is not always there.
+//
+// Measured on the real portal at three widths (David, 2026-08-09), local to #header:
+//
+//   1248 wide   logo y 0..90   user y  0..60    nav y  90..199   → strip 60..90  (30px)
+//   1135 wide   logo y 0..90   user y  0..60    nav y  90..199   → strip 60..90  (30px)
+//    687 wide   logo y 0..90   user y 90..150   nav y 150..259   → strip is ZERO
+//
+// Below roughly 700px the user menu wraps onto its own row and the header stacks with nothing spare. That
+// is why every fixed approach collided with something: overlay-always has nowhere to go when narrow, and
+// flow-always shifts the page when there was room all along.
+//
+// So: OVERLAY when the message fits the strip — no layout change, the common case — and fall back to
+// NORMAL FLOW when it does not, pushing the buttons down rather than striking through them. The layout
+// only moves in the case that genuinely has no room.
+var flowed=false;
+var place=function(){try{
+var hb=head.getBoundingClientRect();
+var lg=document.getElementById('header-logo'),hu=document.getElementById('header-user');
+var nav=document.getElementById('navigation')||document.getElementById('nav-buttons');
+var top=hu?(hu.getBoundingClientRect().bottom-hb.top):0;
+var strip=nav?((nav.getBoundingClientRect().top-hb.top)-top):0;
+// Measure the message at the width it would occupy, not at whatever width it currently has.
+// SYMMETRIC margins, both set by the logo's width. Anchoring the left to the logo and the right to the
+// page edge centred the text in that lopsided box, so it read visibly off-centre — and it was: the box's
+// middle was not the header's middle. Mirroring the inset makes the box centred on the header, so the text
+// is centred on the PAGE, it still cannot reach the logo, and as the window narrows the box narrows evenly
+// and the message wraps to a second line instead of drifting or colliding. One change, three symptoms.
+var left=lg?Math.max(0,lg.getBoundingClientRect().right-hb.left+14):12;
+if(!flowed){d.style.left=left+'px';d.style.right=left+'px'}
+// A CONSTANT, never the element's own height. Measuring d.offsetHeight fed the decision with a value that
+// DEPENDS on the decision — the flowed element is 12.5px and full width, the overlaid one 14px and inset,
+// so each mode measured a different requirement, flipped, and measured again. That is what made it stutter
+// during a resize and settle on whichever mode the drag happened to stop in.
+//
+// The strip itself is a stable input: our element sits inside #navigation when flowed, so it changes that
+// element's HEIGHT but never its top, and the strip is measured from that top.
+//
+// HYSTERESIS, so the two thresholds cannot touch. Dropping into flow at 20 and returning to overlay only
+// above 30 means a width that sits exactly on the boundary picks one and stays there.
+var need=20;
+if(nav&&(flowed?strip<30:strip<need+2)){
+// No room: move into the flow ahead of the navigation. Idempotent — only re-parents on a change, so a
+// resize storm does not thrash the DOM.
+if(!flowed){flowed=true;
+// NO clear:both. This header is float-based, and clearing pushed the banner below every float, inflating
+// the header and shoving the whole thing down — the "weird bump" at the narrowest width. Inserted INSIDE
+// the navigation, above the buttons, rather than before the nav block: that container is already a block,
+// so a plain div stacks above the button row without interacting with the floats at all.
+// Smaller when it lands here: this only happens at widths where the button row is already being clipped,
+// so a slightly smaller message is the cheaper compromise — the same trade the portal's own banner makes.
+// Full width too, with no left offset for the logo: at this vertical position the logo is a row above, so
+// reserving space beside it would waste the width that lets the text stay on one line.
+// Pulled UP into the whitespace that already sits above this row, so a second line grows into space the
+// page was not using rather than shoving the buttons down. Deliberately NOT clamped to one line here:
+// David would rather it wrap than be truncated at these widths, and wrapping upward costs nothing.
+d.style.cssText='margin-top:-12px;padding:0 8px 2px;font-weight:700;font-size:12.5px;line-height:1.2;color:#a11d2f;text-align:center';
+var btns=document.getElementById('nav-buttons');
+if(btns&&btns.parentNode)btns.parentNode.insertBefore(d,btns);
+else if(nav.parentNode)nav.parentNode.insertBefore(d,nav)}
+return}
+if(flowed){flowed=false;
+// No line clamp and no max-height: those truncate at two lines, which would fire before the shrink loop
+// below ever got a chance. Shrinking to fit beats clipping a sentence.
+d.style.cssText='position:absolute;z-index:2;padding:0 12px;font-weight:700;font-size:14px;line-height:1.2;color:#a11d2f;text-align:center;pointer-events:auto';
+head.appendChild(d);d.style.left=left+'px';d.style.right='12px'}
+// EIGHT PIXELS ABOVE the strip's nominal top, which is deliberate rather than a fudge. The strip measures
+// ~30px (menu row ends at 60, buttons begin at 90) and a two-line message needs ~34, so anchored at 60 it
+// ends at 94 and clips the buttons. The menu row's own text does not reach its lower edge, so borrowing
+// that slack fits two lines at 52..86 — clear of the buttons — and lifts the one-line case a touch too,
+// which is where it looked low.
+d.style.top=Math.max(0,top-8)+'px';
+// SHRINK TO FIT rather than clip. Two lines fit the borrowed strip at 14px; a longer message needs three,
+// and truncating a status notice mid-sentence is the one outcome a status notice must not have.
+//
+// Safe to measure the element here, even though measuring it is exactly what caused the resize stutter
+// earlier: that fed the element's height into the MODE decision, so the decision changed its own input.
+// This only chooses a font size WITHIN a mode — the mode is already settled from the strip and a constant —
+// so there is no path back. Reset to 14 first, or it ratchets down and never recovers on a widen.
+var room=nav?((nav.getBoundingClientRect().top-hb.top)-(Math.max(0,top-8))):999;
+d.style.fontSize='14px';
+for(var fs=14;fs>10&&d.offsetHeight>room;fs--)d.style.fontSize=fs+'px'}catch(e){}};
+place();
+// Re-measured on resize because the strip appears and disappears with the wrap.
+window.addEventListener('resize',place)}
+else{
+d.style.cssText='padding:8px 14px;background:#e8f2fb;border-bottom:1px solid #b8d4ea;color:#123;font-weight:700;font-size:14px;line-height:1.4;text-align:center';
+bannerHtml(d,msg);
+var b=document.body;if(b)b.insertBefore(d,b.firstChild)}})
+.catch(function(){})}
+// ── The footer version line (portal.versionLine) ──
+// Joined onto the footer's LAST paragraph with the same separator the platform's own version entries use,
+// rather than added as a line of its own: this is one more entry in an existing row, and a portal footer
+// is not worth another line of page height. The last paragraph is the version row whether or not a vendor
+// add-on has put its own entry there — the platform's version sits on it either way.
+// Our content is one <span> so the whole entry can be found, and so a vendor re-render that replaces the
+// paragraph simply drops it and the observer puts it back, rather than leaving a half-entry behind.
+// The link is absent from the page for anyone below reseller — not disabled, so there is nothing to
+// re-enable — and absent for everyone when the deployment has declared PORTAL_RELEASE_NOTES_URL empty.
+// No footer, or no version config, means nothing is added: the least consequential thing the kit does
+// should be the quietest to fail.
+// REMOVE A FOSSIL OF OUR OWN ENTRY, which is what the reported "duplicate version line" actually was.
+// Mechanism, from a live footer capture (2026-08-09): we append our span to the platform's version row,
+// and the vendor's release-notes widget LATER rebuilds that row from its textContent. That inlines our
+// words into the vendor's own anchor as plain characters and destroys our span, so what remains has no
+// class on it and the dedupe below cannot see it. The next pass finds zero entries and adds a fresh one
+// to the new last version row, leaving one live entry plus a fossil that reads exactly like a duplicate.
+// The capture named itself: the fossil's separator was our box-drawing bar while the platform's own is a
+// pipe, and only we emit the former.
+//
+// We put those characters on the page, so taking them back out is repairing our own damage rather than
+// editing someone else's content. The match is anchored on our exact product name and version, which
+// nothing else on the page emits, and it takes the separator with it. Both separators are matched: a
+// page rendered before this version fossilised the old bar, and it should still heal.
+//
+// This is also what makes writing early SAFE. The alternative was to defer until the footer settled,
+// which trades a duplicate for a race against a vendor whose timing we do not control -- and would show
+// nothing at all on a portal where that vendor never loads. Clean-then-ensure is idempotent, so the
+// early write can simply be corrected.
+function vlFossil(f,txt){
+// '$' sits at the END of this character class on purpose. A dollar immediately followed by an open
+// brace opens a template substitution inside a String.raw body, so writing the class in its natural
+// order breaks the file -- and TypeScript then reports it dozens of lines away, never at the cause.
+// Same family as a backtick in one of these bodies. Writing THIS comment cost a compile too: the
+// sequence breaks the literal from inside a comment just as readily, which is why it is described
+// here in words instead of quoted.
+var esc=txt.replace(/[.*+?^{}()|[\]\\$]/g,'\\$&');
+var re=new RegExp('[\\s\\u00a0]*[|\\u2502][\\s\\u00a0]*'+esc,'g');
+var w=document.createTreeWalker(f,NodeFilter.SHOW_TEXT,null,false),n,hit=[];
+while((n=w.nextNode())){
+// Never touch text inside our own span -- that one IS the live entry.
+var own=false;
+for(var q=n.parentNode;q&&q!==f;q=q.parentNode){
+if(q.className&&String(q.className).indexOf('_svxver')>=0){own=true;break}}
+re.lastIndex=0;
+if(!own&&re.test(n.nodeValue||'')){hit.push(n)}}
+for(var h=0;h<hit.length;h++){re.lastIndex=0;hit[h].nodeValue=hit[h].nodeValue.replace(re,'')}}
+function verLine(){
+var f=document.getElementById('footer');if(!f)return;
+var v=_KC.vl;if(!v)return;
+// Clean before measuring: a fossil carries a version pair, so leaving it in place would let a row that
+// only LOOKS like a version row win the host election below.
+vlFossil(f,v.name+': '+v.ver);
+// TARGET THE VERSION ROW, not "the last paragraph". The old heuristic produced a DUPLICATE line in
+// production, and the race behind it is worth remembering: a vendor add-on appends its own version row
+// asynchronously, so "the last paragraph" resolves to the Powered-by line when we run first and to the
+// version row when we run second. One rule, two destinations, decided by load order. A version row is
+// identified by CARRYING a version pair, which is what that row is, rather than by where it sits.
+var ps=f.getElementsByTagName('p'),host=null;
+for(var i=ps.length-1;i>=0;i--){if(/:\s*\d+\.\d+/.test(ps[i].textContent||'')){host=ps[i];break}}
+// SELF-HEALING, and document-wide rather than scoped to the row we picked: whatever produced a duplicate,
+// the invariant is ONE entry on the page. If exactly one exists and it is already in the right row, leave
+// it alone; otherwise remove every instance and insert one. A stray copy is then corrected on the next
+// observer pass instead of persisting until reload.
+var old=f.querySelectorAll('._svxver');
+if(old.length===1&&host&&old[0].parentNode===host)return;
+for(var k=0;k<old.length;k++){if(old[k].parentNode)old[k].parentNode.removeChild(old[k])}
+// No version row yet? Do nothing and let the observer try again. Falling back to the Powered-by line is
+// what stranded the entry in the wrong paragraph in the first place.
+if(!host)return;
+var txt=v.name+': '+v.ver,inner;
+// Below reseller this is a text node, not a link -- absent from the page rather than disabled, which
+// matches the platform: an Office Manager's own version row is plain text there too.
+if(v.url&&_isRes()){inner=document.createElement('a');inner.href=v.url;inner.target='_blank';inner.rel='noopener noreferrer';inner.textContent=txt}
+else{inner=document.createTextNode(txt)}
+var sp=document.createElement('span');sp.className='_svxver';
+// The platform's own separator, byte for byte: NBSP, pipe, NBSP -- it renders '&nbsp;|&nbsp;' between its
+// footer entries, confirmed from a live capture. This used to emit '\u2502' (BOX DRAWINGS LIGHT VERTICAL)
+// with ordinary spaces while the comment above claimed it matched the platform; on a real footer the
+// mismatch was plain, our taller heavier bar beside the portal's thin pipe in the same row. An entry
+// appended to someone else's row should be indistinguishable from the entries already there.
+// Written as escapes, not literals, so the emitted bundle stays pure ASCII and decodes identically
+// whatever charset the response or host page is read as -- a literal did not (a mock server without
+// charset=utf-8 rendered it as mojibake). NBSP also stops the separator wrapping to its own line.
+// MATCH THE PORTAL'S OWN SEPARATOR, by reading it off the page rather than pinning values. Measured on
+// a live footer: ours inherited the version row's 10px #a2a2a2 while the portal's separator between
+// entries is 13px #333, because theirs is a SIBLING of the paragraphs and ours is inside one. Two pipes
+// a few characters apart, visibly different weights. These are the operator's portal styles; hardcoding
+// them here would bake one deployment's theme into a kit that ships to others, and would go stale the
+// first time they restyle a footer.
+//
+// Found structurally, not by id: a sibling element whose ENTIRE text is a separator. Keying off the
+// vendor container's name would couple this to one add-on and break on a portal without it.
+var bar=document.createElement('span');
+bar.appendChild(document.createTextNode('\u00a0|\u00a0'));
+sp.appendChild(bar);sp.appendChild(inner);host.appendChild(sp);
+// STYLE AFTER INSERTION, because the reference has to be measured in place -- and which reference is
+// right depends on what else is in the row.
+//
+// With the vendor add-on present the row already contains a separator of its own, and ours should be
+// indistinguishable from it: copy both colour and size. Without the add-on there is no separator to
+// match, and the row is the platform's PLAIN TEXT while our entry is a link -- which the portal styles
+// larger. Inheriting the row then rendered a 10px pipe against our own 13px link and read as a mistake.
+//
+// With no separator to copy, the size is scaled RELATIVELY and the colour is left alone. Inheriting the
+// row outright produced a 10px pipe beside our own 13px link and read as a bug; the stock portal's own
+// separator is 1.3x its row, so that ratio is the fallback. Relative rather than pinned pixels, so it
+// tracks whatever base size the operator's footer uses instead of assuming ours. Colour stays inherited
+// on purpose: a pinned one is the value that goes wrong on a portal themed unlike the stock one, and
+// punctuation reading as body text is right on every theme.
+var BAR_SCALE='130%';
+var par=host.parentNode,kids=par?par.children:null,ref=null;
+for(var r=0;kids&&r<kids.length;r++){
+if(kids[r].tagName==='SPAN'&&/^[\s\u00a0]*[|\u2502][\s\u00a0]*$/.test(kids[r].textContent||'')){ref=kids[r];break}}
+var cs=ref?getComputedStyle(ref):null;
+if(cs){bar.style.color=cs.color;bar.style.fontSize=cs.fontSize}else{bar.style.fontSize=BAR_SCALE}}
 var F=[{p:/^\/portal\/home/,m:homeStatus,a:function(){return !!_AF.appStatus}},
 {p:/^\//,m:appsMenu,a:function(){return !!_AF.appAccess||!!_AF.menuConfig}},
 {p:/^\//,m:accountMenu,a:function(){return !!_AF.menuConfig}},
-{p:/^\//,m:managementMenu,a:function(){return !!_AF.menuConfig}}];
+{p:/^\//,m:managementMenu,a:function(){return !!_AF.menuConfig}},
+{p:/^\//,m:verLine,a:function(){return !!_AF.versionLine}},
+// EVERY portal page. The predecessor this replaced gated client-side to six paths — /portal/home,
+// /portal/users*, /portal/domains, /portal/siptrunks, /portal/callhistory, /portal/inventory — and David's
+// recollection (2026-08-09) is that this was "maybe not bothering with the other pages", not a decision
+// worth preserving. A status notice that appears on some pages and not others is the kind of inconsistency
+// people learn to distrust, so it now runs everywhere and the endpoint decides.
+//
+// The trade, recorded because it is real: one webhook call per portal page load rather than six page types.
+// If that volume ever matters, the endpoint already receives the path and can answer empty, or the six
+// above are here to be turned into a setting.
+{p:/^\//,m:statusBanner,a:function(){return !!_AF.statusBanner}}];
 function run(){for(var i=0;i<F.length;i++){try{var f=F[i];if(f.p.test(location.pathname)&&(!f.a||f.a()))f.m()}catch(e){}}}
 var raf=0;function sched(){if(raf)return;raf=requestAnimationFrame(function(){raf=0;run()})}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run);else run();
 var ob=new MutationObserver(sched);ob.observe(document.documentElement,{childList:true,subtree:true});
-setTimeout(function(){ob.disconnect()},8000);`;
+setTimeout(function(){ob.disconnect()},8000);
+// THE FOOTER OUTLIVES THE OBSERVER, so the version line gets its own late passes.
+// The vendor's release-notes widget rebuilds the footer whenever it happens to finish, and when that
+// lands after the 8s disconnect above, nothing runs again and the fossil it makes of our entry stays
+// until reload. That is the state the reported duplicate was captured in.
+//
+// Only verLine re-runs, and only it should: it is idempotent by construction -- it cleans, then ensures
+// exactly one entry -- so a late pass either changes nothing or repairs something. The menus and the
+// banner are deliberately one-shot (repeating an add duplicates it), so widening the observer window for
+// everyone would change their behaviour to fix this one.
+var VLT=[2000,5000,12000,25000];
+for(var vi=0;vi<VLT.length;vi++)setTimeout(function(){try{if(_AF.versionLine)verLine()}catch(e){}},VLT[vi]);`;
 
 /** Shared bundle preamble: the `(function(){ _AF; _KC; base; <body> }())` wrapper. `featureKeys` is the
  * flag↔key map for THIS bundle (admin vs self); `allowedKeys` is already `can()`-filtered by the caller,
@@ -943,7 +1366,19 @@ function wrapBundle(featureKeys: ReadonlyArray<{ flag: string; key: string }>, a
   const labelShort = (env.RINGOTEL_LABEL_SHORT ?? '').trim() || label;
   const appBaseRaw = (env.RINGOTEL_APP_BASE_URL ?? '').trim();
   const appBase = /^https:\/\//i.test(appBaseRaw) ? appBaseRaw : '';
-  const cfg = JSON.stringify({ label, labelShort, appBase, dl: parseDownloads(env) });
+  // The version line's own config, and ONLY when this caller's tier actually carries the feature — same
+  // reasoning as buildSelfBundle stripping appBase: bytes a bundle will not use have no business in it.
+  // `url` is '' when the deployment declared PORTAL_RELEASE_NOTES_URL empty, which the body reads as
+  // "text only". Whether the reader is senior enough for a link is decided in the browser from their own
+  // token, because two callers with the same allowed-key set share these cached bytes.
+  // The banner endpoint, only for a tier that carries the feature. https required: this request carries the
+  // caller's ns_t, and sending a live credential over plain http is not a mistake worth supporting.
+  const bwRaw = (env.STATUS_BANNER_WEBHOOK ?? '').trim();
+  const bw = allowedKeys.includes('portal.statusBanner') && /^https:\/\//i.test(bwRaw) ? { bw: bwRaw } : {};
+  const vl = allowedKeys.includes('portal.versionLine')
+    ? { vl: { name: productName(env), ver: VERSION, url: releaseNotesUrl(env) ?? '' } }
+    : {};
+  const cfg = JSON.stringify({ label, labelShort, appBase, dl: parseDownloads(env), ...vl, ...bw });
   return `(function(){
 "use strict";
 var _AF={${af}};
@@ -966,4 +1401,139 @@ export function buildKitBundle(allowedKeys: string[], env: KitEnv): string {
  * served to every ns_t (portal.self defaults `all`). */
 export function buildSelfBundle(allowedKeys: string[], env: KitEnv): string {
   return wrapBundle(SELF_FEATURE_KEYS, allowedKeys, { ...env, RINGOTEL_APP_BASE_URL: '' }, KIT_COMMON + KIT_SELF_BODY);
+}
+
+/** Flag↔key map for the SPK bundle. One entry — but keep the shape so wrapBundle stays uniform. */
+export const SPK_FEATURE_KEYS = [{ flag: 'status', key: 'kit.status' }] as const;
+export const spkFeaturePolicyKeys = (): string[] => SPK_FEATURE_KEYS.map((f) => f.key);
+
+const SPK_BODY = String.raw`
+if(!_AF.status)return;
+var _spkFrame=null;
+// The console runs in box()'s sandboxed iframe: opaque origin, no localStorage, so it cannot fetch the
+// Worker itself. It asks US, and we hand back only probe results — never the token.
+// What is actually loaded on THIS page. Free to compute — the console's own bundle runs in the portal
+// page, so chain loading was never unverifiable; it was unverifiable from inside the sandboxed iframe,
+// which is a different claim. Hosts rather than full URLs: an unexpected host is the diagnostic, and a
+// list of every script URL on a portal page is noise the reader has to filter.
+function spkPage(){
+var ho=(window.__kitCfg&&window.__kitCfg.ho)||{};
+var present=false,hm={},hosts=[];
+try{var hs=document.getElementsByTagName('script');
+for(var i=0;i<hs.length;i++){var sc=hs[i].src;if(!sc)continue;
+if(ho.u&&sc===ho.u)present=true;
+// blob:/data: are how the primary injects the gated bundles — their host is the empty string, which
+// rendered as a phantom nameless entry in the list. They are also this kit's own code, so naming them
+// would answer a question nobody asked with the one host the reader already knows about.
+try{var uu=new URL(sc,location.href);if(uu.protocol==='blob:'||uu.protocol==='data:')continue;if(uu.host)hm[uu.host]=1}catch(x){}}
+hosts=Object.keys(hm).sort()}catch(x){}
+return {declared:!!ho.u,missing:!!ho.m,preexisting:!!ho.pre,addedByKit:!!ho.add,present:present,hosts:hosts}}
+// The portal's own menus as they stand right now, read through the SHARED finders in KIT_COMMON so the
+// builder offers to hide exactly the elements the appliers act on. Entries this kit already added are
+// skipped (any _svx* class): offering to hide your own addition would be offering to write a config that
+// contradicts itself, and the hide would not work anyway — hides run before adds.
+function spkMenus(){
+var out={};
+['apps','account','management'].forEach(function(n){
+var ul=null;try{ul=menuUl(n)}catch(x){}
+if(!ul){out[n]={present:false,entries:[]};return}
+var seen={},entries=[];
+for(var i=0;i<ul.children.length;i++){var li=ul.children[i];
+if(li.className&&String(li.className).indexOf('_svx')>=0)continue;
+var a=li.querySelector&&li.querySelector('a');if(!a)continue;
+var t=(a.textContent||'').replace(/\s+/g,' ').trim();
+if(!t||seen[t.toLowerCase()])continue;
+seen[t.toLowerCase()]=1;entries.push(t)}
+out[n]={present:true,entries:entries}});
+return out}
+window.addEventListener('message',function(e){
+if(!_spkFrame||e.source!==_spkFrame.contentWindow)return;
+var d=e.data;if(!d)return;
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.pageRequest}'){
+try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.pageResponse}',${SPK_BRIDGE.pageKey}:spkPage()},'*')}catch(x){}
+return}
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.menusRequest}'){
+try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.menusResponse}',${SPK_BRIDGE.menusKey}:spkMenus()},'*')}catch(x){}
+return}
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.checkRequest}'){
+// The candidate rides the query string, so bound it: a URL the edge refuses would come back as an
+// opaque failure, and "could not check" must never be shown as "valid".
+var c=String(d.${SPK_BRIDGE.checkKey}==null?'':d.${SPK_BRIDGE.checkKey});
+var reply=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.checkResponse}',${SPK_BRIDGE.checkKey}:v},'*')}catch(x){}};
+if(c.length>8000){reply({ok:false,error:null,unchecked:'This config is too large to validate from here. Your deployment still validates it at startup, loudly.'});return}
+jget('/kit/menus/check?c='+encodeURIComponent(c))
+.then(function(r){reply({ok:!!(r&&r.ok),error:(r&&r.error)||null})})
+.catch(function(){reply({ok:false,error:null,unchecked:'Could not reach this deployment to validate. Nothing is wrong with the config yet — this check just did not run.'})});
+return}
+if(d.${SPK_BRIDGE.tag}!=='${SPK_BRIDGE.request}')return;
+jget('/kit/status?format=json&probe=1').then(function(r){
+try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.response}',${SPK_BRIDGE.dataKey}:(r&&r.probes)||[]},'*')}catch(x){}
+}).catch(function(){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.response}',${SPK_BRIDGE.errorKey}:1},'*')}catch(x){}})});
+function spkOpen(){
+var j=tok();if(!j)return;
+// Drop the previous frame reference BEFORE opening: box() removes any existing #_svx, so a stale
+// contentWindow here would leave the message handler holding a detached frame. Hygiene, not a hole —
+// the event.source=== guard already refuses anything else — but a dangling frame ref invites the next
+// reader to assume the guard is weaker than it is.
+_spkFrame=null;
+fetch(B+'/kit/status',{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw new Error(x.status);return x.text()})
+.then(function(html){box('Super Portal Kit - Integration Console',html,'');
+var o=document.getElementById('_svx');_spkFrame=o&&o.querySelector('iframe')})
+.catch(function(){alert('Super Portal Kit is unavailable right now.')})}
+function spkMenu(){
+// Management FIRST, account as the FALLBACK — and the fallback is the point, not politeness.
+//
+// mgmtUl() finds that menu by its toggle's own label, which is the only stable handle it has: it carries
+// no id and no href. So it misses on a portal that renames it, on one that does not have it at all, and
+// for any scope the portal does not show it to. Until this fallback, every one of those cases left the
+// console with NO entry point whatsoever — the bundle shipped, the routes answered, and there was
+// nothing to click. It has never bitten us because our portal has the menu; that is exactly the shape of
+// bug a single-deployment test never finds.
+//
+// The account menu is the better fallback because acctUl() does not depend on a NAME: it keys on a
+// sign-out entry plus the user's own profile link, and a portal without either is not a portal. Same
+// gate either way (kit.status), so which menu carries the entry changes nothing about who can see it.
+var ul=mgmtUl(),fallback=false;
+if(!ul){ul=acctUl();fallback=!!ul}
+if(!ul||ul.dataset.svxspk)return;ul.dataset.svxspk='1';
+var li=document.createElement('li');
+// Marked so anything walking this menu can tell OUR entry from the portal's. The builder skips _svx*
+// rows: offering to hide the console's own link would compose a config that contradicts itself, and the
+// hide would not even work, since hides run before adds.
+li.className='_svxspk';
+var a=document.createElement('a');a.href='javascript:void(0)';a.textContent='Super Portal Kit';
+// Bold, because this is an operator/superadmin tool sitting among ordinary per-customer entries and
+// should not read as one of them.
+a.style.fontWeight='600';
+// In the account menu it sits among the reader's OWN account entries, where an operator tool is more
+// out of place than it is in Management. Say where it landed rather than let it read as one of them.
+if(fallback)a.title='Operator console. Shown here because this portal has no Management menu.';
+a.addEventListener('click',function(e){e.preventDefault();spkOpen()});
+li.appendChild(a);
+// PREPEND, not append. Two reasons. It belongs at the top as the operator entry. And appending made the
+// position NON-DETERMINISTIC: managementMenu() (PORTAL_MENUS additions, in the self bundle) also appends
+// to this same <ul>, so whichever bundle's fetch resolved first won — observed live moving between
+// reloads. insertBefore(firstChild) is stable regardless of which runs first.
+ul.insertBefore(li,ul.firstChild)}
+var _spkF=[{p:/^\//,m:spkMenu}];
+function spkRun(){for(var i=0;i<_spkF.length;i++){try{if(_spkF[i].p.test(location.pathname))_spkF[i].m()}catch(e){}}}
+var _spkRaf=0;function spkSched(){if(_spkRaf)return;_spkRaf=requestAnimationFrame(function(){_spkRaf=0;spkRun()})}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',spkRun);else spkRun();
+var _spkOb=new MutationObserver(spkSched);_spkOb.observe(document.documentElement,{childList:true,subtree:true});
+setTimeout(function(){_spkOb.disconnect()},8000);
+`;
+
+/** The operator console bundle. Its own file, not a flag inside the admin bundle: folding it in would
+ *  ship these bytes to every Office Manager behind a cosmetic self-hide. Strips RINGOTEL_APP_BASE_URL
+ *  for the same reason buildSelfBundle does — this body never uses it.
+ *
+ *  It ALSO strips `PORTAL_APP_DOWNLOADS`, which is not about bytes but about reachability: `wrapBundle`
+ *  calls `parseDownloads`, which THROWS on malformed JSON, and `/kit/spk.js` is served ahead of the
+ *  Group-2 validator (`appAccessConfigError`) that would otherwise have caught it. A thrown
+ *  `AppAccessConfigError` is not an `HttpError`, so the console route's catch answers a bare
+ *  `{"error":"Request failed"}`, the injected primary silently drops the non-200, and the operator loses
+ *  the Management-menu entry that leads to the one page that names the broken setting. The console must
+ *  survive exactly the class of config it exists to report — and this body never reads `_KC.dl`. */
+export function buildSpkBundle(allowedKeys: string[], env: KitEnv): string {
+  return wrapBundle(SPK_FEATURE_KEYS, allowedKeys, { ...env, RINGOTEL_APP_BASE_URL: '', PORTAL_APP_DOWNLOADS: '' }, KIT_COMMON + SPK_BODY);
 }

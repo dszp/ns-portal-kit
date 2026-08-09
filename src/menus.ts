@@ -6,7 +6,7 @@
  * no separate include/exclude syntax. `{"*": [x]}` changes everywhere; adding `{"acme": []}` makes it
  * "everywhere except acme"; `{"*": [], "acme": [x]}` makes it "only acme". The same holds on every axis.
  *
- * Precedence, most specific wins:  domain  →  user scope  →  app state  →  "*"
+ * Precedence, most specific wins:  account  →  domain  →  user scope  →  app state  →  "*"
  *
  * A domain key, when present, WINS OUTRIGHT — it is not merged with the app-state list. Merging would
  * make "turn it off here" inexpressible, which is the likeliest reason to reach for an override at all.
@@ -17,7 +17,7 @@
 
 /** Loud, distinct error for bad menu config (⇒ a 500 upstream, like AppAccessConfigError). */
 import { parseHideList } from './appAccess.js';
-import { KNOWN_SCOPES } from './features.js';
+import { looksLikeAccount, KNOWN_SCOPES } from './features.js';
 
 export class MenuConfigError extends Error {}
 
@@ -72,6 +72,13 @@ export interface TargetCtx {
    * here), for the `scopes` axis. Absent ⇒ no scope rung can match; the rule falls through as if unlisted.
    */
   scope?: string;
+  /**
+   * This user's EFFECTIVE account id (`user@domain`), for the `users` axis. Effective, not the operator's,
+   * for the same reason `scope` is: while masquerading, every other authz decision here is made as the
+   * masked user, and a menu rule that followed the operator instead would show one person's entries to
+   * another. Absent ⇒ no user rung can match, and the rule falls through as if the account were unlisted.
+   */
+  user?: string;
   /** This user's own facts, for `{var}` substitution in add entries. Absent ⇒ variables resolve empty. */
   vars?: Record<string, string>;
 }
@@ -221,18 +228,44 @@ export function resolveTargeted<T>(
   const appKey = keyOf('app');
   const domainsKey = keyOf('domains');
   const scopesKey = keyOf('scopes');
+  const usersKey = keyOf('users');
 
-  if (appKey !== undefined || domainsKey !== undefined || scopesKey !== undefined) {
+  if (appKey !== undefined || domainsKey !== undefined || scopesKey !== undefined || usersKey !== undefined) {
     let chosen: T[] | undefined;
     // An in-axis "*", from the most specific axis that carries one. Held back until every axis has had a
     // chance at an EXACT match, so `{"scopes":{"*":[a]},"app":{"ringotel":[b]}}` gives an app-active user
     // `b` — a star is a default, and a default must never beat a rule that actually names you.
     let axisDefault: T[] | undefined;
-    if (domainsKey !== undefined) {
+    // USERS FIRST — it is the most specific axis there is. A rule naming your account must beat one naming
+    // your domain, or naming an account could never carve an exception out of a domain-wide rule, which is
+    // the only reason to name one.
+    if (usersKey !== undefined) {
+      const umap = raw[usersKey];
+      if (!isObj(umap)) throw new MenuConfigError(`${path}.users must be an object`);
+      for (const k of Object.keys(umap)) {
+        // Loud on a non-account, exactly like the scope and app axes: a key that can never match is a rule
+        // that is silently absent for everyone. Same predicate PORTAL_SUPERADMINS uses, imported rather
+        // than re-written — three settings that name accounts must agree on what an account is.
+        if (k.trim() !== '*' && !looksLikeAccount(k.trim())) {
+          throw new MenuConfigError(`${path}.users has an entry that is not a user@domain: "${k}"`);
+        }
+      }
+      const v = validated(umap, `${path}.users`);
+      const me = norm(ctx.user ?? '');
+      if (me) chosen = pickCI(v, me);
+      if (axisDefault === undefined) axisDefault = pickCI(v, '*');
+    }
+    if (chosen === undefined && domainsKey !== undefined) {
       const dmap = raw[domainsKey];
       if (!isObj(dmap)) throw new MenuConfigError(`${path}.domains must be an object`);
       const v = validated(dmap, `${path}.domains`);
       chosen = pickCI(v, dom);
+      // The in-axis default, which this axis alone used to omit. `users`, `scopes` and `app` all pick up
+      // their own `"*"`; `domains` did not, so `{"domains":{"*":["A"],"acme.example":[]}}` -- the exact
+      // "change everywhere except some" shape this file's own contract documents, and the console teaches
+      // -- validated green and then matched nothing anywhere. A rule that silently never fires is the
+      // failure mode every other axis here throws to prevent.
+      if (axisDefault === undefined) axisDefault = pickCI(v, '*');
     }
     if (scopesKey !== undefined) {
       const smap = raw[scopesKey];
@@ -300,26 +333,92 @@ function rawMenus(env: MenuEnv): Record<string, { hide?: unknown; add?: unknown 
 }
 
 /**
+ * Where each entry of the apps-menu hide list came from. Exists so the console can show one effective list
+ * and still say which setting contributed each label — which is what makes two settings safe rather than
+ * confusing. The union below is only defensible because this exists.
+ */
+export interface AppsHideSources {
+  /** Labels from `PORTAL_APPS_HIDE`, in its own parser's order. */
+  legacy: string[];
+  /** Labels from `PORTAL_MENUS["apps"].hide`, after targeting resolution. */
+  menus: string[];
+  /** The effective list: the union, first-seen order, case-insensitively de-duplicated. */
+  effective: string[];
+}
+
+/** Case-insensitive union preserving first-seen order and the first spelling seen. Hiding is idempotent
+ *  and commutative, so a union is the only merge of two hide lists with no order dependence. */
+function unionLabels(...lists: string[][]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const list of lists) {
+    for (const label of list) {
+      const k = label.trim().toLowerCase();
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      out.push(label);
+    }
+  }
+  return out;
+}
+
+/**
+ * The two apps-menu hide settings, separately and merged, for one user.
+ *
+ * Setting both used to be a fatal config error, on the reasoning that two places to look for one answer is
+ * how a menu ends up wrong with nobody able to say why. The reasoning was right about the risk and wrong
+ * about the remedy: the cost fell on the wrong thing entirely. `menuConfigError` runs in the pre-routing
+ * gauntlet, so two overlapping cosmetic settings took down every route except `/health` and the console —
+ * the injected primary included — and the whole portal add-on went dark for every user. A hide list is the
+ * least consequential config this kit has, and it had the largest blast radius of any of them.
+ *
+ * The remedy that actually addresses the risk is to make the answer VISIBLE rather than to make the
+ * combination illegal: one effective list, with provenance, on the console. Precedence was the other
+ * candidate and is worse — it silently discards a setting the operator wrote, which is the failure mode
+ * that is hardest to debug and the one this repo has been bitten by before.
+ */
+export function appsHideSources(env: MenuEnv, ctx: TargetCtx): AppsHideSources {
+  const cfg = rawMenus(env)['apps'] ?? {};
+  const legacy = (env.PORTAL_APPS_HIDE ?? '').trim() ? legacyHide(env, ctx) : [];
+  const menus = resolveTargeted<string>(cfg.hide, ctx, 'PORTAL_MENUS["apps"].hide', asStringItem);
+  return { legacy, menus, effective: unionLabels(menus, legacy) };
+}
+
+/**
+ * True when both apps-menu hide settings carry a value — not an error, but worth reporting once.
+ *
+ * TOTAL, deliberately: `setupIssues` calls this, and `setupIssues` is the function whose whole job is to
+ * REPORT what is wrong with a deployment. A reporting predicate that throws takes down the page that would
+ * have shown the problem — this one did, for a few minutes, on a deployment with malformed `PORTAL_MENUS`,
+ * which is precisely the deployment that needs the checklist to render. An unparseable value cannot be
+ * "both set", and `menuConfigError` reports the malformed JSON itself, loudly and at the right layer.
+ */
+export function bothAppsHideSet(env: MenuEnv): boolean {
+  if (!(env.PORTAL_APPS_HIDE ?? '').trim()) return false;
+  try {
+    return (rawMenus(env)['apps'] ?? {}).hide !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The resolved plan for every supported menu, for ONE user's domain + scope + app state.
  *
- * `PORTAL_APPS_HIDE` remains supported as the apps-menu hide list (unchanged parsing). Setting BOTH it and
- * `PORTAL_MENUS.apps.hide` is a config ERROR rather than a precedence rule: two places to look for one
- * answer is how a menu ends up wrong with nobody able to say why.
+ * Hides and adds are two independent lists, and the client applies them in that order — see `menuApply` in
+ * `kit.ts`. That order is the contract: a hide names a STOCK entry, so it can never remove one of this
+ * config's own additions, and neither list's meaning depends on the other.
  */
 export function resolveMenus(env: MenuEnv, ctx: TargetCtx): Record<MenuName, MenuPlan> {
   const menus = rawMenus(env);
-  const legacyRaw = (env.PORTAL_APPS_HIDE ?? '').trim();
-
-  const appsCfg = menus['apps'] ?? {};
-  if (legacyRaw && appsCfg.hide !== undefined) {
-    throw new MenuConfigError('Both PORTAL_APPS_HIDE and PORTAL_MENUS["apps"].hide are set — use one (PORTAL_MENUS supersedes)');
-  }
 
   const out = {} as Record<MenuName, MenuPlan>;
   for (const name of MENU_NAMES) {
     const cfg = menus[name] ?? {};
-    let hide = resolveTargeted<string>(cfg.hide, ctx, `PORTAL_MENUS["${name}"].hide`, asStringItem);
-    if (name === 'apps' && cfg.hide === undefined && legacyRaw) hide = legacyHide(env, ctx);
+    // The apps menu has two hide settings and they MERGE — see appsHideSources. Every other menu has one.
+    const hide = name === 'apps'
+      ? appsHideSources(env, ctx).effective
+      : resolveTargeted<string>(cfg.hide, ctx, `PORTAL_MENUS["${name}"].hide`, asStringItem);
     const add = resolveTargeted<MenuItem>(cfg.add, ctx, `PORTAL_MENUS["${name}"].add`, menuItemAt(ctx));
     out[name] = { hide, add };
   }
@@ -348,7 +447,10 @@ function legacyHide(env: MenuEnv, ctx: TargetCtx): string[] {
  */
 export function menuConfigError(env: MenuEnv): string | null {
   try {
-    for (const app of [...APP_NAMES, 'none']) resolveMenus(env, { domain: 'probe.example', app });
+    // A probe ACCOUNT as well as a probe domain: without one, a `users` rung would never be exercised by
+    // the startup check, and a malformed key there would sail past exactly the way an unvalidated app key
+    // used to. Eager validation inside resolveTargeted does the work — the probe just has to reach it.
+    for (const app of [...APP_NAMES, 'none']) resolveMenus(env, { domain: 'probe.example', app, user: 'probe@probe.example' });
     return null;
   } catch (e) {
     if (e instanceof MenuConfigError) return `Menu config invalid: ${e.message}`;
