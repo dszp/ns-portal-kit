@@ -19,7 +19,6 @@ const P = (scope: string, id = 'boss@example.com'): Principal =>
  * do not "fix" it by escaping or truncating the value. Stop carrying the value at all.
  */
 const SENTINELS: Record<string, string> = {
-  NS_API_TOKEN: 'SENTINEL-NS-API-TOKEN-a1b2c3',
   RINGOTEL_API_KEY: 'SENTINEL-RINGOTEL-KEY-d4e5f6',
   NS_EVENTS_PATH_SECRET: 'SENTINEL-PATH-SECRET-g7h8i9',
   NS_API_KEY: 'SENTINEL-NS-API-KEY-j1k2l3',
@@ -44,7 +43,7 @@ const SENTINELS: Record<string, string> = {
   ok(partial.length === 0, 'not even a prefix of a secret appears');
   const tail = Object.values(SENTINELS).filter((v) => html.includes(v.slice(-8)));
   ok(tail.length === 0, 'nor a trailing fingerprint of one — the "last four" habit is still a disclosure');
-  ok(html.includes('NS_API_TOKEN'), 'the secret NAME is shown — name the setting, never the value');
+  ok(html.includes('NS_API_KEY'), 'the secret NAME is shown — name the setting, never the value');
 
   // THE SAME CLAIM, AT THIS FILE'S OWN LAYER. The block above cannot fail from a bug in statusPage.ts:
   // status.ts already sets `value: null` for every secret, so removing renderSettingRow's own secret

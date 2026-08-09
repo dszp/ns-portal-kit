@@ -569,7 +569,7 @@ function eventsCard(env: StatusEnv): CardResult & { armed: boolean } {
   return { ...inertOn(env, unmet), armed: false };
 }
 
-const IDENTITY_NOTE = 'NS_API_KEY is not a fallback for NS_API_TOKEN — there is deliberately no fallback between them.';
+const IDENTITY_NOTE = 'NS_API_KEY is the only stored NetSapiens credential this Worker has, and it is used solely for work that arrives with no caller.';
 
 /** Takes the ALREADY-RESOLVED identity (`resolveWriteIdentity`, the same call `parseNsEventsConfig` makes
  *  internally) rather than re-deriving "which credential wins" from raw env — admin wins over API only
@@ -655,7 +655,6 @@ function ratelimitCard(env: StatusEnv): CardResult {
  */
 const PORTAL_INAPPLICABLE: Record<string, string> = {
   access: 'Ignored in portal-backend mode. A Cloudflare Access gate would refuse the plain <script src> that loads the injected primary, so the whole injection would die before any ns_t existed — and there is nothing here for it to protect, since every caller supplies their own ns_t and that verification IS the gate. Set it only on a standalone deployment.',
-  exposure: 'Nothing to protect in portal-backend mode. This gate exists to refuse a STORED NetSapiens token that has nothing verifiable in front of it, and portal mode never reads one — a request with no bearer is refused outright rather than falling back. A stored NS_API_TOKEN here is simply unused.',
 };
 function applicabilityOfSubsystem(id: string, _env: StatusEnv): Applicability {
   const why = PORTAL_INAPPLICABLE[id];
@@ -701,7 +700,7 @@ function buildSubsystems(
       result: writesCard(env, errs.ringErr) },
     { id: 'appaccess', name: 'Self-service app access', group: 'appaccess', tab: 'integration', parent: 'ringotel',
       description: 'The signed-in user\'s own "how do I sign into the app" surface — SSO detection, hide list, download links.',
-      settings: ['PORTAL_MODE', 'RINGOTEL_API_KEY', 'RINGOTEL_SSO_SERVICE', 'SSO_AUTO_ACTIVATE', 'PORTAL_APPS_HIDE', 'PORTAL_APP_DOWNLOADS'],
+      settings: ['RINGOTEL_API_KEY', 'RINGOTEL_SSO_SERVICE', 'SSO_AUTO_ACTIVATE', 'PORTAL_APPS_HIDE', 'PORTAL_APP_DOWNLOADS'],
       result: appAccessCard(env, errs.aaErr) },
     { id: 'sso', name: 'Ringotel SSO', group: 'appaccess', tab: 'integration', parent: 'ringotel',
       description: 'Whether this deployment claims Ringotel single sign-on for its users.',
