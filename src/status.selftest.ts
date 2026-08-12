@@ -84,10 +84,10 @@ ok(envBadge('svc.example.com', 'dev') === 'DEV', 'CACHE_SCOPE=dev wins over a pr
   const doc = buildStatus(OK_ENV, { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' });
   const byKey = (k: string) => doc.features.find((f) => f.key === k)!;
 
-  // EXACT, not a floor. `>= 18` against a registry of exactly 21 passes by coincidence and loosens
+  // EXACT, not a floor. `>= 18` against a registry of exactly 24 passes by coincidence and loosens
   // silently — deleting a registry entry left it green. Same reason EXPECTED_SUBSYSTEM_IDS below is a set
   // and not a count: adding a feature should be a deliberate edit here.
-  ok(doc.features.length === 21, `every registry feature gets a card, and there are exactly 21 (got ${doc.features.length})`);
+  ok(doc.features.length === 24, `every registry feature gets a card, and there are exactly 24 (got ${doc.features.length})`);
   ok(doc.features.every((f) => f.name && f.description), 'cards carry a name and description');
 
   ok(byKey('me.devices').state === 'off', 'a feature gated `off` reports off');

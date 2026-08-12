@@ -4,7 +4,7 @@ import { Script, runInNewContext } from 'node:vm';
 import { toPrincipal, type Principal } from '@dszp/netsapiens-lib';
 import { buildStatus } from './status.js';
 import { resolveMenus, appsHideSources, menuConfigError, MENU_VARS, MENU_NAMES, APP_NAMES } from './menus.js';
-import { statusHtml, richPara, plainPara, CHECKS_INTRO_TEXT } from './statusPage.js';
+import { statusHtml, richPara, plainPara, featureAnchor, CHECKS_INTRO_TEXT } from './statusPage.js';
 import { PROBE_CATALOG, probeCatalogFor, settingDocsUrl, groupDocsUrl, type ProbeResult } from './statusModel.js';
 import { parseFeatures, KNOWN_SCOPES } from './features.js';
 import { SPK_BRIDGE } from './spkBridge.js';
@@ -169,7 +169,9 @@ const DOC = () => buildStatus(
   // appears on the Integrations tab.
   // Matches both card shapes: a feature that carries explanatory prose spans the grid (`card card-wide`).
   // The bare quoted token silently dropped those, which read as a one-off count mismatch.
-  const featureCards = panel('features', 'integrations').split(/<div class="card(?: card-wide)?">/).slice(1);
+  // Feature cards also carry an `id` now (the per-feature jump list points at it), so the class attribute
+  // is no longer the end of the tag — match up to the closing quote and let the id follow.
+  const featureCards = panel('features', 'integrations').split(/<div class="card(?: card-wide)?" id="/).slice(1);
   ok(featureCards.length === doc.features.length,
     `the features panel renders exactly one card per feature (${featureCards.length} vs ${doc.features.length})`);
   // The tab is split by AUDIENCE (admin features, then self-service), so the expected order is that
@@ -182,6 +184,31 @@ const DOC = () => buildStatus(
   // Every feature lands in exactly one of the two sections — a feature whose audience were neither would
   // silently vanish from the tab.
   ok(expectedOrder.length === doc.features.length, 'and every feature is in one of the two audience sections');
+
+  // The per-feature jump list. The tab is past twenty cards, several of them full-width with paragraphs
+  // of prose, so a reader looking for one feature was scrolling the whole list to find where it is.
+  {
+    const feats = panel('features', 'integrations');
+    const missing = doc.features.filter((f) => !feats.includes(`data-target="${featureAnchor(f.key)}"`)).map((f) => f.key);
+    ok(missing.length === 0, `every feature has a jump-list entry${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`);
+    const noAnchor = doc.features.filter((f) => !feats.includes(`id="${featureAnchor(f.key)}"`)).map((f) => f.key);
+    ok(noAnchor.length === 0, `and a card carrying the id that entry points at${noAnchor.length ? ` (missing: ${noAnchor.join(', ')})` : ''}`);
+    // EVERY card gets the back-to-top button, not only the wide ones that carry prose. Restricting it to
+    // those was a guess about which cards a reader would be deep inside; with a jump list above, a reader
+    // arrives at ANY card from anywhere, and the one they land on is the one they need to leave.
+    const heads = featureCards.map((c) => c.slice(0, c.indexOf('</div>')));
+    ok(heads.every((h) => h.includes('class="totop"')), 'every feature card offers a way back to the top, not just the wide ones');
+
+    // Two features colliding on one anchor would send both jump entries to the same card, silently.
+    const anchors = doc.features.map((f) => featureAnchor(f.key));
+    ok(new Set(anchors).size === anchors.length, 'and no two features share an anchor id');
+    // These buttons contain child elements (the section bar wraps its count in a span), so the shared
+    // handler has to resolve the button the click landed INSIDE. Reading classList off the clicked node
+    // made every click on a child do nothing at all — silently, since a jump that does not jump looks
+    // like a page that has not finished loading.
+    ok(/raw\.closest\('\.tocref'\)/.test(html) && /raw\.closest\('\.totop'\)/.test(html),
+      'the jump handler resolves the button a click landed inside, so a click on a child is not dead');
+  }
 
   // Split WITHOUT the closing quote: a row that is dimmed (not applicable, or behind an unsatisfied gate)
   // renders `class="setting-row dimmed"`, and the quoted token silently matched only the 21 undimmed ones —

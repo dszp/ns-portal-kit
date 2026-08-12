@@ -286,6 +286,10 @@ function sectionHead(id: string, label: string, count?: number): string {
 // (`resolveGate`, `gateLevels`, `allowedLevels`) and an operator has to translate it before they can
 // answer their own question. Detail about WHO belongs on the Permissions tab, whose whole subject that is.
 
+/** A feature key as a DOM id. Derived from the key rather than the name, because the key is the stable
+ *  identifier an operator can also search for, and because two features could one day share a name. */
+export const featureAnchor = (key: string): string => `feat-${key.replace(/[^A-Za-z0-9]+/g, '-').toLowerCase()}`;
+
 function renderFeatureCard(f: FeatureCard, whats: Record<string, string>, vals: Record<string, string>): string {
   // Rendered only when the answer is NO. A superadmin passes every non-`off` gate by construction, so
   // "you pass" would be true on ~16 of 18 cards on every deployment forever — and a row that cannot vary
@@ -296,8 +300,8 @@ function renderFeatureCard(f: FeatureCard, whats: Record<string, string>, vals: 
   const why = f.detail.length
     ? `<div class="why">${f.detail.map(richBlock).join('')}</div>`
     : '';
-  return `<div class="card${f.detail.length ? ' card-wide' : ''}">
-  <div class="card-head">${pill(f.state)}<span class="card-name">${esc(f.name)}</span><code class="card-key">${esc(f.key)}</code>${f.detail.length ? '<button type="button" class="totop" title="Back to the top of the page">top</button>' : ''}</div>
+  return `<div class="card${f.detail.length ? ' card-wide' : ''}" id="${esc(featureAnchor(f.key))}">
+  <div class="card-head">${pill(f.state)}<span class="card-name">${esc(f.name)}</span><code class="card-key">${esc(f.key)}</code><button type="button" class="totop" title="Back to the top of the page">top</button></div>
   <p class="card-desc">${esc(f.description)}</p>
   ${why}
   <dl class="kv">
@@ -315,6 +319,28 @@ function renderFeatureCard(f: FeatureCard, whats: Record<string, string>, vals: 
 </div>`;
 }
 
+/**
+ * A jump list naming EVERY feature in a group, not just the two group headings.
+ *
+ * The section bar answers "which half am I in", which stopped being the question once this tab grew past
+ * twenty cards — several of them full-width with paragraphs of prose, so the group a reader wants can be
+ * several screens below the heading that names it. Somebody looking for one feature had to scroll the
+ * whole list to find out where it is, which is the failure a table of contents exists to remove.
+ *
+ * Names, not keys: this is for finding a thing you can describe. The key is on the card, and stays the
+ * anchor's basis so the link survives a rename.
+ *
+ * ⚠️ No nested element inside the button. The shared jump handler reads `data-target` off the CLICKED
+ * node, so a `<span>` inside a `.tocref` is a dead click when the reader happens to hit the span.
+ */
+function renderFeatureJumps(features: FeatureCard[]): string {
+  if (features.length < 2) return '';
+  const links = features
+    .map((f) => `<button type="button" class="tocref" data-target="${esc(featureAnchor(f.key))}" title="${esc(f.key)}">${esc(f.name)}</button>`)
+    .join('');
+  return `<nav class="toc toc-jump">${links}</nav>`;
+}
+
 function renderFeatures(doc: StatusDoc, whats: Record<string, string>, vals: Record<string, string>): string {
   const admin = doc.features.filter((f) => f.audience === 'admin');
   const self = doc.features.filter((f) => f.audience === 'self');
@@ -322,10 +348,12 @@ function renderFeatures(doc: StatusDoc, whats: Record<string, string>, vals: Rec
   ${renderTocBar([{ id: 'sec-feat-admin', label: 'Administrative', count: admin.length }, { id: 'sec-feat-self', label: 'Self-service', count: self.length }])}
   ${sectionHead('sec-feat-admin', 'Administrative features', admin.length)}
   <p class="dim">Things an administrator does to other people's accounts. "Available to" is who may use them.</p>
+  ${renderFeatureJumps(admin)}
   <div class="card-grid">${admin.map((f) => renderFeatureCard(f, whats, vals)).join('')}</div>
   ${sectionHead('sec-feat-self', 'Self-service features', self.length)}
   <p class="dim">Things a signed-in user sees about their own account. Here <strong>your</strong> users are
   the subject, not you — see the Permissions tab for what each scope actually gets.</p>
+  ${renderFeatureJumps(self)}
   <div class="card-grid">${self.map((f) => renderFeatureCard(f, whats, vals)).join('')}</div>
 </section>`;
 }
@@ -1622,6 +1650,12 @@ details.schema p { margin:.4rem 0; }
 .tocref { font:inherit; font-size:.78rem; padding:.15rem .45rem; border-radius:5px; border:1px solid var(--line);
           background:var(--bg); color:var(--blue); cursor:pointer; }
 .tocref:hover { border-color:var(--blue); }
+/* The per-feature jump list is longer than the section bar, so it reads as a list rather than a toolbar:
+   quieter chrome, tighter rows, and a scroll cap so it can never push the cards it points at off-screen. */
+.toc-jump { margin:.1rem 0 1rem; padding:.45rem .55rem; max-height:9.5rem; overflow-y:auto; }
+.toc-jump .tocref { font-size:.74rem; padding:.1rem .4rem; }
+/* A card jumped to must not land under the sticky header, and must be findable once it does. */
+.card[id] { scroll-margin-top:4.5rem; }
 h3.jumph { display:flex; align-items:baseline; gap:.5rem; scroll-margin-top:.5rem; }
 .totop { font:inherit; font-size:.68rem; padding:0 .3rem; border-radius:4px; border:1px solid var(--line);
          background:transparent; color:var(--dim); cursor:pointer; margin-left:auto; }
@@ -1769,7 +1803,13 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
 
   // The jump bar and the back-to-top buttons on each heading. Both are pure scrolls within the current tab.
   document.addEventListener('click', function(ev){
-    var t = ev.target;
+    var raw = ev.target;
+    if (!raw || !raw.closest) return;
+    // closest(), not classList on the clicked node: these buttons contain child elements — the section
+    // bar wraps its count in a span — and a click that lands on the child was silently doing nothing.
+    // Reading the button the click is INSIDE makes the whole control clickable, which is what it looks
+    // like, and it stops the markup of a jump entry from being load-bearing.
+    var t = raw.closest('.tocref') || raw.closest('.totop') || raw;
     if (!t || !t.classList) return;
     if (t.classList.contains('tocref')) {
       var el = document.getElementById(t.getAttribute('data-target') || '');

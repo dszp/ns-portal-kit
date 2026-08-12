@@ -78,6 +78,17 @@ export const FEATURE_KEYS = [
   // was to know the query parameter. Same key the route enforces — the flag only decides whether the
   // control is drawn, never whether the refresh is permitted.
   { flag: 'refresh', key: 'ringotel.refresh' },
+  // ⚠️ THE ONLY FLAGS HERE THAT TAKE SOMETHING AWAY. Every entry above says "draw a control we add, and
+  // hide it when the policy says no" — and the sentence at the top of this block, that the flag is
+  // cosmetic because the same key gates the data route server-side, is what makes that safe.
+  //
+  // These three hide controls the NetSapiens PORTAL drew, whose forms post straight to the NetSapiens
+  // core. There is no route of ours behind them and there cannot be. So the flag is not cosmetic in the
+  // usual sense — it is the entire mechanism, and the mechanism is a guardrail rather than enforcement.
+  // See the registry entries in features.ts, which say so where an operator will read it.
+  { flag: 'domainCreate', key: 'portal.domainCreate' },
+  { flag: 'domainEdit', key: 'portal.domainEdit' },
+  { flag: 'domainDelete', key: 'portal.domainDelete' },
 ] as const;
 
 /** All policy keys a principal is tested against for the bundle (in registry order). */
@@ -955,6 +966,124 @@ _actSched=true;var email=profEmail();
 // worker.ts's /rapp/user route.
 jget('/rapp/user?domain='+encodeURIComponent(d)+'&ext='+encodeURIComponent(ext)+'&fresh=1').then(function(r){_actSched=false;actSection(panel,d,ext,email,r)}).catch(function(){_actSched=false});
 }
+// ── The portal's own domain-record controls: create, edit, delete ────────────────────────────────────
+//
+// Gated REMOVAL, which inverts two habits that hold everywhere else in this bundle.
+//
+// 1. There is no route of ours behind these. The portal's forms post to the NetSapiens core and we are
+//    not in that path, so removing a control removes the way in, not the ability. Never describe this as
+//    a permission.
+// 2. It therefore fails OPEN. A renamed class or id means the control stays, and a quiet page is not
+//    evidence the removal ran. That is the honest trade for touching DOM we do not own, and it is why
+//    the click guard below exists: it does not depend on having found the node.
+//
+// THE domain-record predicate. The second argument is the domain the control would act on -- available
+// on every one of them, since each control's href carries it. It is ignored today: the gates are
+// reader-side only. It is threaded through anyway so that per-domain targeting, when it comes, lands in
+// this function alone instead of in every call site. A bare _AF.domainEdit read at each call site would
+// have to be torn out.
+// (No backticks anywhere below: this whole body is a template literal, and one would end it.)
+function mayDomain(flag,d){return !!_AF[flag]}
+// Is there anything for this reader to do at all? Today that is "any of the three flags is off". When
+// per-domain targeting lands it must ALSO be true whenever a narrowing exists for this reader, or these
+// surfaces will skip work they need -- which is why it is a function beside mayDomain rather than an
+// inline check at each call site, where the second half would have to be remembered three times.
+function domAny(){return !(_AF.domainCreate&&_AF.domainEdit&&_AF.domainDelete)}
+// href -> [flag, domain] for the two row controls. One regex, so the click guard and the removal cannot
+// disagree about which verb a link is.
+function domVerb(href){var m=String(href||'').match(/\/portal\/domains\/(edit|delete)\/([^/?#]+)/);return m?[m[1]==='edit'?'domainEdit':'domainDelete',m[2]]:null}
+// WHERE a control keeps its target, which is not one place. The row controls are anchors carrying an
+// href; the context bar's Edit Domain is a BUTTON with no href at all, whose target sits in
+// data-modal-path and is opened by the portal's own handler rather than by loadModal. Reading both here
+// is what lets one selector list and one decoder cover both shapes -- and it is why the click guard,
+// which was written for hrefs, does not quietly skip the bar.
+function domHref(el){return (el&&(el.getAttribute('href')||el.getAttribute('data-modal-path')))||''}
+// Every control that opens a domain-record form, in either shape. One list, shared by the removal and
+// the click guard, so the two cannot come to disagree about what counts.
+var DOM_SEL='a[href*="/portal/domains/edit/"],a[href*="/portal/domains/delete/"],[data-modal-path*="/portal/domains/edit/"],[data-modal-path*="/portal/domains/delete/"]';
+function domDrop(el){if(el&&el.parentNode)el.parentNode.removeChild(el)}
+// The domains list. Add Domain carries a literal id (no domain mangling), so it is the one stable
+// selector here; the row controls are matched on class AND href, since the edit/delete classes alone are
+// generic enough to exist elsewhere in a portal we do not control.
+function domList(){
+if(!domAny())return;
+if(!mayDomain('domainCreate',null))domDrop(document.getElementById('ButtonAddDomainWriteDomain'));
+var as=document.querySelectorAll('td.action-buttons a.edit[href*="/portal/domains/edit/"],td.action-buttons a.delete[href*="/portal/domains/delete/"]');
+for(var i=0;i<as.length;i++){var a=as[i],v=domVerb(a.getAttribute('href'));if(v&&!mayDomain(v[0],v[1]))domDrop(a)}
+}
+// ⚠️ THE REMOVAL HAS TO OUTLIVE run()'s OBSERVER, and outlive the table itself.
+//
+// run()'s shared observer disconnects after 8 seconds. This list sorts and paginates long after that, so
+// without something persistent every removed control comes back. An observer keyed to the tbody found at
+// install time is not enough either: a filter or a soft navigation can replace the TABLE rather than its
+// rows, which orphans it silently -- and the controls that come back are anchors, which can be opened by
+// a middle click that the click guard's click listener never sees.
+//
+// So watch the document, which cannot be replaced out from under us; rAF-throttle it, as run() does; and
+// install it ONLY for a reader who is denied something, so nobody else pays for it. It converges: the
+// only mutations it causes are removals, and a second pass finds nothing left to remove.
+function domWatch(){
+if(!domAny()||domWatch._on)return;domWatch._on=1;
+var raf=0;
+new MutationObserver(function(){
+if(raf)return;
+raf=requestAnimationFrame(function(){raf=0;try{domList();domBar()}catch(e){}});
+}).observe(document.documentElement,{childList:true,subtree:true});
+}
+// The domain-context bar ("You are viewing the ... domain") carries an Edit Domain button, on a page
+// that is not the domains list -- /portal/home while managing a domain, among others. Two passes,
+// because the button declares its target but a portal that differs may not.
+function domBar(){
+// Precise first: it names its own target in data-modal-path, so this is the SAME decision the row
+// controls get, made on the same data, and it carries the domain for when targeting is per-domain.
+var bs=document.querySelectorAll('[data-modal-path*="/portal/domains/edit/"]');
+for(var i=0;i<bs.length;i++){var v=domVerb(domHref(bs[i]));if(v&&!mayDomain(v[0],v[1]))domDrop(bs[i])}
+// Then the LABEL, the technique menus.ts uses for the Management dropdown. Deliberately NOT scoped to
+// the container the button sits in today: the only case this pass exists for is a portal whose markup
+// differs, and in that case the container is exactly as likely to have been renamed as the button.
+if(mayDomain('domainEdit',dom()))return;
+var cs=document.querySelectorAll('a.btn,button.btn');
+for(var j=0;j<cs.length;j++){if(/^edit domain$/i.test((cs[j].textContent||'').trim()))domDrop(cs[j])}
+}
+// The second line, and the one that does not depend on having FOUND the control. Every one of them
+// opens its form on click -- the row controls and Add Domain through the portal's loadModal(...), the
+// context bar through its own NSDomainSettings handler -- so refusing the click refuses the form,
+// including on a control we failed to remove or one the portal redrew between observer callbacks.
+//
+// Refusing the click, not patching the handler. Replacing NSDomainSettings.clickedSettingsButton would
+// cover a programmatic call this cannot, and would cost far more than it buys: that function's name says
+// "settings button", not "domain edit", so we would be sitting in the path of portal behaviour we do not
+// understand, on every click that uses it, with our mistakes breaking the portal for everyone rather
+// than only declining something for one reader. It would also lose silently if the portal defined or
+// redefined the object after us. Neither is worth it for a guardrail that cannot enforce anything
+// anyway -- a patched function is exactly as reversible from a console as a removed node.
+//
+// Capture phase on document, so it runs before the inline onclick and before the delegated Bootstrap
+// modal handler, and needs no ordering against page load. It acts ONLY on a denied verb: every other
+// click, including the Manage dropdown sharing that cell, passes through untouched.
+function domClicks(){
+if(!domAny())return; // nothing is denied for this reader -- do not put a listener on every click
+if(domClicks._on)return;domClicks._on=1;
+function guard(e){
+try{
+var t=e.target;if(!t||!t.closest)return;
+var flag=null,d=null,a=t.closest(DOM_SEL);
+if(a){var v=domVerb(domHref(a));if(v){flag=v[0];d=v[1]}}
+else if(t.closest('#ButtonAddDomainWriteDomain'))flag='domainCreate';
+if(!flag||mayDomain(flag,d))return;
+// stopImmediatePropagation as well as stopPropagation: the latter never silences another listener on
+// THIS node, and document is a node anything may listen on. No such listener exists in the portal we
+// captured, so this is hardening rather than a fix -- but it costs nothing and the alternative is
+// relying on a property of someone else's code that nothing here can hold still.
+e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
+}catch(x){}
+}
+// BOTH events. The row controls are anchors, and a middle click or a "open in new tab" opens one without
+// ever firing a click event -- preventDefault on click does not stop that, and the form it opens is the real
+// one. auxclick is where a middle click's default action lives, so it is where it can be refused.
+document.addEventListener('click',guard,true);
+document.addEventListener('auxclick',guard,true);
+}
 var F=[
 {p:/^\//,m:banner},
 {p:/^\/portal\/inventory/,m:inv,a:cfAud},
@@ -965,6 +1094,14 @@ var F=[
 {p:/^\/portal\/users\/?($|index)/,m:usersCol},
 {p:/^\/portal\/(users|answerrules|phones)/,m:usredit,a:cfAud},
 {p:/^\/portal\/domains\/?($|index)/,m:domCol,a:resList},
+// The domain-record controls. No activation gate on any of the three: each decides per CONTROL, because the
+// three verbs can be gated independently and a single answer for the page would be the wrong one for
+// two of them. Same reasoning as pgRefresh below -- a flag read once at install time cannot go stale
+// against the page it fires on.
+{p:/^\/portal\/domains\/?($|index)/,m:domList},
+{p:/^\/portal\//,m:domBar},
+{p:/^\/portal\//,m:domClicks},
+{p:/^\/portal\//,m:domWatch},
 // Installed on both list pages, once (self-guarded). No activation gate here -- the handler decides per click, so a
 // policy flag read at install time can't go stale against the page it fires on.
 {p:/^\/portal\/(domains|users)\/?($|index)/,m:pgRefresh},

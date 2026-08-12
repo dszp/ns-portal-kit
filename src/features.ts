@@ -7,8 +7,23 @@
  */
 import { isResellerScope, type Policy, type PolicyRule, type Principal } from '@dszp/netsapiens-lib';
 
-/** A configured gate: a level, a union of levels, levels+forced-users, or raw policy rules. */
-export type Gate = string | string[] | { levels?: string[]; users?: string[] } | PolicyRule[];
+/**
+ * The account axis of a gate object. A plain list is the ALLOW list — the original, unchanged form.
+ * The object form names a direction, and both directions may be given at once.
+ *
+ * `allow` rather than `allowOnly`: the list still unions with `levels`, so "only" would be false
+ * whenever `levels` is present. The only-ness comes from omitting `levels`, exactly as it always has.
+ *
+ * `deny` is the reason this shape exists. Without it, "every reseller except these two" can only be
+ * written as its complement — every reseller who KEEPS the capability — which is wrong the moment an
+ * account is created, and wrong silently. The direction lives under the axis rather than in a sibling
+ * `denyUsers` key so that the pairing is structural: a second axis needing a deny then costs a shape
+ * the parser already knows. (`menus.ts` set the list-or-object precedent.)
+ */
+export type GateUsers = string[] | { allow?: string[]; deny?: string[] };
+
+/** A configured gate: a level, a union of levels, levels+users (allow and/or deny), or raw policy rules. */
+export type Gate = string | string[] | { levels?: string[]; users?: GateUsers } | PolicyRule[];
 
 /** Loud, distinct error for a bad gate/level/config value (⇒ a 500 upstream). */
 export class FeaturesConfigError extends Error {}
@@ -100,6 +115,19 @@ export function resolveGate(gate: Gate, superadmins: string[]): Policy {
   }
 
   if (!shape.ccOnly && superadmins.length) rules.push({ users: superadmins });
+
+  // THE DENY, distributed onto EVERY rule — because the engine ORs rules and ANDs within one, so a
+  // single rule left bare re-admits the denied account through it. `netsapiens-lib`'s policy selftest
+  // pins that property ("notUsers is per-rule"), and this is the code it exists to protect.
+  //
+  // ⚠️ Including the superadmin union, deliberately. Everywhere else the union is purely additive, so
+  // this changes its character: a deny now beats it. Accepted because `off` already denies superadmins
+  // (the union was never absolute), and because a deny that names an account and then quietly does not
+  // apply to it is the worse of the two surprises. An existing `notUsers` on a raw rule is preserved
+  // and added to, never replaced.
+  if (shape.denyUsers.length) {
+    return rules.map((r) => ({ ...r, notUsers: [...(r.notUsers ?? []), ...shape.denyUsers] }));
+  }
   return rules;
 }
 
@@ -272,7 +300,60 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
       'Unset the endpoint and the feature is inert — nothing is requested and nothing is drawn. There is no half-configured state to get wrong.',
     ],
   },
+   // ── The portal's OWN domain-record controls (2026-08-11) ────────────────────────────────────────
+  //
+  // ⚠️ THE FIRST KEYS IN THIS REGISTRY WITH NO SERVER ROUTE OF OURS BEHIND THEM. Every other feature's
+  // `_AF` flag mirrors a route this Worker also gates, which is what makes "the flag is cosmetic"
+  // (kit.ts, FEATURE_KEYS) a safe thing to say: the server refuses a caller the flag would have hidden
+  // it from. These three hide controls belonging to the NetSapiens portal, whose forms post straight
+  // from the browser to the NetSapiens core. We are not in that path and cannot be. Denying one of
+  // these removes the way in, not the ability — say so wherever it is documented, and never let a
+  // reader inherit the usual guarantee by association.
+  //
+  // Three keys rather than one because grouping cannot be undone cheaply (a later `portal.domainDelete`
+  // beside a `portal.domainAdmin` leaves two keys claiming one control), and because one split IS worth
+  // expressing: may adjust a customer's limits, may never delete the customer.
+  //
+  // `reseller` throughout is a true no-op — no scope below it is offered these controls by the portal,
+  // so shipping these keys changes nothing anywhere until an operator configures one.
   {
+    key: 'portal.domainCreate',
+    name: 'Domain creation',
+    description: "The portal's own Add Domain control on the domains list.",
+    default: 'reseller',
+    detail: [
+      'Whether this account is offered the portal\'s own control for creating a domain. It is the one domain-record capability with no target to name — you are making the domain, so there is nothing yet to be specific about.',
+      '### What denying it does, and does not do',
+      'It removes the control. It does not remove the capability: the form behind it belongs to your NetSapiens portal and posts directly to it, with this kit nowhere in the path. Someone who knows the URL is unaffected. Treat this as a guardrail against the wrong click by someone who should not be making that click, not as a permission — the platform\'s own scopes are the only thing that can refuse the write.',
+    ],
+  },
+  {
+    key: 'portal.domainEdit',
+    name: 'Domain editing',
+    description: "The portal's own Edit controls for a domain's configuration record.",
+    default: 'reseller',
+    detail: [
+      'Whether this account is offered the portal\'s own controls for editing a domain\'s configuration — its limits especially. It covers every way in that we can see: the edit control on each row of the domains list, and the Edit Domain button shown while viewing a domain.',
+      '### It is about the domain record, not its contents',
+      'Users, call queues, auto attendants, time frames and inventory inside a domain are untouched by this. Someone denied domain editing can still administer everything within a domain they can open — which is usually the point, since the two are different jobs, but it is worth being explicit about because "cannot edit the domain" invites the wider reading.',
+      '### What denying it does, and does not do',
+      'It removes the controls. It does not remove the capability. The edit form belongs to your NetSapiens portal and posts directly to it; this kit is not in that path and cannot refuse the write. A missed control therefore fails open — you get the button back, never a false sense that something was blocked. Use the platform\'s own scopes for anything that must actually be prevented.',
+      '### The usual shape',
+      'The reason to reach for this is almost always "everyone who has it today, except these people", which is what a deny-only gate means: `{"users":{"deny":["100@example.com"]}}`. That stays correct as staff are added, because it names the exception rather than its complement.',
+    ],
+  },
+  {
+    key: 'portal.domainDelete',
+    name: 'Domain deletion',
+    description: "The portal's own delete control for a domain, on the domains list.",
+    default: 'reseller',
+    detail: [
+      'Whether this account is offered the portal\'s own control for deleting a domain. Separate from editing on purpose: "may adjust a customer\'s limits, may never delete the customer" is an ordinary thing to want of junior staff, and one key covering both could not express it.',
+      '### What denying it does, and does not do',
+      'It removes the control, not the capability — the same caveat as the other two, and it matters most here, because this is the irreversible one. Nothing in a browser can stop a determined request; only the platform\'s own scopes can.',
+    ],
+  },
+ {
     key: 'portal.versionLine',
     name: 'Version line in the portal footer',
     description: 'Adds this kit\'s name and version to the portal footer, linked to that version\'s release notes for reseller scope and above.',
@@ -365,7 +446,10 @@ export function parseSuperadmins(env: FeaturesEnv): string[] {
  *  caller that only needs "does this gate name anyone specifically", without building the list. */
 /** `ccOnly` is the cc-only decision (see `ccOnlyLevels`) recorded ONCE, so `resolveGate` (which acts on it)
  *  and `gateInWords` (which must describe it) read the same answer instead of deriving it twice. */
-export interface GateShape { levels: string[]; users: string[]; hasUsers: boolean; hasRawRules: boolean; ccOnly: boolean }
+/** `denyUsers` is the gate's `users.deny` list — the accounts every rule this gate emits must exclude.
+ *  It is NOT counted by `users`/`hasUsers`, which mean "who does this gate name as ADMITTED" and feed
+ *  `grantedByFor`'s "you are named personally" prose. A denied account is named, and not admitted. */
+export interface GateShape { levels: string[]; users: string[]; hasUsers: boolean; hasRawRules: boolean; ccOnly: boolean; denyUsers: string[] }
 
 /** The type name for an error message. Never the VALUE: the type is what the operator got wrong, and a
  *  gate's `users` list holds account names, which this module has no business echoing. */
@@ -391,14 +475,54 @@ function requireStringList(list: unknown[], where: string): string[] {
 /** The `PolicyRule` fields the engine treats as string lists (see `ruleMatches`). `masking` is a boolean
  *  and `description` is inert, so neither can crash an evaluation — a wrong type there simply never
  *  matches, which is fail-closed. */
-const RULE_STRING_FIELDS = ['scopes', 'domains', 'users', 'operators'] as const;
+const RULE_STRING_FIELDS = ['scopes', 'domains', 'users', 'operators', 'notUsers'] as const;
+
+/**
+ * Read a gate object's `users` in either written form: a plain list (the allow list, unchanged) or an
+ * object naming `allow` and/or `deny`.
+ *
+ * `wroteAllow` records whether an allow side was WRITTEN, which is not the same as its being non-empty
+ * — `parseFeatures` needs to tell "no allow side at all" (expand to the feature's default) from "an
+ * allow side naming nobody" (an error), and those two differ only by whether the key is present.
+ *
+ * An unknown key inside the object is refused rather than ignored. `{"users":{"denies":[…]}}` would
+ * otherwise parse as an empty deny and silently restrict nobody — the failure mode a deny must never
+ * have.
+ */
+function gateUsers(raw: unknown): { users: string[]; denyUsers: string[]; wroteAllow: boolean } {
+  if (raw === undefined) return { users: [], denyUsers: [], wroteAllow: false };
+  if (Array.isArray(raw)) return { users: requireStringList(raw, `a gate object's "users"`), denyUsers: [], wroteAllow: true };
+  if (!raw || typeof raw !== 'object') {
+    throw new FeaturesConfigError(`a gate object's "users" must be an array of user@domain accounts, or an object with "allow"/"deny", got ${typeName(raw)}`);
+  }
+  const u = raw as { allow?: unknown; deny?: unknown };
+  for (const [k, v] of Object.entries(u)) {
+    if (k !== 'allow' && k !== 'deny') {
+      throw new FeaturesConfigError(`a gate object's "users" accepts only "allow" and "deny", got "${k}"`);
+    }
+    if (!Array.isArray(v)) {
+      throw new FeaturesConfigError(`a gate object's "users.${k}" must be an array of user@domain accounts, got ${typeName(v)}`);
+    }
+  }
+  const users = requireStringList((u.allow as unknown[]) ?? [], `a gate object's "users.allow"`);
+  const denyUsers = requireStringList((u.deny as unknown[]) ?? [], `a gate object's "users.deny"`);
+  // ⚠️ A deny naming something that is not an account can never deny anyone, and fails OPEN while doing
+  // it. That is the opposite of a typo in an allow list, which merely admits nobody extra and is
+  // therefore safe to leave unchecked (as it always has been). The asymmetry in the failure direction
+  // is the whole reason this one list is shape-checked — same rule, and same message, as
+  // PORTAL_SUPERADMINS, which names accounts for the same kind of reason.
+  for (const s of denyUsers) {
+    if (!looksLikeAccount(s)) throw new FeaturesConfigError(`a gate object's "users.deny" entry is not a user@domain: ${s}`);
+  }
+  return { users, denyUsers, wroteAllow: u.allow !== undefined };
+}
 
 export function gateLevels(gate: Gate): GateShape {
-  if (typeof gate === 'string') return { levels: [gate], users: [], hasUsers: false, hasRawRules: false, ccOnly: ccOnlyLevels([gate]) };
+  if (typeof gate === 'string') return { levels: [gate], users: [], hasUsers: false, hasRawRules: false, ccOnly: ccOnlyLevels([gate]), denyUsers: [] };
   if (Array.isArray(gate)) {
     if (gate.every((g) => typeof g === 'string')) {
       const levels = gate as string[];
-      return { levels, users: [], hasUsers: false, hasRawRules: false, ccOnly: ccOnlyLevels(levels) };
+      return { levels, users: [], hasUsers: false, hasRawRules: false, ccOnly: ccOnlyLevels(levels), denyUsers: [] };
     }
     if (gate.every((g) => !!g && typeof g === 'object' && !Array.isArray(g))) {
       // Validate every string-list field of every rule, not just the `users` this function reads: these
@@ -406,7 +530,9 @@ export function gateLevels(gate: Gate): GateShape {
       // of them is the same raw TypeError. A non-ARRAY field was previously ignored outright here, which
       // let `{"users":"a@b.example"}` reach `inList()` and crash on `.some`.
       const users: string[] = [];
+      const perRuleDenies: string[][] = [];
       for (const r of gate as Record<string, unknown>[]) {
+        const denies: string[] = [];
         for (const field of RULE_STRING_FIELDS) {
           const v = r[field];
           if (v === undefined) continue;
@@ -414,11 +540,36 @@ export function gateLevels(gate: Gate): GateShape {
           if (!Array.isArray(v)) throw new FeaturesConfigError(`${where} must be an array of strings, got ${typeName(v)}`);
           const strings = requireStringList(v, where);
           if (field === 'users') users.push(...strings);
+          if (field === 'notUsers') denies.push(...strings);
         }
+        // ⚠️ The SAME shape check the object form's `users.deny` gets, for the same reason and with the
+        // same failure direction: a denial naming something that cannot be an account denies nobody, and
+        // does it silently. Checking one spelling of the mechanism and not the other left the loud half
+        // guarding the quiet half's mistakes.
+        for (const s of denies) {
+          if (!looksLikeAccount(s)) throw new FeaturesConfigError(`a raw policy rule's "notUsers" entry is not a user@domain: ${s}`);
+        }
+        // A rule that only denies never matches (the engine's `hasCondition` refuses it), which is
+        // fail-closed but silent — it reads as a working denial and is dead config. Say so.
+        const admits = ['scopes', 'domains', 'users', 'operators', 'masking'].some((f) => r[f] !== undefined);
+        if (denies.length && !admits) {
+          throw new FeaturesConfigError('a raw policy rule naming only "notUsers" can never match: a rule must say who it admits (scopes, domains, users, operators or masking) before a denial can narrow it');
+        }
+        perRuleDenies.push(denies);
       }
       // Raw rules name scopes directly, not levels, so "every level is call-center" is not decidable —
       // and the superadmin union has always applied to them. false, deliberately, not unknown.
-      return { levels: [], users, hasUsers: users.length > 0, hasRawRules: true, ccOnly: false };
+      //
+      // `denyUsers` is the INTERSECTION of every rule's denials, and it exists for one rule the operator
+      // cannot reach: the `{users: superadmins}` union `resolveGate` appends behind their back. They put
+      // a denial on every branch they wrote and a superadmin still sailed through the branch they did
+      // not know about — the same denial, written two ways, giving opposite answers. An account denied
+      // in EVERY branch they wrote is denied as far as their config can say; one denied in only some
+      // branches was deliberately left a path, and closing it would be us overruling them.
+      const denyUsers = perRuleDenies.length
+        ? perRuleDenies.reduce((acc, d) => acc.filter((x) => d.some((y) => y.trim().toLowerCase() === x.trim().toLowerCase())))
+        : [];
+      return { levels: [], users, hasUsers: users.length > 0, hasRawRules: true, ccOnly: false, denyUsers };
     }
     throw new FeaturesConfigError('a gate array must be all level names or all rule objects, not a mix');
   }
@@ -427,33 +578,125 @@ export function gateLevels(gate: Gate): GateShape {
     if (g.levels !== undefined && !Array.isArray(g.levels)) {
       throw new FeaturesConfigError(`a gate object's "levels" must be an array of level names, got ${typeName(g.levels)}`);
     }
-    if (g.users !== undefined && !Array.isArray(g.users)) {
-      throw new FeaturesConfigError(`a gate object's "users" must be an array of user@domain accounts, got ${typeName(g.users)}`);
+    // ⚠️ UNKNOWN KEYS ARE REFUSED, NOT IGNORED — and the deny-only expansion is what made this
+    // load-bearing. An ignored `"level"` (singular) used to leave a gate that was either loudly invalid
+    // or narrower than intended; now it leaves a gate naming no allow side, which `parseFeatures` reads
+    // as "this feature's default, minus these" — and that default can be WIDER than the levels the
+    // operator typed. `{"level":["reseller"],"users":{"deny":[…]}}` on a key defaulting to
+    // office_manager would silently grant office managers. A typo must never widen a gate.
+    for (const k of Object.keys(g)) {
+      if (k !== 'levels' && k !== 'users') {
+        throw new FeaturesConfigError(`a gate object accepts only "levels" and "users", got "${k}"`);
+      }
     }
+    const wroteLevels = g.levels !== undefined;
     const levels = requireStringList(g.levels ?? [], `a gate object's "levels"`);
-    const users = requireStringList(g.users ?? [], `a gate object's "users"`);
+    const { users, denyUsers, wroteAllow } = gateUsers(g.users);
     const hasUsers = users.length > 0;
-    if (!levels.length && !hasUsers) throw new FeaturesConfigError('a gate object needs levels or users');
-    return { levels, users, hasUsers, hasRawRules: false, ccOnly: ccOnlyLevels(levels) };
+    if (!levels.length && !hasUsers) {
+      if (!denyUsers.length) throw new FeaturesConfigError('a gate object needs levels or users');
+      // An allow side WRITTEN but empty is the operator saying "nobody", on either axis. It must not
+      // fall through to `parseFeatures`' deny-only expansion, whose meaning — "this feature's default,
+      // minus these" — is the widest possible misreading of what was typed. `"levels": []` and
+      // `"allow": []` are the same statement on two axes and get the same answer.
+      if (wroteLevels || wroteAllow) {
+        throw new FeaturesConfigError('a gate object needs levels or users: an empty "levels" or "allow" list names nobody. Omit them entirely to mean "this feature\'s default, minus the deny", or name who keeps it.');
+      }
+    }
+    return { levels, users, hasUsers, hasRawRules: false, ccOnly: ccOnlyLevels(levels), denyUsers };
   }
   throw new FeaturesConfigError(`unrecognized gate shape: ${JSON.stringify(gate)}`);
 }
 
-/** PORTAL_FEATURES → { key: gate } ({} if unset). Throws on bad JSON or an unknown feature key. */
+/**
+ * Fold a deny into a base gate, preserving whatever the base already said.
+ *
+ * Only ever called with a REGISTRY DEFAULT as the base (see {@link expandDenyOnly}), which today is
+ * always a level name — the other branches are there so a future default of another shape does not
+ * silently lose its deny. Raw rules cannot be expressed as a gate object, so the deny goes onto each
+ * rule instead, which is the same distribution `resolveGate` performs.
+ */
+function applyDeny(base: Gate, deny: string[]): Gate {
+  if (base === 'off') return 'off'; // nothing to subtract from; still admits nobody
+  if (typeof base === 'string') return { levels: [base], users: { deny } };
+  if (Array.isArray(base)) {
+    if (base.every((b) => typeof b === 'string')) return { levels: base as string[], users: { deny } };
+    return (base as PolicyRule[]).map((r) => ({ ...r, notUsers: [...(r.notUsers ?? []), ...deny] }));
+  }
+  const b = base as { levels?: string[]; users?: GateUsers };
+  const allow = Array.isArray(b.users) ? b.users : b.users?.allow ?? [];
+  const baseDeny = Array.isArray(b.users) ? [] : b.users?.deny ?? [];
+  return {
+    levels: b.levels ?? [],
+    users: { ...(allow.length ? { allow } : {}), deny: [...baseDeny, ...deny] },
+  };
+}
+
+/**
+ * A gate that ONLY denies means "this feature's default, minus these accounts".
+ *
+ * Without this, `{"users":{"deny":["…"]}}` would resolve to no allow rules at all and lock everyone
+ * out — because `parseFeatures` takes the override OR the default and never merges them. That is the
+ * exact opposite of what the operator wrote, and it is the config an operator is most likely to write,
+ * since "everyone who has this today, except one person" is the whole reason the deny form exists.
+ *
+ * It lives HERE rather than in `resolveGate` because this is the one place holding both the key and its
+ * registry default (the `allowedLevels` floor already needs both). `resolveGate` stays self-contained
+ * and never learns which key it is resolving.
+ *
+ * ⚠️ It is therefore the single place a gate is not self-describing, which is why `gateInWords` must
+ * render what came OUT of here and never the config as written — an exception with no base named is a
+ * console describing a gate nobody configured.
+ */
+function expandDenyOnly(gate: Gate, def: FeatureDef): Gate {
+  if (gate === 'off') return gate;
+  const shape = gateLevels(gate); // throws on an unrecognized shape — fail closed, before anything else
+  const namesAnAllowSide = shape.levels.length > 0 || shape.hasUsers || shape.hasRawRules;
+  if (namesAnAllowSide || !shape.denyUsers.length) return gate;
+  return applyDeny(def.default, shape.denyUsers);
+}
+
+/** PORTAL_FEATURES → { key: gate } ({} if unset). Throws on bad JSON or an unknown feature key.
+ *
+ *  Returns the EFFECTIVE gates — deny-only overrides already expanded against their feature's default,
+ *  which is what every enforcement and every piece of prose must read. When you need the config as the
+ *  operator typed it, use {@link parseFeaturesDetailed}; the difference matters in exactly one place and
+ *  it is documented there. */
 export function parseFeatures(env: FeaturesEnv): Record<string, Gate> {
+  return parseFeaturesDetailed(env).effective;
+}
+
+/**
+ * Both views of `PORTAL_FEATURES`, from ONE walk: `effective` (deny-only expanded) and `written` (what
+ * the operator actually typed).
+ *
+ * ⚠️ The distinction exists for the console's copyable JSON, and it is not cosmetic. A deny-only gate
+ * means "this feature's default, minus these accounts" — it TRACKS the default. Expanded, it pins today's
+ * default as a literal. An operator who copies "your current overrides" out of the console and pastes it
+ * into their config would therefore freeze the base against any future change to the registry default:
+ * the exact slow, silent rot that the deny form was added to eliminate, reintroduced through the button
+ * offering to help. So the console shows prose from `effective` (it must describe what is enforced) and
+ * JSON from `written` (it must be safe to paste back).
+ */
+export function parseFeaturesDetailed(env: FeaturesEnv): { effective: Record<string, Gate>; written: Record<string, Gate> } {
   const raw = (env.PORTAL_FEATURES ?? '').trim();
-  if (!raw) return {};
+  if (!raw) return { effective: {}, written: {} };
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new FeaturesConfigError('PORTAL_FEATURES is not valid JSON'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new FeaturesConfigError('PORTAL_FEATURES must be a JSON object');
   const known = new Set(featurePolicyKeys());
   const out: Record<string, Gate> = {};
-  for (const [k, v] of Object.entries(parsed as Record<string, Gate>)) {
+  const written: Record<string, Gate> = {};
+  for (const [k, rawGate] of Object.entries(parsed as Record<string, Gate>)) {
     if (!known.has(k)) throw new FeaturesConfigError(`PORTAL_FEATURES has an unknown feature key: ${k}`);
     // The floor (see FeatureDef.allowedLevels). Checked HERE, at the config-ingestion boundary, because
     // this is the only place a key and its gate are both in hand — resolveGate never learns which key
     // it is resolving.
     const def = FEATURE_REGISTRY.find((f) => f.key === k);
+    // Expand a deny-only gate BEFORE the floor is checked, so the floor sees the levels that will
+    // actually be resolved. Those come from the feature's own default, so they are within the floor by
+    // construction — and a deny can only ever narrow, so this direction cannot breach one.
+    const v = def ? expandDenyOnly(rawGate, def) : rawGate;
     if (def?.allowedLevels) {
       const shape = gateLevels(v);   // throws on an unknown shape — do not soften this
       if (shape.hasRawRules) {
@@ -468,8 +711,9 @@ export function parseFeatures(env: FeaturesEnv): Record<string, Gate> {
       }
     }
     out[k] = v;
+    written[k] = rawGate;
   }
-  return out;
+  return { effective: out, written };
 }
 
 /** Assemble the effective FeaturePolicies: registry defaults ⊕ PORTAL_FEATURES overrides, each gate

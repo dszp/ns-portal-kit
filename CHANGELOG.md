@@ -20,6 +20,68 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [0.5.0] — 2026-08-11
+
+### Added
+
+- **Hide the portal's own domain create / edit / delete controls from chosen accounts.** Three new gates —
+  `portal.domainCreate`, `portal.domainEdit`, `portal.domainDelete` — remove the `Add Domain` button, the
+  edit and delete controls on each row of the domains list, and the `Edit Domain` button shown while
+  viewing a domain. They default to `reseller`, which changes nothing anywhere: no lower scope is offered
+  these controls by the portal, so the keys are inert until you configure one.
+
+  **Read this before relying on them.** Unlike every other gate here, no route of this kit sits behind
+  these. The forms belong to your NetSapiens portal and post straight to your core, with this kit nowhere
+  in the path — so denying one removes the *way in*, not the ability. Someone who knows the URL is
+  unaffected, and a portal update that renames a control means the control stays visible rather than
+  something silently failing shut. Treat it as a guardrail against the wrong click, not a permission; the
+  platform's own scopes are the only thing that can refuse the write. See
+  [CONFIG.md → The domain-record keys](./CONFIG.md#domain-record-keys).
+
+  Three keys rather than one so that *"may adjust a customer's limits, may never delete the customer"* is
+  expressible. The Manage menu sharing that row is navigation and is deliberately left alone.
+
+- **A gate can now name the accounts it EXCLUDES.** `users` in a `PORTAL_FEATURES` gate object accepts
+  `{"allow": […], "deny": […]}` alongside the plain list it always took:
+
+  ```jsonc
+  { "portal.domainDelete": { "users": { "deny": ["junior@example.com"] } } }
+  ```
+
+  A gate that only denies means **that feature's own default, minus those accounts** — so the line above
+  reads "reseller, except that account" and stays correct as staff are added, because the scope side comes
+  from each caller's own token rather than from a list you maintain. The allow form could only express the
+  same intent by listing everyone who *keeps* the capability, which is wrong the moment an account is
+  created, and wrong silently.
+
+  A deny beats everything else in its gate, **including a `PORTAL_SUPERADMINS` account** — the only place
+  other than `off` where one is refused. It also **follows the person through a masquerade**: an account
+  that is denied stays denied while acting as someone else, because a denial that evaporates the moment
+  its subject impersonates another user is not a denial. A `deny` entry that is not a `user@domain` is a
+  loud config error, because a typo there would restrict nobody, silently. See
+  [CONFIG.md → Naming the exception instead of its complement](./CONFIG.md#gate-users-deny).
+
+### Changed
+
+- **The Features tab has a jump list.** It is past twenty cards, several of them full-width with several
+  paragraphs of prose, so the group a reader wants could sit screens below the heading naming it. Each
+  audience section now lists every feature it contains, by name, linking to its card. The three
+  domain-record features sit with the other portal-surface features, below the status banner.
+
+- **The `PORTAL_FEATURES` row on the Config tab now names the key families** — `portal.*`, `callflow.view`,
+  `ringotel.*`, `me.*`, `kit.*` — instead of describing the shape and leaving the reader to find the keys
+  elsewhere. The Permissions tab remains the reference; this is orientation.
+
+- Requires `@dszp/netsapiens-lib` **0.1.9**, which adds the `notUsers` rule condition the deny form
+  compiles to, and makes it follow the operator behind a mask.
+
+### Fixed
+
+- **A jump-list or back-to-top click that landed on a button's own child did nothing.** The handler read
+  the clicked node's classes rather than resolving the button the click was inside, so clicking the count
+  beside a section name was a dead click — silently, since a jump that does not jump reads as a page still
+  loading.
+
 ## [0.4.0] — 2026-08-11
 
 ### Fixed
@@ -1844,6 +1906,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.5.0]: https://github.com/dszp/ns-portal-kit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dszp/ns-portal-kit/compare/v0.3.0...v0.4.0
 [0.2.17]: https://github.com/dszp/ns-portal-kit/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/dszp/ns-portal-kit/compare/v0.2.15...v0.2.16

@@ -21,7 +21,7 @@ import {
 } from './statusModel.js';
 
 import {
-  FEATURE_REGISTRY, resolveFeaturePolicies, featuresConfigError, parseFeatures, parseSuperadmins,
+  FEATURE_REGISTRY, resolveFeaturePolicies, featuresConfigError, parseFeatures, parseFeaturesDetailed, parseSuperadmins,
   gateLevels, fleetReadAllowed, resolveGate, KNOWN_SCOPES, LEVEL_SCOPES, FeaturesConfigError, carriersFor,
   type FeatureDef, type Gate, type FeaturesEnv,
 } from './features.js';
@@ -111,16 +111,24 @@ export function gateInWords(gate: Gate, superadmins: string[]): string {
     return 'An unrecognized gate configuration (see the config error above).';
   }
 
+  // ⚠️ SUBTRACT the denied accounts here rather than announcing them and excepting them later. Listing a
+  // superadmin as admitted and then, in the same sentence, saying they are denied is technically true and
+  // reads as a contradiction — which is exactly how it was first noticed, on a card whose access line
+  // said "no" while the sentence above it named the reader as admitted. If a deny empties the list, the
+  // union clause is not printed at all: there is no superadmin left for it to describe.
+  const liveSupers = superadmins.filter((s) => !shape.denyUsers.some((d) => d.trim().toLowerCase() === s.trim().toLowerCase()));
   const namedSupers = (): string =>
-    `the named superadmin${superadmins.length > 1 ? 's' : ''} (${superadmins.join(', ')})`;
+    `the named superadmin${liveSupers.length > 1 ? 's' : ''} (${liveSupers.join(', ')})`;
 
   const parts: string[] = [];
   for (const level of shape.levels) {
     if (level === 'superadmin') {
       parts.push(
-        superadmins.length
+        liveSupers.length
           ? namedSupers()
-          : 'superadmins — but PORTAL_SUPERADMINS is empty, so this grants nobody',
+          : superadmins.length
+            ? 'superadmins — but every named account is denied here, so this grants nobody'
+            : 'superadmins — but PORTAL_SUPERADMINS is empty, so this grants nobody',
       );
       continue;
     }
@@ -132,8 +140,19 @@ export function gateInWords(gate: Gate, superadmins: string[]): string {
 
   // The union resolveGate applies to every non-CC gate. `superadmin` as a named level already printed the
   // same list above, so don't say it twice.
-  if (!shape.ccOnly && superadmins.length && !shape.levels.includes('superadmin')) {
+  if (!shape.ccOnly && liveSupers.length && !shape.levels.includes('superadmin')) {
     parts.push(`plus ${namedSupers()}, at any scope`);
+  }
+
+  // The deny, last, because it beats everything already said — including the superadmin union printed
+  // immediately above. Stated as an exception to the sentence rather than folded into it, since that is
+  // what it is: `resolveGate` puts the denial on every rule the gate emits.
+  //
+  // ⚠️ This reads the gate parseFeatures RETURNED, not the JSON an operator typed. A deny-only override
+  // is expanded there against the feature's default, so the base named here is the base enforced. Feed
+  // this the raw config instead and a deny-only gate prints an exception with nothing to except it from.
+  if (shape.denyUsers.length) {
+    return `${parts.join(', ')} — except ${shape.denyUsers.join(', ')}, who ${shape.denyUsers.length > 1 ? 'are' : 'is'} denied at any scope.`;
   }
 
   return `${parts.join(', ')}.`;
@@ -159,8 +178,21 @@ export function grantedByFor(
   superadmins: string[],
   overrides: Record<string, Gate>,
 ): StatusDoc['viewer']['grantedBy'] {
-  if (superadmins.includes(principal.id)) return 'superadmin';
   const gate = effectiveGate('kit.status', overrides);
+  // The DENY is read before anything else, including the superadmin shortcut, because it beats both —
+  // `resolveGate` puts it on every rule, the union rule included. Latent today (a denied caller is
+  // refused by `can('kit.status')` in worker.ts long before this renders), but this function's contract
+  // is "why can the viewer see this", and answering "superadmin" or "named-user" for an account the
+  // engine refuses would be a lie waiting for a second caller.
+  let denied: string[] = [];
+  try {
+    denied = gateLevels(gate).denyUsers;
+  } catch (e) {
+    if (!(e instanceof FeaturesConfigError)) throw e;
+    return 'unknown';
+  }
+  if (denied.some((u) => u.trim().toLowerCase() === principal.id)) return 'unknown';
+  if (superadmins.includes(principal.id)) return 'superadmin';
   try {
     if (gateLevels(gate).users.some((u) => u.trim().toLowerCase() === principal.id)) return 'named-user';
   } catch (e) {
@@ -922,7 +954,11 @@ function unnamedAccountId(domain: string, superadmins: string[], overrides: Reco
     const gate = effectiveGate(f.key, overrides);
     if (gate === 'off') continue;
     try {
-      for (const u of gateLevels(gate).users) taken.add(u.trim().toLowerCase());
+      const shape = gateLevels(gate);
+      // BOTH directions. A denied account is named by a configured gate just as surely as an allowed one
+      // — it simply happens to be named as excluded — so an id drawn from the denied set would make the
+      // matrix's "a generic account at this scope" column report that scope as refused when it is not.
+      for (const u of [...shape.users, ...shape.denyUsers]) taken.add(u.trim().toLowerCase());
     } catch (e) {
       if (!(e instanceof FeaturesConfigError)) throw e; // a malformed gate names nobody we can read
     }
@@ -1105,6 +1141,11 @@ export const GATE_EXAMPLES: { title: string; what: string; json: string }[] = [
     json: JSON.stringify({ 'ringotel.prepop': { users: ['ops@example.com'] } }, null, 2),
   },
   {
+    title: 'Everyone who has it, except one person',
+    what: 'A deny with no allow side means this feature\'s own default, minus these accounts — so it keeps working as staff are added, because it names the exception rather than everyone who keeps the capability. It is the only value that beats a PORTAL_SUPERADMINS account, and it follows the person through a masquerade.',
+    json: JSON.stringify({ 'portal.domainDelete': { users: { deny: ['junior@example.com'] } } }, null, 2),
+  },
+  {
     title: 'Off',
     what: 'The kill switch, and the only value with no superadmin exception: nobody at all, including you.',
     json: JSON.stringify({ 'ringotel.refresh': 'off' }, null, 2),
@@ -1126,6 +1167,7 @@ function buildPermissions(
   policies: FeaturePolicies,
   superadmins: string[],
   overrides: Record<string, Gate>,
+  written: Record<string, Gate>,
   viewerDomain: string,
 ): PermissionsView {
   // A real domain when we have one: raw-rule gates can key on `domains`, and evaluating against a
@@ -1205,7 +1247,13 @@ function buildPermissions(
   const explicit: Record<string, Gate> = {};
   for (const f of FEATURE_REGISTRY) explicit[f.key] = effectiveGate(f.key, overrides);
 
-  const jsonOverrides = gateJson(overrides);
+  // ⚠️ AS WRITTEN, not as expanded — see `parseFeaturesDetailed`. This blob exists to be copied back into
+  // PORTAL_FEATURES, and an expanded deny-only gate pins today's registry default as a literal, which is
+  // exactly the silent rot the deny form was added to remove. The PROSE beside it stays expanded, because
+  // prose must describe what is enforced; only the pasteable thing must be what was typed.
+  const jsonOverrides = gateJson(written);
+  // `explicit` is different on purpose: its whole job is to write every key out literally, so pinning the
+  // defaults is what the reader asked for rather than something happening to them.
   const jsonExplicit = gateJson(explicit);
   const jsonError = validateEmitted(jsonOverrides) ?? validateEmitted(jsonExplicit);
   const examplesError = GATE_EXAMPLES.map((e) => validateEmitted(e.json)).find((x) => x !== null) ?? null;
@@ -1242,8 +1290,15 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
     if (!(e instanceof FeaturesConfigError)) throw e;
   }
   let overrides: Record<string, Gate> = {};
+  // The same walk yields the config AS WRITTEN, which the Permissions tab's copyable JSON needs (see
+  // `parseFeaturesDetailed`). It is read HERE rather than re-parsed downstream because this is the guarded
+  // call: a malformed PORTAL_FEATURES must leave the console standing so it can NAME the error, and a
+  // second parse deeper in the page would throw past that guard.
+  let written: Record<string, Gate> = {};
   try {
-    overrides = parseFeatures(env);
+    const detailed = parseFeaturesDetailed(env);
+    overrides = detailed.effective;
+    written = detailed.written;
   } catch (e) {
     if (!(e instanceof FeaturesConfigError)) throw e;
   }
@@ -1430,7 +1485,7 @@ function buildMenus(env: StatusEnv, menuErr: string | null, signIn: boolean): Me
 
   // ── permissions: built FROM the feature cards, not beside them, so the matrix and the cards cannot
   // describe different gates. ──────────────────────────────────────────────────────────────────────
-  const permissions = buildPermissions(env, prunedFeatures, policies, superadmins, overrides, viewer.domain);
+  const permissions = buildPermissions(env, prunedFeatures, policies, superadmins, overrides, written, viewer.domain);
 
   return {
     deployment,

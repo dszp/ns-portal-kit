@@ -833,7 +833,16 @@ export const SETTINGS: SettingDef[] = [
 
   { name: 'PORTAL_FEATURES', group: 'injection', kind: 'config',
     importance: 'important', example: '{"callflow.view": "office_manager", "ringotel.orgList": "off"}',
-    what: 'JSON `{ "<feature.key>": <gate> }` overriding the built-in default gate for one or more features (who can use call-flow view, Ringotel activation, etc).',
+    what: 'JSON `{ "<feature.key>": <gate> }` overriding the built-in default gate for one or more features. '
+      + 'The keys come from five families: `portal.*` is the portal itself — bundle entry, the self-service tier, '
+      + 'the status banner, the footer version line, and the three that hide the portal\'s own domain controls '
+      + '(`portal.domainCreate`, `portal.domainEdit`, `portal.domainDelete`). `callflow.view` is the call-flow diagram. '
+      + '`ringotel.*` is the app integration — status surfaces, activation, password reset, directory pre-population. '
+      + '`me.*` is a user\'s own account — their app status, devices, sign-in details, their own password reset. '
+      + '`kit.*` is this console and its capture button. '
+      + '⚠️ The three `portal.domain*` keys are unlike the rest: no route of this kit sits behind them, so denying one '
+      + 'removes the control, not the ability. The Permissions tab lists every key with its default and who it admits — '
+      + 'this row is the orientation, that tab is the reference.',
     whenUnset: 'Every feature uses its built-in default gate.',
     affects: ['injection'] },
 

@@ -1231,6 +1231,96 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
       '[banner] and describes the allow-list rebuild the code actually performs');
   }
 
+  // ── the portal's own domain-record controls (portal.domainCreate/Edit/Delete) ────────────────────────
+  // The only flags in this bundle that REMOVE something, and the only ones with no route of ours behind
+  // them — so the tests that matter here are about not removing the wrong thing.
+  {
+    const all = buildKitBundle(featurePolicyKeys(), {} as any);
+    ok(/domainCreate:true/.test(all) && /domainEdit:true/.test(all) && /domainDelete:true/.test(all),
+      '[domain] all three flags ride the admin bundle when allowed');
+
+    const noEdit = buildKitBundle(featurePolicyKeys().filter((k) => k !== 'portal.domainEdit'), {} as any);
+    ok(/domainEdit:false/.test(noEdit) && /domainCreate:true/.test(noEdit) && /domainDelete:true/.test(noEdit),
+      '[domain] the three are independent — denying edit leaves create and delete alone');
+
+    // Exercise the SHIPPED href decoder rather than a copy of it: pull the emitted line out of the
+    // bundle and run that. A test-local mirror of this regex would keep passing after the real one
+    // drifted, which is the failure mode this suite has been bitten by before.
+    const line = all.split('\n').find((l) => l.startsWith('function domVerb(href)'));
+    ok(!!line, '[domain] the href decoder is emitted as one recognisable line');
+    const domVerb = runInNewContext(`${line}; domVerb`, {}) as (h: string) => [string, string] | null;
+    ok(JSON.stringify(domVerb('/portal/domains/edit/demo.12345.service')) === '["domainEdit","demo.12345.service"]',
+      '[domain] an edit href decodes to the edit flag and the TARGET domain');
+    ok(JSON.stringify(domVerb('/portal/domains/delete/demo.12345.service')) === '["domainDelete","demo.12345.service"]',
+      '[domain] a delete href decodes to the delete flag');
+    // The gear in the same cell opens a navigation menu and grants nothing. Hiding it would break
+    // getting INTO a domain while doing nothing about editing one.
+    ok(domVerb('/portal/domains/manage/demo.12345.service/Some+Label') === null,
+      '[domain] the Manage link is not a verb — it must never be mistaken for one');
+    ok(domVerb('/portal/users/edit/100@demo.12345.service') === null,
+      '[domain] and an edit link for something that is not a domain is ignored');
+
+    // Selector shape: scoped to the action cell AND the href, because bare .edit/.delete are generic
+    // enough to exist elsewhere in a portal we do not control.
+    ok(all.includes('td.action-buttons a.edit[href*="/portal/domains/edit/"]')
+      && all.includes('td.action-buttons a.delete[href*="/portal/domains/delete/"]'),
+      '[domain] row controls are matched on the action cell and the href, not on class alone');
+    ok(!/\.manage/.test(all.split('function domList()')[1].split('function domBar()')[0]),
+      '[domain] and nothing in the list pass targets the Manage control');
+    ok(all.includes('ButtonAddDomainWriteDomain'), '[domain] Add Domain is matched by its literal id');
+
+    // ⚠️ The controls are TWO SHAPES, and the second one has no href. The row controls are anchors; the
+    // context bar's Edit Domain is a button carrying data-modal-path, opened by a different handler. A
+    // guard written for hrefs alone matches the rows and silently skips the bar — which is what this
+    // asserted set of selectors exists to prevent recurring.
+    ok(all.includes('[data-modal-path*="/portal/domains/edit/"]'),
+      '[domain] the context bar\'s button is matched on data-modal-path, since it carries no href');
+    ok(/function domHref\(el\)\{return \(el&&\(el\.getAttribute\('href'\)\|\|el\.getAttribute\('data-modal-path'\)\)\)\|\|''\}/.test(all),
+      '[domain] and one reader covers both shapes, so the removal and the click guard cannot diverge');
+    const sel = (all.match(/var DOM_SEL='([^']+)'/) ?? [])[1] ?? '';
+    ok(/data-modal-path\*="\/portal\/domains\/edit\//.test(sel) && /data-modal-path\*="\/portal\/domains\/delete\//.test(sel)
+      && /a\[href\*="\/portal\/domains\/edit\//.test(sel) && /a\[href\*="\/portal\/domains\/delete\//.test(sel),
+      '[domain] the shared selector list covers both shapes for both verbs');
+    ok(/t\.closest\(DOM_SEL\)/.test(all), '[domain] and the click guard uses that shared list rather than its own');
+
+    // Patching NSDomainSettings.clickedSettingsButton would put us inside portal behaviour we do not
+    // understand, on every click that uses it, for a guardrail that cannot enforce anything anyway.
+    ok(!/NSDomainSettings\s*[.=]/.test(all.replace(/\/\/[^\n]*/g, '')),
+      '[domain] no portal function is monkey-patched — the guard declines the click instead');
+
+    // The click guard is the line that does not depend on a selector. Capture phase, so it runs before
+    // the portal's inline onclick and before the delegated modal handler.
+    const clicks = all.split('function domClicks()')[1]?.split('var F=[')[0] ?? '';
+    ok(/addEventListener\('click',guard,true\)/.test(clicks), '[domain] the click guard listens in the CAPTURE phase');
+    // A middle click or "open in new tab" never fires `click`, and the anchor's href is the real form.
+    ok(/addEventListener\('auxclick',guard,true\)/.test(clicks), '[domain] and on auxclick, where a middle click can still be refused');
+    ok(/e\.preventDefault\(\);e\.stopPropagation\(\);e\.stopImmediatePropagation\(\)/.test(clicks),
+      '[domain] a denied click is stopped before it reaches the control, same-node listeners included');
+    // ⚠️ Assert the CONDITION, not just the refusal: `if(!flag||mayDomain(flag,d))return` inverted would
+    // refuse every allowed click and permit every denied one, while every string assertion above still
+    // passed. The guard's early-return is the whole decision.
+    ok(/if\(!flag\|\|mayDomain\(flag,d\)\)return;/.test(clicks),
+      '[domain] and it returns EARLY for an allowed verb — the refusal is the exception, not the default');
+
+    // The shared observer stops after 8s; the list sorts and paginates long after that, and a filter or a
+    // soft navigation can replace the TABLE, orphaning anything keyed to a tbody found at install time.
+    const watch = all.split('function domWatch()')[1]?.split('var F=[')[0] ?? '';
+    ok(/observe\(document\.documentElement,\{childList:true,subtree:true\}\)/.test(watch),
+      '[domain] the persistent observer watches the document, which cannot be replaced under it');
+    ok(/if\(!domAny\(\)\|\|domWatch\._on\)return/.test(watch),
+      '[domain] and installs only for a reader who is actually denied something');
+    ok(/requestAnimationFrame/.test(watch), '[domain] rAF-throttled, like run()\'s own observer');
+
+    // ⚠️ Nothing above proves the feature is REACHED. Delete the three dispatcher entries and every
+    // string assertion here still passes, because the functions are still emitted — they just never run.
+    const fArray = all.split('var F=[')[1]?.split('];')[0] ?? '';
+    for (const fn of ['domList', 'domBar', 'domClicks', 'domWatch']) {
+      ok(new RegExp(`m:${fn}\\b`).test(fArray), `[domain] ${fn} is wired into the page dispatcher`);
+    }
+    ok(/\{p:\/\^\\\/portal\\\/domains\\\/\?\(\$\|index\)\/,m:domList\}/.test(fArray),
+      '[domain] domList is scoped to the domains list, not every portal page');
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

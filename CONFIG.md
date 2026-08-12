@@ -1101,6 +1101,9 @@ call-center is exact and orthogonal.
 | `ringotel.resetPassword` | Reset a user's app password from the profile page (**write**) | `office_manager` |
 | `ringotel.profileAppAccess` | The user-visible app sign-in message, on the profile page | `office_manager` |
 | `ringotel.prepop` | Preview/create inactive directory entries for a domain (**write**) | `reseller` |
+| `portal.domainCreate` | The portal's own **Add Domain** control (see below) | `reseller` |
+| `portal.domainEdit` | The portal's own **Edit** controls for a domain's configuration record (see below) | `reseller` |
+| `portal.domainDelete` | The portal's own **delete** control for a domain (see below) | `reseller` |
 | `portal.self` | Receive the **self-service** bundle | `all` |
 | `me.appStatus` | App-status indicator on the user's **own** home page | `all` |
 | `me.devices` | The user's **own** device list/status | `off` |
@@ -1133,14 +1136,42 @@ footer version line, which is the one surprise in that switch.
 {
   "ringotel.orgStatus":  "reseller",                                           // 1. single level
   "ringotel.userStatus": ["office_manager", "call_center_agent"],              // 2. union of levels
-  "callflow.view":       { "levels": ["reseller"], "users": ["x@y.example"] }, // 3. levels + forced users
+  "callflow.view":       { "levels": ["reseller"], "users": ["x@y.example"] }, // 3. levels + users
   "ringotel.orgList":    "off"                                                 // 4. kill-switch
 }
 ```
 
-Disambiguation is by type: `"x"` → a level · `["x","y"]` → a union of levels · `{...}` → levels plus forced
+Disambiguation is by type: `"x"` → a level · `["x","y"]` → a union of levels · `{...}` → levels plus named
 users. An unknown key or level is a **loud config error** — a 500 on every route after `/health`. It never
 silently allows.
+
+<a id="gate-users-deny"></a>
+
+#### Naming the exception instead of its complement
+
+Inside shape 3, `users` may be a plain list (which means **allow**, and is unchanged) or an object naming a
+direction:
+
+| Written | Means |
+|---|---|
+| `"users": ["a@y.example"]` | allow these, in addition to any `levels` |
+| `"users": {"allow": ["a@y.example"]}` | identical to the line above |
+| `"users": {"deny": ["b@y.example"]}` | **this feature's default, minus these accounts** |
+| `"users": {"allow": […], "deny": […]}` | both; **deny wins** where they overlap |
+
+The deny form exists because the allow form cannot say "everyone who has this today, except two people"
+without listing everyone who *keeps* it — a list that is wrong the moment an account is created, and wrong
+silently. So this:
+
+```jsonc
+{ "portal.domainEdit": { "users": { "deny": ["junior@y.example"] } } }
+```
+
+reads as *"reseller — this key's default — except that account"*, and stays correct as staff are added,
+because the scope side is evaluated from each caller's own token rather than from a list you maintain.
+
+`allow` rather than `allowOnly`: the list still unions with `levels`, so "only" would be untrue whenever
+`levels` is present. Write no `levels` and the allow list is the whole gate, exactly as before.
 
 <a id="gate-resolution-rules"></a>
 
@@ -1150,10 +1181,60 @@ silently allows.
   off feature, flip it to `superadmin` or add your account to its `users`.
 - For any other gate, a principal is granted if **any** of these match: the resolved level role-sets, the
   gate's forced `users`, **or** a `PORTAL_SUPERADMINS` account (unless the gate is call-center-only).
-- **Forced users win over roles:** an account in `users` is granted even with no qualifying role.
+- **Named users win over roles:** an account in `users` (or `users.allow`) is granted even with no
+  qualifying role.
 - **`{ "users": ["x@y.example"] }`** with no `levels` means "off for roles, on for these accounts" (plus
   superadmins) — distinct from `off`.
+- **A `users.deny` beats everything else in that gate**, including a `PORTAL_SUPERADMINS` account and an
+  `allow` naming the same person. It is the one place a superadmin is refused other than `off`; that is
+  deliberate, because a deny that names an account and then quietly does not apply to it is the worse of
+  the two surprises.
+- **A deny follows the person through a masquerade.** Every other condition is evaluated against the
+  *effective* principal — so a grant follows the role currently being performed, and masquerading is full
+  impersonation, as it is everywhere in this platform. A deny is the exception: it names a person, and it
+  refuses whether that account is acting as itself or behind a mask. A denial that ended the moment its
+  subject masqueraded into someone else would not be one.
+- **A gate that only denies is read against the feature's own default.** `{"users":{"deny":[…]}}` with no
+  `levels` and no `allow` means *that default, minus these accounts* — see
+  [the table above](#gate-users-deny). Writing `"allow": []` explicitly is not the same thing: an empty
+  allow list names nobody, so it is refused as a config error rather than guessed at.
+- **A `deny` entry must look like `user@domain`**, and is a loud config error otherwise. A typo in an
+  allow list merely admits nobody extra; a typo in a deny list restricts nobody, silently — the failure
+  runs the wrong way, so this one list is checked.
 - Secondary scripts use the **same** level vocabulary in their `auth` field, plus `public`.
+
+<a id="domain-record-keys"></a>
+
+### The domain-record keys — a guardrail, not a permission
+
+`portal.domainCreate`, `portal.domainEdit` and `portal.domainDelete` are unlike every other key here, and
+the difference matters before you rely on them.
+
+Every other feature gates something **this kit adds**, and the same key gates the route behind it — so
+denying one both hides the control and refuses the work. These three hide controls belonging to **your
+NetSapiens portal**: the `Add Domain` button on the domains list, the edit and delete controls on each row,
+and the `Edit Domain` button shown while viewing a domain. Those forms post straight from the browser to
+your NetSapiens core. This kit is not in that path and cannot be.
+
+**So denying one removes the way in, not the ability.** Someone who knows the URL is unaffected, and a
+portal update that renames a control means the control simply stays — it fails toward *visible*, never
+toward a false sense that something was blocked. Use it to keep the wrong click out of reach of someone who
+should not be making it. For anything that must actually be prevented, the platform's own scopes are the
+only thing that can prevent it.
+
+Three keys rather than one so that *"may adjust a customer's limits, may never delete the customer"* is
+expressible. The default is `reseller` on all three, which changes nothing anywhere: no lower scope is
+offered these controls by the portal, so the keys are inert until you configure one. The usual
+configuration is a deny:
+
+```jsonc
+{ "portal.domainEdit":   { "users": { "deny": ["junior@y.example"] } },
+  "portal.domainDelete": { "users": { "deny": ["junior@y.example"] } } }
+```
+
+Editing a domain's **record** is not the same as administering what is inside it. Users, call queues, auto
+attendants, time frames and inventory are untouched by these keys — someone denied domain editing can still
+work inside any domain they can open, which is usually the point.
 
 <a id="kit-status-gate"></a>
 

@@ -1,5 +1,6 @@
 /** Offline test for the feature-gating level vocabulary + gate resolution. pnpm test:features */
 import { isAllowed, toPrincipal, can, type Principal } from '@dszp/netsapiens-lib';
+import { SETTINGS } from './statusModel.js';
 import { resolveGate, FeaturesConfigError, resolveFeaturePolicies, featuresConfigError, FEATURE_REGISTRY, LEVEL_SCOPES, KNOWN_SCOPES, gateLevels, parseFeatures, kitStatusLockedReason, fleetReadAllowed } from './features.js';
 
 const P = (scope: string, id = 'u@d.example', maskChain?: string): Principal =>
@@ -335,6 +336,147 @@ ok(can(P('Reseller'), 'me.appAccess', selfPolicies), 'me.appAccess default admit
   ok(threw, '[fleetRead] a malformed PORTAL_SUPERADMINS throws rather than quietly refusing or admitting');
 }
 
+
+// ── users.deny: naming the exception instead of its complement ────────────────────────────────────
+// The whole point of the form: "everyone who has this, except X" must stay correct when an account is
+// added. So the positive side is asserted alongside every denial — a deny that also broke everyone else
+// would pass a test that only checked X.
+{
+  const BOB = 'bob@x.example', OTHER = 'carol@x.example';
+  const denyBob = { levels: ['reseller'], users: { deny: [BOB] } };
+
+  ok(grants(denyBob, P('Reseller', OTHER)), '[deny] an unnamed reseller still passes — the complement is not enumerated');
+  ok(!grants(denyBob, P('Reseller', BOB)), '[deny] the named account is refused at a scope that otherwise passes');
+  ok(grants(denyBob, P('Super User', OTHER)), '[deny] the level still nests upward for everyone else');
+  ok(!grants(denyBob, P('Super User', BOB)), '[deny] and the denial follows the account up the ladder');
+  ok(!grants(denyBob, P('Reseller', 'BOB@X.EXAMPLE')), '[deny] the account match is case-insensitive');
+
+  // The superadmin union is additive everywhere else. Here it is not — decided deliberately, because
+  // `off` already denies superadmins and a deny that silently skips one is the worse surprise.
+  ok(!grants(denyBob, P('Reseller', BOB), [BOB]), '[deny] beats the superadmin union — a denied superadmin is denied');
+  ok(grants(denyBob, P('Basic User', 'boss@x.example'), ['boss@x.example']), '[deny] an UNdenied superadmin still passes at any scope');
+
+  // Both directions at once. Overlap resolves to denied, which is the only reading that needs no
+  // tie-break rule anyone has to remember.
+  const both = { users: { allow: [OTHER, BOB], deny: [BOB] } };
+  ok(grants(both, P('Basic User', OTHER)), '[deny] allow admits an account no level would');
+  ok(!grants(both, P('Basic User', BOB)), '[deny] and deny wins over an allow naming the same account');
+
+  // The flat form is untouched.
+  ok(grants({ users: [OTHER] }, P('Basic User', OTHER)), '[deny] the original flat users list still means allow');
+}
+
+// ── A deny-only gate means "this feature's default, minus these" ───────────────────────────────────
+// Without the expansion it would resolve to zero allow rules and lock everyone out — the opposite of
+// what was written, on the config an operator is most likely to write.
+{
+  const BOB = 'bob@x.example';
+  const cfg = (o: unknown) => ({ PORTAL_FEATURES: JSON.stringify(o) });
+  const gateFor = (key: string, o: unknown) => parseFeatures(cfg(o))[key];
+
+  const expanded = gateFor('portal.domainEdit', { 'portal.domainEdit': { users: { deny: [BOB] } } });
+  ok(grants(expanded, P('Reseller', 'carol@x.example')), '[deny-only] expands to the feature default (reseller), so everyone else keeps it');
+  ok(!grants(expanded, P('Reseller', BOB)), '[deny-only] and the named account loses it');
+  ok(!grants(expanded, P('Office Manager', 'om@x.example')), '[deny-only] the default is not widened while expanding it');
+
+  // A default of `off` has nothing to subtract from, and must not be expanded into one that admits.
+  const offGate = gateFor('me.devices', { 'me.devices': { users: { deny: [BOB] } } });
+  ok(!grants(offGate, P('Super User', 'carol@x.example'), ['carol@x.example']), '[deny-only] a feature defaulting to off stays off, superadmin included');
+
+  // A floored key: the expansion draws its levels from the default, so it is inside the floor by
+  // construction — and a deny can only narrow, so this direction can never breach one.
+  const floored = gateFor('kit.status', { 'kit.status': { users: { deny: [BOB] } } });
+  ok(grants(floored, P('Basic User', 'boss@x.example'), ['boss@x.example']), '[deny-only] a floored key expands to its own default without tripping allowedLevels');
+  ok(!grants(floored, P('Basic User', BOB), [BOB]), '[deny-only] and the deny still applies there');
+
+  // An allow side present means no expansion — the operator said what the base is.
+  const explicit = gateFor('portal.domainEdit', { 'portal.domainEdit': { users: { allow: ['a@x.example'], deny: [BOB] } } });
+  ok(!grants(explicit, P('Reseller', 'carol@x.example')), '[deny-only] writing an allow side suppresses the expansion — only that side is admitted');
+}
+
+// ── Refusals: a deny that silently restricts nobody is the failure mode this form must not have ────
+{
+  const bad = (o: unknown, why: string) => {
+    let threw = false;
+    try { parseFeatures({ PORTAL_FEATURES: JSON.stringify(o) }); } catch (e) { threw = e instanceof FeaturesConfigError; }
+    ok(threw, why);
+  };
+  bad({ 'portal.domainEdit': { users: { denies: ['bob@x.example'] } } }, '[deny] a misspelt direction is refused, not read as an empty deny');
+  bad({ 'portal.domainEdit': { users: { deny: 'bob@x.example' } } }, '[deny] a bare string where a list belongs is refused');
+  bad({ 'portal.domainEdit': { users: { deny: ['not-an-account'] } } }, '[deny] an entry that cannot BE an account is refused — it could never deny anyone');
+  bad({ 'portal.domainEdit': { users: { deny: [42] } } }, '[deny] a non-string entry is refused before it can reach the policy engine');
+  bad({ 'portal.domainEdit': { users: { allow: [], deny: ['bob@x.example'] } } }, '[deny] an EXPLICIT empty allow is "nobody", never the deny-only default expansion');
+  bad({ 'portal.domainEdit': { users: {} } }, '[deny] an object naming neither direction is refused');
+
+  // ⚠️ THE TYPO THAT WOULD HAVE WIDENED A GATE. An ignored unknown key leaves a gate naming no allow
+  // side, which the deny-only expansion reads as "this feature's default, minus these" — and that
+  // default can be WIDER than the levels the operator typed. `ringotel.activate` defaults to
+  // office_manager, so the misspelling below would have silently granted office managers.
+  bad({ 'ringotel.activate': { level: ['reseller'], users: { deny: ['bob@x.example'] } } },
+    '[deny-only] a misspelt "levels" is refused — an ignored allow side would let a typo WIDEN a gate');
+  bad({ 'portal.domainEdit': { levels: ['reseller'], users: { deny: ['bob@x.example'] }, extra: 1 } },
+    '[deny-only] any unknown key in a gate object is refused, not ignored');
+  bad({ 'portal.domainEdit': { levels: [], users: { deny: ['bob@x.example'] } } },
+    '[deny-only] an EXPLICIT empty levels list names nobody — the same answer an empty allow gets');
+
+  // Raw rules are the other spelling of the same mechanism, and were the unchecked half.
+  bad({ 'callflow.view': [{ scopes: ['Reseller'], notUsers: ['105'] }] },
+    '[raw] a notUsers entry that cannot BE an account is refused — it could never deny anyone');
+  bad({ 'callflow.view': [{ notUsers: ['bob@x.example'] }] },
+    '[raw] a rule naming only notUsers is refused — it can never match, so it is dead config');
+}
+
+// ── Raw rules: the denial the operator cannot see ──────────────────────────────────────────────────
+// resolveGate appends a superadmin union rule behind the operator's back. A denial on every rule they
+// WROTE has to reach that one too, or the same intent expressed two ways gives opposite answers.
+{
+  const BOSS = 'boss@x.example', BOB = 'bob@x.example';
+  const everyRule = [{ scopes: ['Reseller'], notUsers: [BOSS] }, { scopes: ['Office Manager'], notUsers: [BOSS] }];
+  ok(!grants(everyRule, P('Reseller', BOSS), [BOSS]),
+    '[raw] denied in EVERY rule the operator wrote ⇒ denied on the superadmin union too');
+  ok(grants(everyRule, P('Reseller', 'carol@x.example'), [BOSS]),
+    '[raw] and everyone else at those scopes is untouched');
+  // Denied in only SOME rules is a path deliberately left open; closing it would overrule the operator.
+  const someRules = [{ scopes: ['Reseller'], notUsers: [BOB] }, { scopes: ['Office Manager'] }];
+  ok(grants(someRules, P('Office Manager', BOB)),
+    '[raw] a denial on only one rule stays on that rule — the sibling still admits');
+  ok(!grants(someRules, P('Reseller', BOB)), '[raw] while the rule carrying it still refuses');
+}
+
+// ── The three domain-record keys ───────────────────────────────────────────────────────────────────
+// They hide controls belonging to the portal, with no route of ours behind them. The registry is the
+// only place that can say so, so the presence of the detail text is asserted, not just the gate.
+{
+  for (const key of ['portal.domainCreate', 'portal.domainEdit', 'portal.domainDelete']) {
+    const def = FEATURE_REGISTRY.find((f) => f.key === key);
+    ok(!!def, `[domain] ${key} is registered`);
+    ok(def?.default === 'reseller', `[domain] ${key} defaults to reseller — a no-op, since no lower scope is offered the control`);
+    // The guarantee every OTHER key carries (a server route refusing the same caller) does not exist
+    // here. If this text is ever dropped, the next reader inherits a promise nothing keeps.
+    ok(!!def?.detail?.some((p) => /not\s+(remove\s+)?the capability|not as a permission/i.test(p)),
+      `[domain] ${key} states plainly that denying it removes the control, not the capability`);
+  }
+  const policies = resolveFeaturePolicies({ PORTAL_FEATURES: JSON.stringify({ 'portal.domainDelete': { users: { deny: ['bob@x.example'] } } }) });
+  ok(can(P('Reseller', 'carol@x.example'), 'portal.domainDelete', policies), '[domain] end to end: an unnamed reseller keeps deletion');
+  ok(!can(P('Reseller', 'bob@x.example'), 'portal.domainDelete', policies), '[domain] end to end: the named account loses it');
+  ok(can(P('Reseller', 'bob@x.example'), 'portal.domainEdit', policies), '[domain] and the three keys are independent — denying delete leaves editing alone');
+}
+
+// ── The Config tab's PORTAL_FEATURES row must name every key FAMILY that exists ────────────────────
+// It is hand-written orientation prose, so it can go stale the moment a key is added under a namespace
+// nobody thought to mention — and a family missing from it is a family an operator never learns they can
+// configure. The Permissions tab remains the reference; this only pins that the orientation is complete.
+{
+  const row = SETTINGS.find((s) => s.name === 'PORTAL_FEATURES');
+  ok(!!row, '[config] PORTAL_FEATURES has a settings row');
+  const prose = row?.what ?? '';
+  const families = [...new Set(FEATURE_REGISTRY.map((f) => (f.key.includes('.') ? `${f.key.split('.')[0]}.` : f.key)))];
+  const missing = families.filter((fam) => !prose.includes(fam.endsWith('.') ? `${fam}` : fam));
+  ok(missing.length === 0, `[config] the PORTAL_FEATURES row names every key family${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`);
+  for (const k of ['portal.domainCreate', 'portal.domainEdit', 'portal.domainDelete']) {
+    ok(prose.includes(k), `[config] and names ${k} explicitly, since it behaves unlike the rest`);
+  }
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
