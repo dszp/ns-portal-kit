@@ -87,6 +87,24 @@ export const BINDING_WHY_NOT =
 
 export const settingNames = (): string[] => SETTINGS.map((s) => s.name);
 
+/**
+ * The settings reference every Config row links out to. `CONFIG.md` carries an explicit
+ * `<a id="<SETTING>">` above each entry and one `<a id="group-<group>">` per section, so a link survives a
+ * heading being reworded — which the auto-generated heading slug does not.
+ *
+ * Pinned to `main` rather than to the running version. The reader clicking one of these is asking what a
+ * setting means, and `main` always resolves; a `v{version}` link would be exactly right on a released
+ * deployment and a 404 on a dev one running an unreleased build. If an anchor ever stops matching, the
+ * reader lands at the top of the settings reference — the same degraded-but-useful landing
+ * `releaseNotesUrl` chooses for the same reason.
+ *
+ * `src/statusModel.selftest.ts` asserts every name below has an anchor in `CONFIG.public.md`, so a new
+ * setting cannot ship a link that goes nowhere.
+ */
+export const DOCS_BASE = 'https://github.com/dszp/ns-portal-kit/blob/main/CONFIG.md';
+export const settingDocsUrl = (name: string): string => `${DOCS_BASE}#${name}`;
+export const groupDocsUrl = (group: SettingGroup): string => `${DOCS_BASE}#group-${group}`;
+
 export type FeatureState = 'on' | 'off' | 'inert' | 'misconfigured' | 'not-integrated';
 export interface MissingRequirement { setting: string; why: string; how: string }
 
@@ -126,6 +144,9 @@ export interface SettingView {
   example: string | null;
   gate: SettingGate | null;
   applicability: Applicability;
+  /** Where the full entry for this setting lives — see {@link settingDocsUrl}. A row here is a summary;
+   *  the reference has the syntax, the worked examples and the failure modes that do not fit on a card. */
+  docsUrl: string;
   /**
    * The CURRENT value in both forms — readable, and ready to paste into `wrangler.jsonc`.
    *
@@ -287,11 +308,28 @@ export interface PermissionsView {
    *  mean the console had handed out a config that bricks the Worker at boot. */
   jsonError: string | null;
 }
+/**
+ * A read-only table a probe may attach to its own result, when the verdict it reached is a summary of
+ * something the reader would otherwise have to go and list by hand. Rendered collapsed, below the row.
+ *
+ * Deliberately generic — caption, columns, rows of plain strings. The Checks tab renders a table without
+ * knowing what is in it, which keeps a probe's own data shape out of the page's contract. `note` is where
+ * a probe states what the table does NOT show, so a bounded list can never read as a complete one.
+ */
+export interface ProbeTable {
+  caption: string;
+  columns: string[];
+  rows: string[][];
+  note?: string;
+}
+
 export interface ProbeResult {
   id: string; name: string;
   state: 'pass' | 'fail' | 'skip';
   detail: string;
   cost: string;
+  /** Present only when a probe has per-item detail worth showing — see {@link ProbeTable}. */
+  table?: ProbeTable;
 }
 
 /** One live check, as declared BEFORE it runs. `what` is the standing description (what this check does
@@ -373,41 +411,35 @@ export interface Endpoint {
 }
 
 /** One supported menu, as this deployment's config resolves it. */
-export interface MenuView {
-  /** The config key: `apps` | `account` | `management`. */
-  name: string;
-  /** What an operator calls it. */
-  label: string;
-  /** Where it is in the portal, in one line — so a reader can tell which dropdown this is without guessing. */
-  what: string;
-  /** Stock entries hidden at the untargeted rung. */
-  hide: string[];
-  /** Entries added at the untargeted rung. */
-  add: { label: string; url: string; title?: string }[];
-  /** Whether this menu's config varies by domain, scope or app state. A flat list resolves the same for
-   *  everyone; a targeted one does NOT, and a page that showed one rung as "the config" would be lying to
-   *  every user the other rungs apply to. */
-  targeted: boolean;
-}
-
-/**
- * The Menus tab's model: what the menu config currently does, plus what the builder needs to start from.
- *
- * Resolved at a deliberately UNTARGETED probe rung (a domain no config names, no app active), not for the
- * reader. This tab describes the deployment's configuration; a view that resolved for whoever opened it
- * would show a different "current state" to each operator and there would be no way to tell which was the
- * real one. `targeted` marks the menus where that distinction bites.
- */
 export interface MenusView {
-  menus: MenuView[];
   /** Whether either menu setting carries anything at all. */
   configured: boolean;
   /** `PORTAL_MENUS` pretty-printed, or '' when unset — the builder's starting point. */
   raw: string;
   /** `menuConfigError`'s verdict on the LIVE config, so the tab can lead with it. */
   error: string | null;
-  /** Set only when both apps-menu hide settings are in play, so the tab can attribute each label. */
-  appsHide: { legacy: string[]; menus: string[] } | null;
+  /** Apps this deployment could ever run — what the preview picker offers as toggles. Availability, not
+   *  usage: an app available and active nowhere is exactly when its menus want designing. */
+  availableApps: string[];
+  /**
+   * ROWS THE KIT ITSELF PUTS IN THE APPS MENU, so the preview can draw them and mark them not-editable.
+   *
+   * They are not config and cannot be hidden by it — `menuHide` skips every `_svx` row, and the reader
+   * that builds the tick-list skips them too, correctly. But they ARE in the menu the user opens, so a
+   * picture that leaves them out is inaccurate in the one direction that matters: it invites an operator
+   * to add an entry that is already there.
+   *
+   * `label` is what the app is called here and `app` is WHICH app it is — the rows belong to one
+   * integration, so a preview with a different one active must not draw them. `downloads` is whether
+   * `PORTAL_APP_DOWNLOADS` carries any, so the download line is drawn only when there is one. `signIn` is whether the sign-in feature is on at
+   * all — per-USER presence (does this person have an app account) is unknowable for a persona nobody is,
+   * and the caption says so rather than the picture pretending.
+   */
+  injected: { label: string; downloads: boolean; signIn: boolean; app: string };
+  /** Config that is VALID and still reaches nobody — see `unreachableDefaults`. On the page rather than
+   *  only in the builder's verdict, because the operator who hand-edits the var never opens the builder,
+   *  and that is the path no amount of editor seeding can protect. */
+  unreachable: string[];
 }
 
 export interface StatusDoc {
@@ -629,8 +661,8 @@ export const SETTINGS: SettingDef[] = [
   // ── branding: cosmetic only — the shared theme library ships vendor-neutral colors ────────────────
   { name: 'BRAND_ACCENT', group: 'branding', kind: 'config',
     example: '#1a6bb0',
-    what: 'Brand accent color (hex, e.g. #b3282d) used in the flow modal and the viewer\'s brand theme.',
-    whenUnset: 'Unbranded — the neutral "ns-portal" theme is used.',
+    what: 'Brand accent colour (hex, e.g. #b3282d) for the call-flow diagrams this deployment renders.',
+    whenUnset: 'Unbranded — diagrams render in the neutral "ns-portal" palette, which matches the stock portal.',
     affects: ['branding'] },
 
   { name: 'BRAND_NAME', group: 'branding', kind: 'config',
@@ -639,17 +671,11 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'Unbranded — the generic product name and theme label are used.',
     affects: ['branding'] },
 
-  { name: 'BRAND_LABEL', group: 'branding', kind: 'config',
-    importance: 'minor', example: 'Acme Portal',
-    what: 'Override for the theme label shown in the viewer\'s theme picker.',
-    whenUnset: 'Defaults to "<BRAND_NAME> portal" when BRAND_NAME is set, else "Brand".',
-    affects: ['branding'] },
-
   // ── ringotel: enrichment — fully gated on RINGOTEL_API_KEY's presence ─────────────────────────────
   { name: 'RINGOTEL_API_KEY', group: 'ringotel', kind: 'secret',
     importance: 'critical',
     what: 'Ringotel AdminAPI key. Its presence is what turns the whole Ringotel integration on.',
-    whenUnset: 'Ringotel integration fully off: no Ringotel calls, no enrichment, and every Ringotel-dependent route is inert. The NS-only baseline is unaffected.',
+    whenUnset: 'The whole app integration is off: no calls, no enrichment, every dependent route inert. Nothing that reads NetSapiens alone is affected.',
     affects: ['ringotel.orgStatus', 'ringotel.userStatus', 'ringotel.orgList', 'ringotel.activate', 'ringotel.resetPassword'] },
 
   { name: 'RINGOTEL_BASE_URL', group: 'ringotel', kind: 'config',
@@ -692,7 +718,7 @@ export const SETTINGS: SettingDef[] = [
   { name: 'RINGOTEL_EXCLUDE_NAMES', group: 'eligibility', kind: 'config',
     defaultValue: 'SHARED, SHARED VOICEMAIL, VOICEMAIL, FAX, GENERAL VOICEMAIL, GENERAL MAILBOX, CONFERENCE, CONF RM, CONF ROOM, ROUTING', gatedBy: 'RINGOTEL_API_KEY', example: 'SHARED,FAX',
     what: 'Comma-separated, case-insensitive substring matchers on the user\'s name that soft-exclude it from activation (shared lines, voicemail boxes, fax, conference rooms, etc). Applies only when a device is first created — an already-activated user is never blocked from signing in.',
-    whenUnset: 'A built-in default list applies (SHARED, SHARED VOICEMAIL, VOICEMAIL, FAX, GENERAL VOICEMAIL, GENERAL MAILBOX, CONFERENCE, CONF RM, CONF ROOM, ROUTING). Setting this replaces that list entirely — it does not add to it.',
+    whenUnset: 'The built-in list above applies. Setting this replaces that list rather than adding to it, so include the entries you still want.',
     affects: ['ringotel.activate'] },
 
   { name: 'RINGOTEL_EXCLUDE_EXTS', group: 'eligibility', kind: 'config',
@@ -734,7 +760,7 @@ export const SETTINGS: SettingDef[] = [
   // ── appaccess: the self-service surface a signed-in user sees about their own app access ─────────
   { name: 'RINGOTEL_SSO_SERVICE', group: 'appaccess', kind: 'config',
     gatedBy: 'RINGOTEL_API_KEY', example: 'netsapiens_sso',
-    what: 'The app SSO service name this deployment answers for (the part after the "/" in the organisation\'s params.sso), used to tell a user whether SSO sign-in is available to them. Important: setting this does not enable single sign-on. It only turns on the portal-side surface around it — the indicators, the settings and the user lifecycle handling. SSO additionally requires its own separate Worker deployment, and enablement by the app platform\'s support pointed at that Worker, neither of which this deployment can see or verify. See the SSO card on the Integrations tab for the full chain.',
+    what: 'The app SSO service name this deployment answers for — the part after the "/" in the organisation\'s `params.sso` — used to tell a user whether SSO sign-in is available to them. ⚠️ Setting this does not enable single sign-on. It turns on the portal side of it only: the indicators, the settings, the user-lifecycle handling. SSO itself needs its own separate Worker and enablement by the app platform pointed at that Worker, neither of which this deployment can see or verify. The SSO card on the Integrations tab has the full chain.',
     whenUnset: 'Never claims SSO for any org, even one with an SSO service bound — fail closed. An org can have an SSO service bound to a completely different identity provider than the one you run, so inferring it from a binding would send a user to somebody else\'s login.',
     affects: ['me.appAccess'] },
 
@@ -750,16 +776,22 @@ export const SETTINGS: SettingDef[] = [
   // configuration error, which a reader can only notice if the two are next to each other.
   { name: 'PORTAL_APPS_HIDE', group: 'menus', kind: 'config',
     example: 'SNAPmobile Web,Meeting',
-    what: 'Hide specific stock app-menu entries: comma-separated for a fleet-wide list, or JSON `{"<domain>":[...], "*":[...]}` to vary by domain. The older and terser of the two ways to hide an entry, and its one real advantage is the comma-separated form: a bare list needs no escaping in `wrangler.jsonc`, where a JSON value must be embedded as an escaped string. Use it for exactly that — a plain fleet-wide list. Its JSON form has no advantage at all over `PORTAL_MENUS`\'s `apps.hide`: identical escaping, fewer targeting axes (no scope, no app state). If you are reaching for the JSON here, reach for `PORTAL_MENUS` instead. Setting both is allowed and the two hide lists merge — neither silently wins, and duplicates collapse. The console shows the effective list with each entry attributed to the setting it came from, which is what makes two settings safe to have. It used to be a fatal error instead, which meant two cosmetic settings returned 500 on every route including the injected primary; a hide list should not be able to do that.',
-    whenUnset: 'No entries hidden.',
+    what: 'Hides stock entries from the Apps menu: a comma-separated fleet-wide list, or JSON `{"<domain>":[...], "*":[...]}` to vary by domain. The terser of the two ways to hide an entry, and the plain list is its whole advantage — it needs no escaping, where a JSON value must be embedded in `wrangler.jsonc` as an escaped string. Reach for `PORTAL_MENUS` the moment you want more than that: its `apps.hide` does everything the JSON form here does, with more ways to target it.',
+    whenUnset: 'No entries hidden. Setting this and `PORTAL_MENUS` together is fine — the two hide lists merge, duplicates collapse, and the Menus tab attributes each entry to the setting it came from.',
     affects: ['me.appAccess', 'me.menuConfig'] },
 
   // Positioned here for proximity to PORTAL_APPS_HIDE (the two interact — their apps-menu hide lists
   // merge), but its own group is 'menus', not 'appaccess'.
   { name: 'PORTAL_MENUS', group: 'menus', kind: 'config',
     example: '{"apps": {"hide": {"app": {"ringotel": ["SNAPmobile Web"], "none": []}}, "add": [{"label": "Support", "url": "https://support.example.com"}]}}',
-    what: 'JSON adding or hiding entries in the Apps, account and Management menus. A hide or add is either a plain array (applies to everyone) or an object that targets it on one of three axes, and the example on this row shows the one that is hardest to guess. `app` keys on whether your app is active for the user\'s domain, and its keys are a fixed set: an app name (`ringotel`), `none` for a domain where no app is active, and `*` for any state — anything else is a startup error rather than a rule that silently never matches. `domains` keys on the NetSapiens domain and `scopes` on the NetSapiens scope, both by exact name, and `users` keys on a `user@domain` account. Precedence, most specific first: account, then domain, then scope, then app, then `*` — so naming an account carves an exception out of a domain-wide rule, which is the only reason to name one. A `*` inside an axis is a default and never beats a rule that names you. The Menus tab builds all of this for you against your portal\'s real entries, and is the easier route.',
-    whenUnset: 'No customization from this setting — but `PORTAL_APPS_HIDE`, if set, still hides Apps-menu entries independently of this key. That one is older and terser, and not deprecated — but this key\'s `apps.hide` is a strict superset of it, so there is nothing it can do that this cannot. Setting both is allowed: the two apps-menu hide lists merge, duplicates collapse, and the console attributes each entry to the setting it came from.',
+    what: 'JSON adding or hiding entries in the Apps, account and Management menus. Each hide or add is either a plain array, which applies to everyone, or an object targeting it on one axis: `users` by `user@domain`, `domains` and `scopes` by exact NetSapiens name, and `app` by whether your app is active for the user\'s domain — that last one takes an app name (`ringotel`, `documo`), `none` for a domain running none of them, or `*` for any state, and nothing else (an unknown key is a startup error rather than a rule that silently never matches). Precedence runs most specific first — account, domain, scope, app, then `*` — so naming an account carves an exception out of a domain-wide rule, and a `*` inside an axis is a default that never beats a rule naming you. Build it on the Menus tab rather than by hand: it works from your portal\'s real entries, which is the part no example can supply.',
+    whenUnset: 'No customization from this setting. `PORTAL_APPS_HIDE` still hides Apps-menu entries independently of it if set — that one is terser and not deprecated, but this key\'s `apps.hide` does everything it does.',
+    affects: ['me.menuConfig'] },
+
+  { name: 'DOCUMO_DOMAINS', group: 'menus', kind: 'config',
+    importance: 'minor', example: 'acme.example',
+    what: 'Which domains count as running the fax integration, for menu targeting only — a comma-separated list, or `*` for every domain. It exists because that integration cannot answer for itself yet: menu rules written against `app` can name `documo`, and this is what makes them fire. When the integration ships it answers directly and this becomes an override rather than the source.',
+    whenUnset: 'No domain counts as running it, which is the state every deployment is in until that integration exists. A menu rule naming `documo` is then written but inert — legitimate ahead-of-launch config, and the console\'s menu preview will still show you what it would do.',
     affects: ['me.menuConfig'] },
 
   { name: 'PORTAL_APP_DOWNLOADS', group: 'appaccess', kind: 'config',
@@ -790,7 +822,7 @@ export const SETTINGS: SettingDef[] = [
   { name: 'PORTAL_HANDOFF_URL', group: 'injection', kind: 'config',
     importance: 'important', example: 'https://vendor.example.com/bundleRouter.bundle.js',
     what: 'The vendor bundle-router the injected primary chain-loads, so an existing portal add-on keeps working alongside this kit. Set it here and this Worker loads it for you; the primary checks the page first and skips the injection if a script with that exact URL is already present, so it will not double-load one a static loader already added. The match is on the exact URL string — a different-looking URL for the same file would load twice.',
-    whenUnset: 'Absent and empty mean different things, and neither means "nothing loads the vendor router". Absent is treated as a misconfiguration: any vendor add-on you already run would break, so a warning banner is shown to resellers. Empty ("") is a deliberate declaration that this Worker chain-loads nothing — it says nothing about the rest of the page, and the router may still be loaded by a static loader or by other code that is not this kit, which is a normal arrangement. It should be loaded in exactly one place: if an add-on is present and working while this is empty, something else is loading it, and that is where to go look.',
+    whenUnset: 'Absent and empty differ, and neither means "nothing loads the vendor router". Absent is a misconfiguration — any add-on you already run would break, so resellers see a warning banner. Empty ("") declares that this Worker chain-loads nothing, which says nothing about the rest of the page: a static loader may still load the router, and that is a normal arrangement. Exactly one thing should. If an add-on works while this is empty, something else is loading it, and that is where to look.',
     affects: ['injection'] },
 
   { name: 'PORTAL_SECONDARIES', group: 'injection', kind: 'config',
@@ -813,13 +845,13 @@ export const SETTINGS: SettingDef[] = [
 
   { name: 'PORTAL_RELEASE_NOTES_URL', group: 'injection', kind: 'config',
     importance: 'minor', example: 'https://github.com/dszp/ns-portal-kit/releases#release-v{version}',
-    what: 'Where a version number links to, with `{version}` substituted for the running version. Two surfaces share it: this console\'s own header, and the version line in the portal footer. Three states, the same shape PORTAL_HANDOFF_URL uses: absent means the public release list anchored at this version; a value is yours, for a fork or your own notes; and present-but-empty means never link at all, which is the way to switch the link off without removing the version.',
-    whenUnset: 'Links to the public release list, anchored at the version this deployment is running. The list is used rather than the single-release page on purpose — it also carries a version sidebar and a compare control, so it answers "am I behind" as well as "what is in mine", and if the anchor ever stops matching, the reader still lands somewhere that states which version it is showing.',
+    what: 'Where a version number links to, with `{version}` substituted for the running version. Two surfaces share it: this console\'s header, and the version line in the portal footer. Three states, the shape `PORTAL_HANDOFF_URL` also uses — absent is the public release list, a value is yours for a fork or your own notes, and present-but-empty never links at all, which is how to drop the link while keeping the version.',
+    whenUnset: 'Links to the public release list, anchored at the version this deployment is running — which answers "am I behind" as well as "what is in mine".',
     affects: ['injection', 'portal.versionLine'] },
 
   { name: 'STATUS_BANNER_WEBHOOK', group: 'injection', kind: 'config',
     importance: 'minor', example: 'https://automation.example.com/webhook/portal-banner',
-    what: 'An endpoint you host that returns the status-banner message for the caller, or nothing. Asked once per portal page load, on every portal page — so the endpoint sees every visit and decides, rather than the kit guessing which pages deserve a notice. That is one call per page view; if that matters for your backend, the payload includes `path` so it can answer empty cheaply. The kit stores no messages and decides nobody\'s eligibility — your endpoint does both, so a notice can be posted and pulled without a redeploy. ⚠️ The request carries the signed-in user\'s live `ns_t`, so name only an endpoint you control: whatever is here receives a working portal credential from every user. Must be https for the same reason. The reply may be plain text or JSON with a `message`, `text` or `banner` field, and may contain simple HTML — links, bold, italics — which is what a welcome or support notice usually needs. ⚠️ Return only messages you trust: this renders into every user\'s portal. The markup is rebuilt from an allow-list rather than inserted as-is, so `<script>`, event handlers and non-https links are dropped whatever the endpoint returns; that is a backstop against a mistake, not a substitute for controlling what the endpoint says.',
+    what: 'An endpoint you host that returns the status-banner message for the caller, or nothing. Asked once per portal page load, on every page — the endpoint sees every visit and decides, so a notice can be posted and pulled without a redeploy, and the kit stores no messages and judges nobody\'s eligibility. The reply may be plain text or JSON with a `message`, `text` or `banner` field, and may carry simple HTML. ⚠️ The request carries the signed-in user\'s live `ns_t`, so name only an endpoint you control — whatever is here receives a working portal credential from every user, which is also why it must be https. ⚠️ Return only messages you trust — this renders into every user\'s portal. Markup is rebuilt from an allow-list, so scripts, event handlers and non-https links are dropped whatever comes back — a backstop against a mistake, not a substitute for controlling what the endpoint says.',
     whenUnset: 'The status banner is inert — nothing is requested and nothing is drawn.',
     affects: ['injection', 'portal.statusBanner'] },
 
@@ -854,14 +886,14 @@ export const SETTINGS: SettingDef[] = [
   // ── events: NetSapiens change-event subscriptions that keep the app directory in sync ─────────────
   { name: 'NS_EVENTS', group: 'events', kind: 'config',
     defaultValue: 'auto', importance: 'important', gatedBy: 'RINGOTEL_API_KEY', example: 'auto',
-    what: 'Controls the NetSapiens event-subscription feature that keeps the app directory in sync when a user is edited directly in NetSapiens, not just through activate/deactivate/reset actions. `auto` (default) turns it on once Ringotel and the settings below are fully configured; `on` forces it and fails loudly if config is incomplete; `off` disables it outright.',
+    what: 'Whether this deployment subscribes to NetSapiens change events at all. `auto` (the default) turns them on once Ringotel and the settings below are fully configured; `on` forces it and fails loudly when they are not, which is what you want once it is meant to be working; `off` disables it outright.',
     whenUnset: 'Same as `auto` — on automatically once Ringotel and the rest of the event settings are configured; inert (no error) until then.',
     affects: ['events'] },
 
   { name: 'NS_EVENTS_DOMAINS', group: 'events', kind: 'config',
     importance: 'important', gatedBy: 'RINGOTEL_API_KEY', example: 'acme.example',
     what: 'Which domains get an event subscription. `*` = every domain the Ringotel write rail (`RINGOTEL_WRITE_DOMAINS`) permits, discovered at reconcile time; otherwise a comma-separated list, further narrowed to the write rail.',
-    whenUnset: 'Inert — no domain gets a subscription even if NS_EVENTS is on. `*` must be chosen deliberately, it is never a default.',
+    whenUnset: 'Inert — no domain gets a subscription even if NS_EVENTS is on. `*` must be chosen deliberately, it is never a default. This value is a request, not a report: what is actually subscribed lives in NetSapiens, and only the event-subscription check on the Checks tab can tell you — including a subscription still live for a domain this list no longer names.',
     affects: ['events'] },
 
   { name: 'NS_EVENTS_BASE_URL', group: 'events', kind: 'config',
@@ -945,13 +977,13 @@ export const SETTINGS: SettingDef[] = [
   // ── identity: the background service identity used for writes with no caller (event handling) ────
   { name: 'NS_API_KEY', group: 'identity', kind: 'secret',
     importance: 'important', gatedBy: 'NS_EVENTS',
-    what: 'The background service identity: a NetSapiens bearer token used when work runs with no signed-in caller — creating and renewing event subscriptions, adding and removing a user\'s softphone device, deactivating an app record on deletion. It is sent as-is; nothing is exchanged. This is the only stored NetSapiens credential on this deployment, and it exists solely because a change event arrives with nobody attached to act as. NetSapiens can restrict a key by model, domain, IP and read-only — narrow this as far as your deployment allows, because the caller-scope bound that limits every other write here does not apply to it.',
+    what: 'A NetSapiens bearer token, sent as-is, used for the work a change event brings: creating and renewing subscriptions, adding and removing a user\'s softphone device, deactivating an app record on deletion. It is the only stored NetSapiens credential here, and it exists solely because an event arrives with nobody to act as. ⚠️ Narrow it as far as your NetSapiens allows — by model, domain and IP — because the caller-scope bound that limits every other write on this deployment does not apply to this one.',
     whenUnset: 'No API-key identity. NS_ADMIN_USER + NS_ADMIN_PASS are the alternative (exchanged for a token via OAuth, so they additionally need NS_OAUTH_CLIENT_ID and NS_OAUTH_CLIENT_SECRET); if neither is configured, subscriptions cannot be created or renewed and the event handler cannot write.',
     affects: ['events'] },
 
   { name: 'NS_ADMIN_USER', group: 'identity', kind: 'secret',
     importance: 'important', gatedBy: 'NS_EVENTS',
-    what: 'Admin username, paired with NS_ADMIN_PASS: the alternative way to supply the background service identity, for a NetSapiens deployment that issues administrator credentials rather than a standalone API key. Unlike NS_API_KEY these are not sent directly — they are exchanged for an access token via an OAuth password grant, which is why this path additionally needs NS_OAUTH_CLIENT_ID and NS_OAUTH_CLIENT_SECRET. Configure whichever your provider gives you, not both; admin wins if both are set.',
+    what: 'Admin username, paired with `NS_ADMIN_PASS` — the other way to supply the service identity, for a NetSapiens that issues administrator credentials rather than a standalone API key. These are exchanged for a token by an OAuth password grant rather than sent directly, which is why this path also needs `NS_OAUTH_CLIENT_ID` and `NS_OAUTH_CLIENT_SECRET`. Configure whichever your provider gives you, not both; admin wins if both are set.',
     whenUnset: 'No admin-credential identity — falls back to NS_API_KEY if set.',
     affects: ['events'] },
 

@@ -3,7 +3,12 @@
  * plus specific overrides — expresses all four intents (everywhere / all-except / only-these / nothing) on
  * both axes, and that precedence is domain → app → "*". pnpm test:menus
  */
-import { resolveMenus, menuConfigError, MenuConfigError, resolveTargeted, MENU_NAMES, appsHideSources, bothAppsHideSet, type MenuItem } from './menus.js';
+import { resolveMenus, menuConfigError, MenuConfigError, resolveTargeted, MENU_NAMES, appsHideSources, bothAppsHideSet,
+  documoEnabled, activeApps, unreachableDefaults, appAvailable, availableApps,
+  type MenuItem, type TargetCtx, type SourceOut, type MenuSource } from './menus.js';
+// The write rail's OWN parse, so "these two settings agree about what a domain is" is a claim about
+// production rather than about a third copy typed into this file.
+import { resolveRingotelConfig } from './eligibility.js';
 
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => { c ? pass++ : fail++; console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); };
@@ -385,6 +390,351 @@ const M = (o: unknown) => ({ PORTAL_MENUS: JSON.stringify(o) });
   const both = M({ apps: { hide: { users: { '*': ['FromUsers'] }, domains: { '*': ['FromDomains'] } } } });
   ok(resolveMenus(both, { domain: OTHER, app: 'none', user: 'u@x.example' }).apps.hide.join(',') === 'FromUsers',
     "and users' default still outranks the domains default, as the documented order says");
+}
+
+
+// ── provenance: WHICH rung answered, reported by the code that chose it ──────────────────────────────
+// The console draws a chip from this ("default (*)", "scopes → Reseller"), and the alternative is
+// re-deriving precedence in the browser to explain a result the server already decided. These cases pin
+// the distinctions the chip depends on — especially the two empties, which look identical in the plan and
+// mean opposite things.
+{
+  // One source today for every axis but the app tier, which can report two — so these read [0] and the
+  // union block below asserts the plural case directly.
+  const srcs = (raw: unknown, ctx: TargetCtx) => {
+    const out: SourceOut = { sources: [] };
+    resolveTargeted<string>(raw, ctx, 'X', (v) => String(v), out, (ls) => ls.flat());
+    return out.sources;
+  };
+  const src = (raw: unknown, ctx: TargetCtx) => srcs(raw, ctx)[0] ?? null;
+  const at = (domain: string, scope?: string, app = 'none'): TargetCtx =>
+    ({ domain, app, ...(scope ? { scope } : {}) });
+
+  ok(src(['A'], at('acme.example'))?.axis === 'all',
+    '[source] an untargeted list reports that it applies to everyone');
+  ok(src({ scopes: { Reseller: ['A'] } }, at('acme.example', 'Reseller'))?.axis === 'scopes',
+    '[source] an exact rung reports its own axis');
+  ok(src({ scopes: { 'ReSeLLer': ['A'] } }, at('acme.example', 'reseller'))?.key === 'ReSeLLer',
+    '[source] and the key AS WRITTEN, so the chip shows the operator their own spelling');
+  ok(src({ scopes: { '*': ['A'] } }, at('acme.example', 'Reseller'))?.axis === 'scopes',
+    '[source] an in-axis default is attributed to its axis, not to the whole-object default');
+  ok(src({ scopes: { Reseller: ['A'] }, '*': ['B'] }, at('acme.example', 'Office Manager'))?.axis === '*',
+    '[source] while the whole-object default reports itself');
+  ok(src({ 'acme.example': ['A'] }, at('acme.example'))?.axis === 'domains',
+    '[source] the flat form is attributed to the domains axis it really is');
+
+  // THE TWO EMPTIES. `{scopes:{Reseller:[]}}` for a Reseller is the exemption idiom — "these people get
+  // nothing" — and the same empty list with nothing matched means "no rule reached you". The plan cannot
+  // tell them apart; the source can, and the editor renders them differently.
+  const exemption = src({ scopes: { Reseller: [] } }, at('acme.example', 'Reseller'));
+  const nothing = src({ scopes: { Reseller: [] } }, at('acme.example', 'Office Manager'));
+  ok(exemption !== null && exemption.axis === 'scopes',
+    '[source] an EMPTY rung that matched is an exemption, and says so');
+  ok(nothing === null, '[source] while nothing matching at all reports no source — a different fact');
+
+  // Precedence, read off the provenance rather than off the items: the most specific axis wins, and an
+  // in-axis default is held back until every axis has had a chance at an exact match.
+  const both = src({ domains: { 'acme.example': ['A'] }, scopes: { Reseller: ['B'] } }, at('acme.example', 'Reseller'));
+  ok(both?.axis === 'domains', '[source] domains outranks scopes, and the chip will say which one won');
+  const held = src({ scopes: { '*': ['A'] }, app: { ringotel: ['B'] } }, at('acme.example', 'Basic User', 'ringotel'));
+  ok(held?.axis === 'app', '[source] and a star is a default: an exact app match beats an in-axis scope star');
+}
+
+// The plan and the provenance are produced by ONE pass, so they cannot describe different resolutions.
+{
+  const env = { PORTAL_MENUS: JSON.stringify({ account: { add: { scopes: { Reseller: [] }, '*': [{ label: 'S', url: 'https://e.example' }] } } }) };
+  const sources = {} as Record<string, { hide: MenuSource[]; add: MenuSource[] }>;
+  const plan = resolveMenus(env, { domain: 'acme.example', app: 'none', scope: 'Reseller' }, sources as never);
+  ok(plan.account.add.length === 0 && sources.account!.add.length === 1 && sources.account!.add[0]!.axis === 'scopes',
+    '[source] resolveMenus reports the exemption its own plan produced');
+  const other = {} as Record<string, { hide: MenuSource[]; add: MenuSource[] }>;
+  resolveMenus(env, { domain: 'acme.example', app: 'none', scope: 'Office Manager' }, other as never);
+  ok(other.account!.add[0]!.axis === '*', '[source] and the default for an audience no rung names');
+  // ARRAY-shaped, with one entry today. A second integration makes a half legitimately answer from two
+  // app rungs at once, and widening a scalar then would break a shape the editor already consumes.
+  ok(Array.isArray(sources.account!.add), '[source] provenance is a list, sized for the integration tier that is coming');
+}
+
+
+// ── the app axis is a UNION tier (2026-08-10) ────────────────────────────────────────────────────────
+// Registering a second app is what made these writable: with one, union and select-one agree on every
+// expressible config, so every assertion here would have passed vacuously.
+{
+  const hides = (raw: unknown, apps: string[]) =>
+    resolveTargeted<string>(raw, { domain: 'acme.example', app: apps }, 'X', (v) => String(v), undefined,
+      (ls) => unionLabelsForTest(ls));
+  const unionLabelsForTest = (ls: string[][]) => {
+    const seen = new Set<string>(); const out: string[] = [];
+    for (const l of ls) for (const x of l) { const k = x.trim().toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(x); } }
+    return out;
+  };
+  const adds = (raw: unknown, apps: string[]) =>
+    resolveTargeted<string>(raw, { domain: 'acme.example', app: apps }, 'X', (v) => String(v), undefined,
+      (ls) => ls.flat());
+
+  const cfg = { app: { ringotel: ['A'], documo: ['B'], none: ['N'] } };
+  ok(hides(cfg, ['ringotel', 'documo']).join() === 'A,B',
+    '[union] both active ⇒ both rungs contribute; neither integration silently loses its entries');
+  ok(hides(cfg, ['documo']).join() === 'B', '[union] one active ⇒ only its rung');
+  ok(hides(cfg, []).join() === 'N', '[union] and `none` fires exactly when the active set is empty');
+
+  // REGISTRY ORDER, not the order the operator typed their JSON — two configs that say the same thing
+  // must resolve the same way.
+  const reversed = { app: { documo: ['B'], ringotel: ['A'] } };
+  ok(adds(reversed, ['ringotel', 'documo']).join() === 'A,B',
+    '[union] adds concatenate in APP_NAMES order regardless of how the config was written');
+
+  // THE MIGRATED IDIOM. Under select-one an empty rung meant "this audience gets nothing". Under union it
+  // means "this app contributes nothing" — there is no way to say "both active, show nothing" WITHIN the
+  // axis, which is why the exemption idiom lives on the identity axes now.
+  ok(hides({ app: { ringotel: [], documo: ['B'] } }, ['ringotel', 'documo']).join() === 'B',
+    '[union] an empty app rung contributes nothing rather than exempting the audience');
+  ok(hides({ domains: { 'acme.example': [] }, app: { ringotel: ['A'] } }, ['ringotel']).length === 0,
+    '[union] while an identity rung still exempts outright — it outranks the whole app tier');
+
+  // DEFAULT GATING. A default must never beat a rule that names you, and under union "names you" means at
+  // least one match across the active set.
+  const withStar = { app: { ringotel: ['A'], '*': ['D'] } };
+  ok(hides(withStar, ['documo']).join() === 'D',
+    '[union] the in-axis default fires when NO app rung matched any active app');
+  ok(hides(withStar, ['ringotel', 'documo']).join() === 'A',
+    '[union] and is held back as soon as one did, even with another app active and unmatched');
+
+  // DUPLICATE ADDS ACROSS RUNGS. `menuApply` drops a repeated URL client-side, so the portal was never
+  // going to draw it twice — but the PLAN would have carried both, and the console renders the plan, so
+  // the preview would have shown a row the live menu does not have.
+  {
+    const dup = { app: { ringotel: [{ label: 'Support', url: 'https://s.example' }],
+                         documo: [{ label: 'Support (fax)', url: 'https://s.example' }] } };
+    const out: SourceOut = { sources: [] };
+    const got = resolveTargeted<MenuItem>(dup, { domain: 'acme.example', app: ['ringotel', 'documo'] },
+      'X', (v) => v as MenuItem, out, (ls) => mergeAddsForTest(ls));
+    ok(got.length === 1 && got[0]!.label === 'Support',
+      '[union] one URL added by two rungs resolves to one entry, first spelling winning');
+    ok(out.sources.length === 2,
+      '[union] and provenance still names both rules — the operator wrote two, even though one draws');
+  }
+
+  // ⚠️ AND THE SAME CASE THROUGH THE PRODUCTION PATH. Everything above hands resolveTargeted a merge
+  // written IN THIS FILE, so `mergeAdds` could lose its dedupe entirely and every assertion here would
+  // stay green — while the console's preview drew a doubled row the live portal does not have. Union is
+  // the headline of this train; it must not ship on a test of its own mirror image.
+  {
+    const dup = { apps: { add: { app: {
+      // A {variable} on purpose: the raw sink must stay index-aligned with the resolved plan THROUGH the
+      // dedupe, and it is the dedupe that can silently drop one side out of step with the other.
+      ringotel: [{ label: 'Support', url: 'https://s.example/?d={domain}' }],
+      documo: [{ label: 'Support (fax)', url: 'https://s.example/?d={domain}' }],
+    } } } };
+    const sources = {} as Record<string, { hide: MenuSource[]; add: MenuSource[] }>;
+    const raw = {} as Record<string, MenuItem[]>;
+    const plan = resolveMenus(M(dup), { domain: ACME, app: ['ringotel', 'documo'] }, sources as never, raw as never);
+    ok(plan.apps.add.length === 1 && plan.apps.add[0]!.label === 'Support',
+      `[union] resolveMenus itself dedupes a URL added by two rungs (${JSON.stringify(plan.apps.add)})`);
+    ok(plan.apps.add[0]!.url === 'https://s.example/?d=',
+      `[union] and the surviving entry is the RESOLVED one — no vars supplied, so the placeholder is empty (${plan.apps.add[0]!.url})`);
+    ok(raw.apps!.length === plan.apps.add.length && raw.apps![0]!.url.includes('{domain}'),
+      `[union] the raw sink stays index-aligned with the plan through the dedupe (${JSON.stringify(raw.apps)})`);
+    ok(sources.apps!.add.length === 2,
+      '[union] and both rules are still reported, so the operator can find the one they can delete');
+  }
+
+  // Provenance goes plural exactly here and nowhere else.
+  const out: SourceOut = { sources: [] };
+  resolveTargeted<string>(cfg, { domain: 'acme.example', app: ['ringotel', 'documo'] }, 'X', (v) => String(v), out, (ls) => ls.flat());
+  ok(out.sources.length === 2 && out.sources.every((x) => x.axis === 'app'),
+    '[union] a both-active half reports BOTH rungs — the case scalar provenance would have broken');
+}
+
+// Two settings both name domains — the write rail and the Documo stand-in — and they must not disagree
+// about what a domain IS. The parse in `menus.ts` is a copy rather than a delegation (a module edge for
+// five tokens was the worse trade), so the agreement is asserted rather than assumed.
+//
+// ⚠️ AGAINST THE REAL RAIL. This block used to spell the rail's parse out a third time, right here — which
+// made it an assertion that documoEnabled matches a rule typed into a test, and left the actual rail free
+// to change underneath it. resolveRingotelConfig is what production asks, so it is what this asks.
+{
+  const railOf = (v: string) => resolveRingotelConfig({ RINGOTEL_WRITE_DOMAINS: v } as never).writeDomains;
+  const cases = ['acme.example', ' ACME.example ', 'a.example, b.example', '*', 'A.example,,b.example '];
+  const disagree = cases.filter((v) => {
+    const rail = railOf(v);
+    const wild = rail === '*';
+    for (const probe of ['acme.example', 'a.example', 'b.example', 'other.example']) {
+      const byRail = wild || (rail as string[]).includes(probe);
+      if (documoEnabled({ DOCUMO_DOMAINS: v }, probe) !== byRail) return true;
+      // ...and the same answer for a differently-cased probe, since neither is case-sensitive.
+      if (documoEnabled({ DOCUMO_DOMAINS: v }, probe.toUpperCase()) !== byRail) return true;
+    }
+    return false;
+  });
+  ok(disagree.length === 0,
+    `[union] DOCUMO_DOMAINS and the write rail agree on what a domain is${disagree.length ? ` (differ on: ${disagree.join(' | ')})` : ''}`);
+  ok(documoEnabled({}, 'acme.example') === false,
+    '[union] and unset means no domain is active — which is what keeps the union inert in production');
+}
+
+/** The dedupe-by-URL merge, mirrored here so the assertion above tests the RULE rather than the wiring. */
+function mergeAddsForTest(lists: MenuItem[][]): MenuItem[] {
+  const seen = new Set<string>(); const out: MenuItem[] = [];
+  for (const l of lists) for (const it of l) {
+    const k = it.url.trim().toLowerCase();
+    if (!seen.has(k)) { seen.add(k); out.push(it); }
+  }
+  return out;
+}
+
+// ── the migration claim, as a test that can actually fail ────────────────────────────────────────────
+// With `documo` registered but inactive everywhere, union must equal select-one on every config that was
+// expressible before. This is the assertion that was vacuous while one app was registered: it could not
+// distinguish the semantics because no config could tell them apart.
+{
+  const legacyShapes: unknown[] = [
+    ['A'],
+    { 'acme.example': ['A'], '*': ['B'] },
+    { app: { ringotel: ['A'], none: ['B'] } },
+    { app: { ringotel: ['A'], '*': ['B'] } },
+    { scopes: { Reseller: ['A'] }, app: { ringotel: ['B'] }, '*': ['C'] },
+    { domains: { 'acme.example': [] }, app: { ringotel: ['B'] } },
+    { users: { 'a@acme.example': ['A'] }, app: { none: ['B'] } },
+  ];
+  // Every ctx a single-app deployment could produce.
+  const ctxs = [
+    { domain: 'acme.example', app: 'ringotel' as const },
+    { domain: 'acme.example', app: 'none' as const },
+    { domain: 'other.example', app: 'ringotel' as const, scope: 'Reseller' },
+    { domain: 'acme.example', app: 'none' as const, scope: 'Reseller', user: 'a@acme.example' },
+  ];
+  let same = 0, differ: string[] = [];
+  for (const raw of legacyShapes) {
+    for (const ctx of ctxs) {
+      const got = resolveTargeted<string>(raw, ctx, 'X', (v) => String(v));
+      // The pre-union answer, computed the old way: exactly one rung, first match wins.
+      const expected = selectOneReference(raw, ctx);
+      if (JSON.stringify(got) === JSON.stringify(expected)) same++;
+      else differ.push(`${JSON.stringify(raw)} @ ${JSON.stringify(ctx)}: ${JSON.stringify(got)} vs ${JSON.stringify(expected)}`);
+    }
+  }
+  ok(differ.length === 0,
+    `[union] with the second app inactive, every previously-expressible config resolves identically (${same} cases)${differ.length ? `\n    ${differ.join('\n    ')}` : ''}`);
+}
+
+/** The pre-union rule, written out independently so the equivalence test compares against a SECOND
+ *  derivation rather than against the implementation it is checking. Select-one: users → domains →
+ *  scopes → app exact, then the most specific in-axis star, then the whole-object star. */
+function selectOneReference(raw: unknown, ctx: { domain: string; app: string; scope?: string; user?: string }): string[] {
+  const n = (x: string) => x.trim().toLowerCase();
+  if (Array.isArray(raw)) return raw as string[];
+  if (!raw || typeof raw !== 'object') return [];
+  const o = raw as Record<string, any>;
+  const key = (want: string) => Object.keys(o).find((k) => n(k) === want);
+  const axes = ['users', 'domains', 'scopes', 'app'] as const;
+  const has = axes.some((a) => key(a) !== undefined);
+  const pick = (m: Record<string, any>, want: string) => {
+    const k = Object.keys(m).find((x) => n(x) === want);
+    return k === undefined ? undefined : (m[k] as string[]);
+  };
+  if (!has) return pick(o, n(ctx.domain)) ?? pick(o, '*') ?? [];
+  const want: Record<string, string | undefined> = {
+    users: ctx.user ? n(ctx.user) : undefined,
+    domains: n(ctx.domain),
+    scopes: ctx.scope ? n(ctx.scope) : undefined,
+    app: n(ctx.app),
+  };
+  let chosen: string[] | undefined, def: string[] | undefined;
+  for (const a of axes) {
+    const k = key(a); if (k === undefined) continue;
+    const m = o[k] as Record<string, any>;
+    const w = want[a];
+    if (chosen === undefined && w) chosen = pick(m, w);
+    if (def === undefined) def = pick(m, '*');
+  }
+  const topKey = key('*');
+  return chosen ?? def ?? (topKey !== undefined ? (o[topKey] as string[]) : []) ?? [];
+}
+
+
+// ── entries that reach nobody: the decidable half of reachability ────────────────────────────────────
+// David's own config is the fixture. He built a covering app axis one group at a time, and the "*" that
+// carried Support and Email Support went dead fleet-wide with nothing anywhere saying so.
+{
+  const shared = [{ label: 'Support', url: 'https://s.example' }, { label: 'Email', url: 'mailto:a@e.example' }];
+  const covering = {
+    apps: { add: { app: { ringotel: [{ label: 'A', url: 'https://a.example' }],
+                          documo: [{ label: 'B', url: 'https://b.example' }],
+                          none: [{ label: 'C', url: 'https://c.example' }] }, '*': shared } },
+  };
+  const w = unreachableDefaults({ PORTAL_MENUS: JSON.stringify(covering) });
+  ok(w.length === 1 && /can never apply/.test(w[0]!),
+    '[dead] a covering app axis strands its default, and the config says which one');
+  ok(/reach nobody/.test(w[0]!) && /each group/.test(w[0]!),
+    '[dead] and says what to do about it, not just that it is wrong');
+
+  // Prove the claim rather than trusting the detector: resolve it for every app state and confirm the
+  // shared entries genuinely reach no one.
+  const seen = new Set<string>();
+  for (const apps of [[], ['ringotel'], ['documo'], ['ringotel', 'documo']]) {
+    for (const it of resolveMenus({ PORTAL_MENUS: JSON.stringify(covering) }, { domain: 'acme.example', app: apps }).apps.add) seen.add(it.label);
+  }
+  ok(!seen.has('Support') && !seen.has('Email'),
+    '[dead] and the entries really are unreachable — asserted by resolving, not by reading the config');
+
+  // One state left uncovered ⇒ the default is live and must NOT be reported.
+  const partial = JSON.parse(JSON.stringify(covering));
+  delete partial.apps.add.app.none;
+  ok(unreachableDefaults({ PORTAL_MENUS: JSON.stringify(partial) }).length === 0,
+    '[dead] leave one state uncovered and the default is live again — no warning');
+  ok(resolveMenus({ PORTAL_MENUS: JSON.stringify(partial) }, { domain: 'acme.example', app: [] }).apps.add.length === 2,
+    '[dead] which resolving confirms: an app-less domain falls through to it');
+
+  // An in-axis "*" IS the catch-all, so a covering axis beneath it strands nothing.
+  const starred = JSON.parse(JSON.stringify(covering));
+  starred.apps.add.app['*'] = [];
+  ok(unreachableDefaults({ PORTAL_MENUS: JSON.stringify(starred) }).length === 0,
+    '[dead] an in-axis star is itself a catch-all, so nothing is stranded under it');
+
+  // No default to strand ⇒ nothing to say. A covering axis is a perfectly good config on its own.
+  const noDefault = JSON.parse(JSON.stringify(covering));
+  delete noDefault.apps.add['*'];
+  ok(unreachableDefaults({ PORTAL_MENUS: JSON.stringify(noDefault) }).length === 0,
+    '[dead] and a covering axis with no default is not a problem at all');
+
+  // It REPORTS, it does not refuse — the bothAppsHideSet lesson: a cosmetic menu mistake made fatal in
+  // the pre-routing gauntlet took down every route including the injected primary.
+  ok(menuConfigError({ PORTAL_MENUS: JSON.stringify(covering) }) === null,
+    '[dead] a stranded default is still VALID config — this deployment boots and serves it');
+}
+
+
+// ── availability is a SECOND predicate, not a view of the first ──────────────────────────────────────
+// The console decides whether to offer an app in the preview picker from this. Inferring it from usage
+// deadlocks: no toggle means no rung, means nothing names it, means no toggle, forever.
+{
+  ok(appAvailable({ RINGOTEL_API_KEY: 'k' }, 'ringotel') && !appAvailable({}, 'ringotel'),
+    '[avail] the app integration is available exactly when its key is set');
+  // The three states, the same shape PORTAL_HANDOFF_URL uses.
+  ok(!appAvailable({}, 'documo'), '[avail] absent ⇒ not available on this deployment');
+  ok(appAvailable({ DOCUMO_DOMAINS: '' }, 'documo'),
+    '[avail] present but EMPTY ⇒ available and enabled nowhere — the design-ahead state');
+  ok(appAvailable({ DOCUMO_DOMAINS: 'acme.example' }, 'documo'), '[avail] a list ⇒ available');
+
+  // AVAILABLE AND ACTIVE NOWHERE is a real, ordinary state — the one the picker has to keep offering.
+  ok(appAvailable({ DOCUMO_DOMAINS: '' }, 'documo') && !documoEnabled({ DOCUMO_DOMAINS: '' }, 'acme.example'),
+    '[avail] available and active nowhere is a state, which is why one predicate cannot serve both');
+  ok(JSON.stringify(availableApps({ RINGOTEL_API_KEY: 'k', DOCUMO_DOMAINS: '' })) === JSON.stringify(['ringotel', 'documo']),
+    '[avail] and the picker is offered the registry order it will render in');
+  ok(availableApps({}).length === 0, '[avail] while a deployment that declared neither is offered neither');
+}
+
+// The detector's blind spot, asserted so the trade stays deliberate: it uses the FULL vocabulary, so a
+// config covering every state that can actually OCCUR on a deployment where documo is unavailable is not
+// reported. A missed warning, never a false alarm — folding availability in would make one config warn on
+// one deployment and not another, which is what makes the check answer portable.
+{
+  const covering = { apps: { add: { app: { ringotel: [{ label: 'A', url: 'https://a.example' }],
+                                           none: [{ label: 'B', url: 'https://b.example' }] },
+                                    '*': [{ label: 'S', url: 'https://s.example' }] } } };
+  ok(unreachableDefaults({ PORTAL_MENUS: JSON.stringify(covering) }).length === 0,
+    '[avail] the detector stays deployment-independent, missing rather than inventing a warning');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

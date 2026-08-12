@@ -1,10 +1,12 @@
 /** Offline test for the status page renderer. pnpm test:statuspage */
-import { Script } from 'node:vm';
+import { readFileSync } from 'node:fs';
+import { Script, runInNewContext } from 'node:vm';
 import { toPrincipal, type Principal } from '@dszp/netsapiens-lib';
 import { buildStatus } from './status.js';
-import { statusHtml, richPara, CHECKS_INTRO_TEXT } from './statusPage.js';
-import { PROBE_CATALOG, probeCatalogFor, type ProbeResult } from './statusModel.js';
-import { parseFeatures } from './features.js';
+import { resolveMenus, appsHideSources, menuConfigError, MENU_VARS, MENU_NAMES, APP_NAMES } from './menus.js';
+import { statusHtml, richPara, plainPara, CHECKS_INTRO_TEXT } from './statusPage.js';
+import { PROBE_CATALOG, probeCatalogFor, settingDocsUrl, groupDocsUrl, type ProbeResult } from './statusModel.js';
+import { parseFeatures, KNOWN_SCOPES } from './features.js';
 import { SPK_BRIDGE } from './spkBridge.js';
 import { buildSpkBundle } from './kit.js';
 
@@ -105,6 +107,11 @@ const DOC = () => buildStatus(
   // forces each exception to be named, so an accidental `open` still fails.
   const OPEN_BY_DESIGN = [
     'class="kidgroup" open',   // the sole integration with parts — a collapsed group nobody knows exists is undiscoverable
+    // The readable config, on the Menus tab. It is the thing you check before pasting, so it earns its
+    // space by default; it folds because the reader may not want it every time. The schema reference
+    // sitting immediately above it is the opposite case and stays shut — reference material announces
+    // itself by existing, and the config does not.
+    'class="schema" open',
   ];
   const opened = [...html.matchAll(/<details[^>]*\bopen\b[^>]*>/g)].map((m2) => m2[0]!);
   const unexpected = opened.filter((tag) => !OPEN_BY_DESIGN.some((allowed) => tag.includes(allowed)));
@@ -194,6 +201,18 @@ const DOC = () => buildStatus(
   const rendered = new Set(rows.map(idOf));
   const absent = doc.settings.filter((s) => !rendered.has(s.name)).map((s) => s.name);
   ok(absent.length === 0, `and every setting has a row${absent.length ? ` (absent: ${absent.join(', ')})` : ''}`);
+
+  // Item 28 — each row links to its own entry in the settings reference. Asserted against the row's OWN
+  // name, not against a count: a link on every row that all point at the same anchor would satisfy a count
+  // and send every reader to the same wrong place.
+  const wrongLink = rows.filter((r) => !r.includes(`href="${settingDocsUrl(idOf(r))}"`)).map(idOf);
+  ok(wrongLink.length === 0,
+    `each row links to its own entry in the settings reference${wrongLink.length ? ` (wrong or missing: ${wrongLink.join(', ')})` : ''}`);
+  const cfgPanel = panel('config', 'checks');
+  const groupLinks = [...new Set(doc.settings.map((s) => s.group))]
+    .filter((g) => !cfgPanel.includes(`href="${groupDocsUrl(g)}"`));
+  ok(groupLinks.length === 0,
+    `and each group section links its own${groupLinks.length ? ` (missing: ${groupLinks.join(', ')})` : ''}`);
 }
 
 // ── the probe bridge: one field name, agreed by two generated artifacts ──────────
@@ -221,8 +240,9 @@ const DOC = () => buildStatus(
   // Every payload field the protocol defines. Listed explicitly rather than derived from SPK_BRIDGE's
   // values, because half of those are message TYPES rather than fields — and an assertion that derived
   // both sides from the same object would pass with either side deleted.
-  const expected = [SPK_BRIDGE.tag, SPK_BRIDGE.dataKey, SPK_BRIDGE.errorKey, SPK_BRIDGE.pageKey,
-    SPK_BRIDGE.menusKey, SPK_BRIDGE.checkKey].sort();
+  const expected = [SPK_BRIDGE.tag, SPK_BRIDGE.idKey, SPK_BRIDGE.dataKey, SPK_BRIDGE.errorKey,
+    SPK_BRIDGE.pageKey, SPK_BRIDGE.menusKey, SPK_BRIDGE.checkKey, SPK_BRIDGE.resolveKey,
+    SPK_BRIDGE.stockKey].sort();
   const sorted = (s: Set<string>): string => [...s].sort().join(',');
   ok(sorted(fieldsSent) === expected.join(','),
     `the bundle sends exactly the protocol's fields (sends: ${sorted(fieldsSent)})`);
@@ -464,6 +484,177 @@ const DOC = () => buildStatus(
   ok(script.includes("getElementById('spkChecksIntro')"), 'the client script locates the intro element by its id');
   ok(script.includes(JSON.stringify(CHECKS_INTRO_TEXT.ranAlready)),
     'and the response handler writes the SAME "already ran" sentence exported from statusPage.ts — not a retyped copy');
+}
+
+// ── item 2: setting prose renders its markup, and only markup that renders ─────────────────────────
+// The descriptions were written with backticks around identifiers and pushed through esc(), so the
+// punctuation reached the operator as punctuation — and inside a `title` attribute it could not have
+// rendered at all. Both are fixed at the renderer, which means the guard belongs there too: prose may
+// use exactly what richPara draws, and anything else is caught here rather than on the page.
+{
+  const doc = DOC();
+  const leftovers = doc.settings.flatMap((s) => [['what', s.name, richPara(s.what)], ['whenUnset', s.name, richPara(s.whenUnset)]] as const)
+    .filter(([, , html]) => html.includes('`') || html.includes('**') || /\]\(https?:/.test(html));
+  ok(leftovers.length === 0,
+    `no setting's prose uses markup this renderer does not draw${leftovers.length ? ` (${leftovers.map(([f, n]) => `${n}.${f}`).join(', ')})` : ''}`);
+
+  const withCode = doc.settings.filter((s) => s.what.includes('`'));
+  ok(withCode.length > 0 && richPara(withCode[0]!.what).includes('<code>'),
+    'and a backticked identifier becomes a code span rather than punctuation');
+
+  // The same string in a `title` attribute has no markup to draw, so it is reduced instead of escaped.
+  ok(plainPara('set `NS_SERVER` first') === 'set NS_SERVER first', 'a title strips the markup rather than showing it');
+  const html = statusHtml(doc);
+  const titled = html.match(/title="[^"]*"/g) ?? [];
+  ok(titled.length > 0 && !titled.some((t) => t.includes('`')), 'and no rendered title attribute carries a backtick');
+}
+
+// ── the preview pair: a failed preview must never draw as a menu ───────────────────────────────────
+// The rule the pair exists for, and the one a future edit is most likely to lose: an empty plan rendered
+// as a composed menu says "nothing is hidden and nothing is added for this audience", which is a
+// confident wrong answer when the truth is "we could not ask". Same failure the Checks panel's errorKey
+// prevents, in a different panel — so the same shape, asserted the same way.
+{
+  const html = statusHtml(DOC());
+  const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+  const bundle = buildSpkBundle(['kit.status'], { PORTAL_HANDOFF_URL: '' } as any);
+
+  ok(script.includes(SPK_BRIDGE.resolveRequest) && bundle.includes(SPK_BRIDGE.resolveRequest),
+    '[preview] both sides speak the resolve message');
+  ok(/\/kit\/menus\/resolve\?/.test(bundle),
+    '[preview] and the PARENT does the fetching — the sandboxed frame has no origin to fetch from');
+
+  // THREE replies, three states, never collapsed: a plan, a config that will not resolve (normal while
+  // typing one), and could-not-ask. The third is the dangerous one.
+  const fn = script.slice(script.indexOf('function mbPreviewNotice'), script.indexOf('if (mbHost && HOSTED)'));
+  ok(/unavailable/.test(fn) && /invalid/.test(fn),
+    '[preview] the page tells could-not-ask apart from will-not-resolve');
+  ok(/Nothing below is a statement about your config/.test(fn),
+    '[preview] and an unavailable preview says so rather than implying an answer');
+
+  // The parent bounds the candidate BEFORE building the URL, same 8000 as the check pair — a config that
+  // previews but will not validate (or the reverse) is worse than either refusing.
+  const parentResolve = bundle.slice(bundle.indexOf(SPK_BRIDGE.resolveRequest));
+  // \b, because /8000/ is a substring match: widening the guard to >80000 kept it green. And the claim
+  // was "the same size as the check pair", which nothing compared — so assert the two bounds against
+  // each other, and against the server's cap, since a config that previews but will not validate (or
+  // the reverse) is worse than either refusing.
+  const bounds = [...bundle.matchAll(/length>(\d+)/g)].map((m) => Number(m[1]));
+  ok(bounds.length === 2 && bounds[0] === bounds[1],
+    `[preview] the check and resolve pairs bound the candidate at the SAME size (${bounds.join(' vs ')})`);
+  ok(bounds[0] === 8000, `[preview] at 8000 (got ${bounds[0]})`);
+  ok(/if \(candidate\.length > 8192\)/.test(readFileSync(new URL('./worker.ts', import.meta.url), 'utf8')),
+    '[preview] under the server cap of 8192, so the client refuses first and says why');
+  ok(/unavailable:/.test(parentResolve.slice(0, 1400)),
+    '[preview] and a Worker it cannot reach reports unavailable, never an empty plan');
+
+  // ── the check reply carries THREE facts, and the bridge dropped one ────────────────────────────────
+  // ACCEPTED AND STILL WRONG is a real verdict: this deployment takes the config and some of it reaches
+  // nobody. The route computed the warnings and the page had the wording for them — and the parent's
+  // reply forwarded ok and error only, so that whole branch was dead code with nothing failing anywhere.
+  // The field-agreement test above could not see it: `warnings` rides INSIDE the check payload, not as a
+  // top-level message field, so this is asserted at the payload level or not at all.
+  const parentCheck = bundle.slice(bundle.indexOf(SPK_BRIDGE.checkRequest));
+  const replyAt = parentCheck.indexOf('/kit/menus/check');
+  ok(/warnings:/.test(parentCheck.slice(replyAt, replyAt + 400)),
+    '[preview] the parent forwards the validator\'s warnings, not only its verdict');
+  ok(/v\.warnings/.test(script) && /reaches nobody/.test(script),
+    '[preview] and the page renders accepted-with-warnings as neither valid nor rejected');
+}
+
+// ── the persona bar and the composed menu ──────────────────────────────────────────────────────────
+{
+  const html = statusHtml(DOC());
+  const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+
+  ok(html.includes('id="spkmb-persona"') && html.includes('id="spkmb-apps"'),
+    '[persona] the bar exists, above everything it governs');
+  // TOGGLES, not tabs or a radio: two apps can be active at once, so a control that shows one and hides
+  // the other would hide a rule that is live. This is the whole reason the layout is shaped this way.
+  ok(/aria-pressed/.test(script) && /mbPersona\.apps\.splice/.test(script),
+    '[persona] apps are independently toggleable, because two can apply at once');
+  ok(/all off = a domain running none of them/.test(script),
+    '[persona] and all-off is named as the audience it is, not left reading as an empty selection');
+  // Availability, not usage — an app that can never be active here has no toggle, because "what would
+  // this persona see with it active" has no referent.
+  ok(/MB_AVAIL = /.test(script) && /if \(!MB_AVAIL\.length\)/.test(script),
+    '[persona] the toggles come from what this deployment could run, and vanish when it could run none');
+
+  // The composed menu is drawn from the SERVER's plan, never from a client-side resolution.
+  ok(/function mbComposed/.test(script) && /v\.plan\[mn\.name\]/.test(script),
+    '[composed] the picture is drawn from the resolved plan the Worker returned');
+  // ⚠️ THIS USED TO BE A GREP FOR /return;/ IN THE REST OF THE FILE, which every later function
+  // satisfies — deleting mbComposed's early return left it green while a failed preview drew a
+  // confident empty menu, the exact lie the pair exists to prevent. It is behavioural now, in the DOM
+  // harness below, where the failure branch is actually executed. Only the wiring stays a grep.
+  ok(/mbPreviewNotice\(v\)/.test(script), '[composed] the notice is consulted at all');
+  // Provenance colour carries exactly one warning, so it must not leak.
+  const chipAt = script.indexOf('function mbChip(list, what)');
+  const chip = script.slice(chipAt, chipAt + 900);
+  ok(/axis === 'scopes'/.test(chip) && /mbPersona\.scope/.test(chip),
+    '[composed] green means the rule names THIS persona — an app rung is shared, and stays amber');
+  // Two empties, two sentences.
+  ok(/an exemption, written as an empty rule/.test(script) && /the default is empty/.test(script),
+    '[composed] an exemption and an empty default are told apart, because the fixes differ');
+  // Nothing should ever render as "all → *": two of the five axis values mean "everyone" differently, and
+  // the chip maps them to words rather than printing the pair it was handed.
+  ok(/function mbSrcName/.test(script) && /'everyone else'/.test(script) && /'everyone'/.test(script),
+    '[composed] provenance is mapped to the operator\'s words, never printed as axis → key');
+
+  // ⚠️ THE TWO BUGS THAT SHIPPED TO DEV are no longer asserted by grep. Both were behavioural, both
+  // passed every grep in this file, and both are now covered by the DOM harness further down, which runs
+  // the real emitted builder against a stub DOM. A grep pins the one line that was wrong; the harness
+  // pins the property. What stays here is the structural half of the loop fix, because the guard's shape
+  // is the thing a tidy-up would remove:
+  ok(/mbLastAsk/.test(script) && /if \(!force && key === mbLastAsk\) return;/.test(script),
+    '[regress] the preview refuses to re-ask a question already answered, which is what breaks the loop');
+
+  // Config that names a label this page does not have is still real config.
+  ok(/Also hidden by your config, not on this page/.test(script),
+    '[composed] and a hide naming an absent label stays visible rather than silently vanishing');
+}
+
+// ── item 35/53: a probe's table renders, collapsed, on BOTH paths ───────────────────────────────────
+// Two renderers exist for one shape — the server's, and the client's, which is the one a real run
+// actually uses (results arrive over the bridge and are injected into the DOM). A test that only checked
+// the server render would pass with the client half deleted, which is the exact way the stale-intro bug
+// above went unnoticed.
+{
+  const withTable: ProbeResult[] = [{
+    id: PROBE_CATALOG[0]!.id, name: PROBE_CATALOG[0]!.name, cost: PROBE_CATALOG[0]!.cost,
+    state: 'pass', detail: 'ok',
+    table: {
+      caption: 'Event subscriptions this deployment owns (1)',
+      columns: ['Domain', 'Events', 'Expires', 'In NS_EVENTS_DOMAINS'],
+      rows: [['acme<script>.example', 'subscriber', '2027-01-01 00:00:00', 'yes']],
+      note: '3 subscription(s) belong to another integration.',
+    },
+  }];
+  const doc = buildStatus(
+    { NS_SERVER: 'api.example.com', NS_PORTAL_ISS: 'manage.example.com', PORTAL_MODE: '1',
+      PORTAL_HANDOFF_URL: '', PORTAL_SUPERADMINS: 'boss@example.com', CACHE_SCOPE: 'dev' },
+    { principal: P('Super User'), hostname: 'svc-dev.example.com', probes: withTable });
+  const html = statusHtml(doc);
+  const at = html.indexOf('id="spkpanel-checks"');
+  const panel = html.slice(at, html.indexOf('</main>', at));
+
+  ok(panel.includes('<details class="probetable"><summary>Event subscriptions this deployment owns (1)'),
+    '[item35] the table renders under its check row, collapsed');
+  ok(panel.includes('<td>2027-01-01 00:00:00</td>') && panel.includes('<th scope="col">Domain</th>'),
+    '[item35] with its columns and its cells');
+  ok(panel.includes('another integration'), '[item35] and the note saying what it is NOT showing');
+  // Every cell is upstream data. NetSapiens supplies these domain names, so a cell reaching innerHTML
+  // unescaped would be an injection this console handed itself.
+  ok(!panel.includes('acme<script>') && panel.includes('acme&lt;script&gt;.example'),
+    '[item35] cells are escaped — they are upstream strings, not ours');
+
+  // The client half: a run injects results, so the table has to be built there too, and by DOM node
+  // rather than markup for the same reason.
+  const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+  ok(/function checkTable\(/.test(script), '[item35] the client script builds the table for an injected result');
+  ok(/checkTable\(r\.table\)/.test(script), '[item35] reading it off the result the bridge delivered');
+  const fn = script.slice(script.indexOf('function checkTable('), script.indexOf('// One code path for both triggers'));
+  ok(fn.length > 0 && !/innerHTML/.test(fn), '[item35] and never touches innerHTML with an upstream cell');
 }
 
 // ── Task: Run-checks control moves to the TOP of the tab, and auto-runs once per modal instance ─────
@@ -824,19 +1015,45 @@ const DOC = () => buildStatus(
   const featPanel = html.slice(html.indexOf('id="spkpanel-features"'), html.indexOf('id="spkpanel-integrations"'));
   ok(/<summary>What it needs/.test(featPanel), '[reqs] the three-across Features cards keep theirs disclosed');
 
+  /**
+   * ONE CARD'S OWN HTML, bounded by the next card.
+   *
+   * ⚠️ A FIXED-LENGTH WINDOW READS ITS NEIGHBOUR. `slice(at, at + 4000)` ran past the end of the card and
+   * into the ones after it, so "this INERT card shows what is missing" was satisfied by ANY later card
+   * having a Missing block — a one-card regression was invisible, and with several inert cards in the
+   * fixture the assertion could not fail at all. Bounded here, and the boundary is itself asserted below.
+   */
+  // Two spellings of one pattern on purpose: matchAll needs the /g, and .test() on a /g regex advances
+  // lastIndex, so reusing it for the boundary check would make the assertion depend on call order.
+  const CARD_AT = /class="card(?: card-child)?"/g;
+  const CARD_ONE = /class="card(?: card-child)?"/;
+  const cardFor = (panelHtml: string, id: string): string => {
+    const at = panelHtml.indexOf(`>${id}<`);
+    if (at < 0) return '';
+    // ⚠️ NOT indexOf('class="card') — that is a prefix of `class="card-key"`, the element the id itself
+    // sits in, so the window closed on the heading and every card looked empty.
+    const bounds = [...panelHtml.matchAll(CARD_AT)].map((m) => m.index);
+    const start = bounds.filter((i) => i <= at).pop();
+    const next = bounds.find((i) => i > at);
+    return panelHtml.slice(start ?? at, next ?? panelHtml.length);
+  };
+
   // An INERT card is the case this exists for: its missing list must be on screen, not behind a control.
   const inert = doc.subsystems.filter((x) => x.tab === 'integration' && x.state === 'inert' && x.missing.length > 0);
+  ok(inert.length > 0, '[reqs] the fixture has an INERT card to assert about');
   for (const c of inert) {
-    const at = intPanel.indexOf(`>${c.id}<`);
-    const card = intPanel.slice(at, at + 4000);
+    const card = cardFor(intPanel, c.id);
+    ok(card.length > 0 && !CARD_ONE.test(card.slice(1)),
+      `[reqs] ${c.id}'s window is that card and nothing after it`);
     ok(/<dt>Missing<\/dt>/.test(card), `[reqs] ${c.id} is INERT and shows what is missing inline`);
   }
   // A card with nothing to say still gets neither — an empty block is as bad as an empty disclosure.
   const bare = doc.subsystems.filter((x) => x.tab === 'integration' && x.settings.length === 0 && x.missing.length === 0 && x.notes.length === 0);
   ok(bare.length > 0, '[reqs] there is at least one card with nothing to show (the unwired integrations)');
   for (const c of bare) {
-    const at = intPanel.indexOf(`>${c.id}<`);
-    const card = intPanel.slice(at, intPanel.indexOf('class="card', at + 10) === -1 ? at + 3000 : intPanel.indexOf('class="card', at + 10));
+    const card = cardFor(intPanel, c.id);
+    ok(card.length > 0 && !CARD_ONE.test(card.slice(1)),
+      `[reqs] ${c.id}'s window is that card and nothing after it`);
     ok(!/class="reqs"/.test(card), `[reqs] ${c.id} has nothing to show and renders no empty block`);
   }
 }
@@ -1002,12 +1219,60 @@ const DOC = () => buildStatus(
   // Before Config: this tab WRITES a setting and Config READS all of them.
   ok(html.indexOf('spktab-menus') < html.indexOf('spktab-config'), '[menus] and it sits before Config');
 
-  // Current state is SERVER-rendered, so the tab says something true with no bridge, no script and no
-  // portal — which is also what makes it testable offline and renderable in the static demo.
-  ok(/What your config does now/.test(html), '[menus] current state is server-rendered');
-  for (const name of ['apps', 'account', 'management']) {
-    ok(html.includes(`>${name}</code>`), `[menus] naming the ${name} menu`);
+  // ── THE SCHEMA REFERENCE ──────────────────────────────────────────────────────────────────────────
+  // A config is a text file someone edits by hand when the console is not the fastest route, and nothing
+  // anywhere said what the whole vocabulary IS. Generated from the modules that VALIDATE, so it cannot
+  // describe a config this deployment would refuse at boot — a hand-written reference disagrees with the
+  // parser eventually, and the disagreement is invisible until someone writes what it describes.
+  ok(/Every key and legal value/.test(html), '[schema] the reference is on the page');
+  {
+    const at = html.indexOf('Every key and legal value');
+    const block = html.slice(at, html.indexOf('</details>', at));
+    for (const scope of KNOWN_SCOPES) {
+      ok(block.includes(`&quot;${scope}&quot;`), `[schema] naming the scope ${scope}, from the list the runtime checks`);
+    }
+    for (const app of [...APP_NAMES, 'none']) {
+      ok(block.includes(`&quot;${app}&quot;`), `[schema] and the app key ${app}`);
+    }
+    for (const v of MENU_VARS) ok(block.includes(`{${v}}`), `[schema] and the variable {${v}}`);
+    ok(MENU_NAMES.every((m) => block.includes(`&quot;${m}&quot;`)), '[schema] and every menu name');
+    ok(/users/.test(block) && /domains/.test(block) && /scopes/.test(block) && /app/.test(block)
+      && /users → domains → scopes → app/.test(block),
+      '[schema] with the axes and the precedence order they resolve in');
+    // It carries comments, so it is NOT valid JSON — a block that looks pasteable and is not is worse
+    // than one that obviously is not.
+    ok(/not\s*\n?\s*<strong>valid JSON as written|not valid JSON as written/.test(block.replace(/\s+/g, ' ')),
+      '[schema] and says it is annotated rather than pasteable');
+
+    // ⚠️ THE ASSERTIONS ABOVE ARE CIRCULAR ON THEIR OWN, and I only noticed by trying the wrong mutation:
+    // adding a scope to KNOWN_SCOPES fed BOTH the reference and the expectation, so it stayed green. They
+    // catch the reference dropping the list; they cannot catch it carrying a hardcoded copy that is right
+    // today. That is the failure that matters — a reference which disagrees with the parser is invisible
+    // until someone writes the config it describes and the deployment refuses it at boot. So assert the
+    // DERIVATION, in source: the vocabularies come from the modules that validate them, and no scope or
+    // app name is typed into this function.
+    const src = readFileSync(new URL('./statusPage.ts', import.meta.url), 'utf8');
+    const fn = src.slice(src.indexOf('function menuSchema()'), src.indexOf('function renderConfig('));
+    ok(fn.length > 400 && fn.length < 6000, '[schema] (sliced the right function)');
+    for (const ref of ['KNOWN_SCOPES', 'APP_NAMES', 'APP_RESERVED', 'MENU_NAMES', 'MENU_VARS', 'MENU_VAR_HELP']) {
+      ok(fn.includes(ref), `[schema] built from ${ref}, not from a copy of it`);
+    }
+    const typedOut = [...KNOWN_SCOPES, ...APP_NAMES].filter((v) => fn.includes(`'${v}'`) || fn.includes(`"${v}"`));
+    ok(typedOut.length === 0,
+      `[schema] and no scope or app name is written into it by hand${typedOut.length ? ` (found: ${typedOut.join(', ')})` : ''}`);
   }
+
+  // ⚠️ "What your config does now" was REMOVED (David, 2026-08-10). It rendered a card per menu resolved
+  // at ONE fictional rung, which is why every targeted card carried a paragraph apologising that what it
+  // showed was not the config. The builder answers the same question at a rung the reader chooses, so the
+  // section was a screenful of a weaker answer standing in front of the better one.
+  ok(!/What your config does now/.test(html), '[menus] the fictional-rung summary is gone, not merely demoted');
+  // What must NOT go with it: the two verdicts on the LIVE config. They are rung-independent, and the
+  // second is the state an operator cannot discover any other way.
+  ok(/is not valid, so none of it is being applied/.test(statusHtml({ ...doc, menus: { ...doc.menus, error: 'boom' } } as never)),
+    '[menus] an invalid live config still leads the tab');
+  ok(/Some of this config reaches nobody/.test(statusHtml({ ...doc, menus: { ...doc.menus, unreachable: ['apps.add'] } } as never)),
+    '[menus] and so does valid-but-reaches-nobody');
 
   // The builder starts EMPTY and asks the page. A builder that rendered a mock-up of a portal menu would
   // be wrong for every deployment but the one it was drawn against.
@@ -1071,11 +1336,15 @@ const DOC = () => buildStatus(
   // Emitted per menu from MB_BASE when untouched — the property that makes the output non-destructive.
   ok(/one\.hide = mbClone\(base\.hide\)/.test(script) && /one\.add = mbClone\(base\.add\)/.test(script),
     '[full] an untouched menu is emitted from the running config, not omitted');
-  // A TARGETED menu cannot be represented by a flat tick-list, so it must be locked and passed through.
-  // Flattening it to one probe rung would quietly narrow it to a single audience.
-  ok(/hideLocked: mbIsTargeted\(base\.hide\)/.test(script) && /addLocked: mbIsTargeted\(base\.add\)/.test(script),
-    '[full] a targeted menu is locked rather than flattened');
-  ok(/not editable here yet/.test(script), '[full] and says so where the operator is looking');
+  // A targeted menu is edited RUNG BY RUNG since item 47 — never flattened, which would narrow the rule
+  // to a single audience. What stays locked is a shape this cannot round-trip, and it is still SHOWN.
+  ok(/hideLocked: mbIsTargeted\(base\.hide\) && !hideRungs/.test(script)
+    && /addLocked: mbIsTargeted\(base\.add\) && !addRungs/.test(script),
+    '[full] a targeted menu is locked only where it cannot be round-tripped');
+  ok(/cannot round-trip, so it is not editable here/.test(script),
+    '[full] and says so where the operator is looking');
+  ok(/mbShowRungs\(base\.hide, card/.test(script) && /mbShowRungs\(base\.add, card/.test(script),
+    '[full] and shows it anyway — not editable must never mean not readable');
   // Not editable is only half an answer. Saying a rule exists while hiding what it says is the worst of
   // both — you can neither change it nor read it without leaving the tab. Whatever the builder cannot edit,
   // it still shows.
@@ -1083,25 +1352,977 @@ const DOC = () => buildStatus(
   ok(/nothing — an exemption/.test(script),
     '[full] naming an empty rung, since an empty list is the "everyone except these" idiom and not a blank');
 
-  // Reset returns to the RUNNING config, not to empty. Empty is a config too, and a destructive one.
-  ok(/spkmb-reset/.test(html) && /mbSeed\(\); mbRebuild\(\);/.test(script),
-    '[full] Reset restores the running config rather than clearing');
+  // Reset returns to the RUNNING config, not to empty. Empty is a config too, and a destructive one — and
+  // it takes the rail's change log and every fork answer with it, because a log of edits that are no
+  // longer in the config is a log that lies.
+  ok(/spkmb-reset/.test(html) && /mbSeed\(\); mbResetForks\(\); mbChanges\.length = 0; mbRebuild\(\);/.test(script),
+    '[full] Reset restores the running config, and clears what described the edits it just discarded');
 
   // Hide-by-name exists: the menu relabels itself by context, and other injections add entries this page
   // load never showed, so ticking what is visible cannot be the only way in.
   ok(/Hide an entry by name/.test(script), '[full] an entry can be hidden by name');
-  ok(/Also hidden by your config, but not on this page/.test(script),
+  ok(/Also hidden by your config, not on this page/.test(script),
     '[full] and hides for labels not on this page stay visible instead of vanishing');
 
-  // Existing added entries are EDITABLE in place, not read-only prose above the editor.
-  ok(/st\.add\.forEach\(function\(entry\)\{ mbAddRow/.test(script),
-    '[full] entries already in your config are editable');
+  // ── the old rung editor is GONE, and that is the point of the rebuild ─────────────────────────────
+  // It was never meant to survive beside the picture: two editors for one config is how "a ton of
+  // scrolling and a lot more confusing" happened. Editing moved INTO the composed menu, so the widgets
+  // that made a second copy of it must not still be here, waiting to be re-attached by a later change.
+  for (const gone of ['mbRungs', 'mbHideList', 'mbAddList', 'mbAddRow', 'mbNewRung', 'mbTargetControl', 'mbDefaultList']) {
+    ok(!script.includes(gone), `[rebuild] the old rung editor's ${gone} is deleted, not hidden behind a disclosure`);
+  }
+  ok(!/Hidden entries/.test(script) && !/Added entries/.test(script),
+    '[rebuild] and hides and adds are one picture — those two headings do not exist to compete');
+  // What must SURVIVE the deletion: the seeding rule and the emit layer hold the round-trip and the
+  // no-op-on-the-resolved-plan invariants, and both were expensive to get right.
+  ok(/function mbMakeTargeted/.test(script) && /function mbConfig/.test(script),
+    '[rebuild] the seeding rule and the emit layer survive it, because the invariants live in them');
+
+  // ── item 47: the scopes axis is editable rung by rung ────────────────────────────────────────────
+  // The builder's promise is that it emits the COMPLETE config, so the thing that must be proven is not
+  // that a rung can be edited — it is that editing one leaves everything it did not touch identical.
+  // That is a property of the state→JSON path, which needs no DOM, so the real emitted functions are run
+  // here rather than grepped. A grep would have passed on a builder that dropped the sibling axis.
+  {
+    const slice = (from: string, to: string): string => {
+      const a = script.indexOf(from);
+      const b = script.indexOf(to, a);
+      if (a < 0 || b < 0) throw new Error(`could not slice ${from} → ${to} out of the builder`);
+      return script.slice(a, b);
+    };
+    const src = [
+      slice('function mbIsTargeted', 'function mbRender'),
+      slice('function mbSeed', 'function mbStart'),
+      'MB_MENUS=M;MB_BASE=B;MB_SCOPES=S;MB_APPS=A;mbState=ST;mbLive=null;'
+        + '({ mbConfig: mbConfig, mbSeed: mbSeed, mbAxisOf: mbAxisOf })',
+    ].join('\n');
+    const build = (base: unknown) => {
+      const ctx: Record<string, unknown> = {
+        M: [{ name: 'apps' }, { name: 'account' }, { name: 'management' }],
+        B: base, S: ['Super User', 'Reseller', 'Office Manager'], A: ['ringotel', 'none'], ST: {},
+        MB_MENUS: null, MB_BASE: null, MB_SCOPES: null, MB_APPS: null, mbState: null, mbLive: null,
+      };
+      const api = runInNewContext(src, ctx) as {
+        mbConfig: () => unknown; mbSeed: () => void;
+        mbAxisOf: (raw: unknown, name: string) => unknown;
+      };
+      api.mbSeed();
+      return { api, state: ctx.ST as Record<string, any> };
+    };
+
+    // A scopes-targeted hide, sitting beside a domains axis and a whole-object default — the shape where
+    // "carry the rest through" is a claim that can actually be wrong.
+    const BASE = {
+      apps: {
+        hide: {
+          scopes: { Reseller: ['Voicemail'], 'Office Manager': [] },
+          domains: { 'acme.example': ['Meeting'] },
+          '*': ['Fax'],
+        },
+        add: { scopes: { 'Office Manager': [{ label: 'Support', url: 'https://support.example.com' }] } },
+      },
+      account: { hide: ['Messages'] },
+      management: { hide: { users: { 'boss@acme.example': ['Billing'] } } },
+    };
+
+    const { api, state } = build(BASE);
+    const axisOf = (r: any, name: string) => r.axes.find((a: any) => a.name === name);
+    ok(!!state.apps.hideRungs && state.apps.hideLocked === false,
+      '[item47] a targeted hide is editable rather than locked');
+    ok(!!state.apps.addRungs && state.apps.addLocked === false, '[item47] and so is a targeted add');
+    ok(!!state.management.hideRungs && state.management.hideLocked === false,
+      '[item47] every axis is editable, accounts included — targeting is the feature, not an edge of it');
+    ok(axisOf(state.apps.hideRungs, 'scopes').order.join(',') === 'Reseller,Office Manager',
+      '[item47] every rung is carried, in the order it was written');
+    ok(!!axisOf(state.apps.hideRungs, 'domains'),
+      '[item47] and a second axis on the same half is its own editable block, not a carried-through blob');
+    ok(axisOf(state.apps.hideRungs, 'scopes').map['Office Manager'].length === 0,
+      '[item47] including an empty rung — that is the "everyone except these" idiom, not an absent rule');
+    ok(!!state.apps.hideRungs.top && state.apps.hideRungs.top.list.join(',') === 'Fax',
+      '[item47] the whole-menu default is a rung too — usually the one holding what everyone gets');
+
+    // Untouched ⇒ byte-for-byte. The builder emits the whole config on every render, so a round-trip that
+    // is merely equivalent is not good enough: an operator diffs this against what they are running.
+    ok(JSON.stringify(api.mbConfig()) === JSON.stringify(BASE),
+      `[item47] an untouched config round-trips identically (got ${JSON.stringify(api.mbConfig())})`);
+
+    // Edit ONE rung. Everything else — the sibling axis, the whole-object default, the other menus — must
+    // come back unchanged. This is the assertion that would catch a builder that flattened.
+    axisOf(state.apps.hideRungs, 'scopes').map['Office Manager'].push('Meeting');
+    const after = api.mbConfig() as typeof BASE;
+    ok(JSON.stringify(after.apps.hide.scopes) === JSON.stringify({ Reseller: ['Voicemail'], 'Office Manager': ['Meeting'] }),
+      '[item47] editing a rung changes that rung');
+    ok(JSON.stringify(after.apps.hide.domains) === JSON.stringify(BASE.apps.hide.domains)
+      && JSON.stringify(after.apps.hide['*']) === JSON.stringify(BASE.apps.hide['*']),
+      '[item47] and leaves the other axis and the default on that menu exactly as configured');
+    ok(JSON.stringify(after.account) === JSON.stringify(BASE.account)
+      && JSON.stringify(after.management) === JSON.stringify(BASE.management),
+      '[item47] and leaves every other menu alone, editable or not');
+
+    // The rung PICKER is gone with the old editor: a new rule is no longer chosen from a vocabulary of
+    // keys, it is carved from the persona on screen (see the fork prompt in the DOM harness below). That
+    // is the same capability arriving in the operator's terms instead of the format's, and it is why
+    // mbFreeKeys and its three assertions were deleted rather than ported.
+
+    // MAKING A FLAT HALF TARGETED — the leap that was missing. David, live on dev: "I can't tell if I can
+    // add a menu item to Apps ONLY if ringotel is true. I see I can hide an option based on these; the add
+    // form doesn't seem to let me select an app state." His apps.add is a plain list, so it had no groups
+    // and no axis control, and there was no route from there to a targeted rule without editing JSON.
+    // The property that matters is that converting LOSES NOTHING: whatever applied to everyone still does.
+    {
+      const flat = build({ apps: { add: [{ label: 'Support', url: 'https://s.example' }] } });
+      const st = flat.state.apps;
+      ok(!st.addRungs && !st.addLocked, '[targetable] a plain list starts untargeted, as it should');
+      const mk = runInNewContext(`${slice('function mbMakeTargeted', '// \u2500\u2500 WHERE AN EDIT LANDS')}; mbMakeTargeted`, {}) as
+        (existing: unknown[], axis: string, key: string) => any;
+      st.addRungs = mk(st.add, 'app', 'ringotel');
+      const after = flat.api.mbConfig() as any;
+      ok(JSON.stringify(after.apps.add['*']) === JSON.stringify([{ label: 'Support', url: 'https://s.example' }]),
+        '[targetable] what applied to everyone still does — it becomes the default, never dropped');
+      ok(JSON.stringify(after.apps.add.app) === JSON.stringify({ ringotel: [{ label: 'Support', url: 'https://s.example' }] }),
+        '[targetable] and the NEW group is seeded with the same entries, which is the correctness of it');
+
+      // THE INVARIANT, checked against the real resolver rather than asserted in prose. A default is
+      // SUPPRESSED for anyone a rule names, so seeding only the default is safe until the first edit and
+      // silently wrong after it — the audience being added to loses every shared entry. David built
+      // exactly that config on dev before this was fixed, and it dropped two entries for everyone.
+      {
+        const before = { apps: { add: [{ label: 'Support', url: 'https://s.example' }] } };
+        const afterCfg = flat.api.mbConfig();
+        const personas = [
+          { domain: 'acme.example', app: [] as string[] },
+          { domain: 'acme.example', app: ['ringotel'] },
+          { domain: 'acme.example', app: ['documo'] },
+          { domain: 'acme.example', app: ['ringotel', 'documo'] },
+          { domain: 'other.example', app: ['ringotel'], scope: 'Reseller' },
+          { domain: 'other.example', app: [], scope: 'Office Manager' },
+        ];
+        const differ = personas.filter((p) => {
+          const a1 = resolveMenus({ PORTAL_MENUS: JSON.stringify(before) }, p as never).apps;
+          const a2 = resolveMenus({ PORTAL_MENUS: JSON.stringify(afterCfg) }, p as never).apps;
+          return JSON.stringify(a1) !== JSON.stringify(a2);
+        });
+        ok(differ.length === 0,
+          `[targetable] converting is a no-op on the RESOLVED PLAN for every persona${differ.length ? ` (differs for: ${differ.map((p) => `${p.scope ?? 'any'}/${p.app.join('+') || 'none'}`).join(', ')})` : ''}`);
+      }
+    }
+
+    // A rung that is not a flat list is not something this can round-trip, so its axis stays out of the
+    // editable set rather than being half-understood.
+    const weird = build({ apps: { hide: { scopes: { Reseller: { nested: true } } } } });
+    ok(weird.state.apps.hideLocked === true, '[item47] a rung that is not a flat list stays locked');
+    // ...but a menu where ONE axis is unreadable and another is fine keeps the good one editable, and
+    // carries the other through untouched.
+    const mixed = build({ apps: { hide: { scopes: { Reseller: { nested: true } }, domains: { 'acme.example': ['Meeting'] } } } });
+    ok(!!mixed.state.apps.hideRungs && !mixed.state.apps.hideLocked,
+      '[item47] one unreadable axis does not lock a half whose other axis is fine');
+    ok(JSON.stringify(mixed.api.mbConfig()) === JSON.stringify({ apps: { hide: { scopes: { Reseller: { nested: true } }, domains: { 'acme.example': ['Meeting'] } } } }),
+      '[item47] and the unreadable one round-trips byte for byte beside it');
+  }
 
   // A malformed running config must not break the page — the console is where you go to fix it.
   const bad = { ...DOC(), menus: { ...DOC().menus, raw: '{ not json' } };
   let threw = false;
   try { statusHtml(bad as never); } catch { threw = true; }
   ok(!threw, '[full] a malformed running config still renders the tab');
+}
+
+// ── THE DOM HARNESS: run the real emitted builder against a stub DOM ─────────────────────────────────
+//
+// Why this exists, in one sentence: two bugs reached dev inside one hour and NOT ONE test in this file
+// could see either, because the client half of the console is JavaScript emitted as a string and every
+// assertion above verifies it by READING it. A grep catches the regression it was written for and nothing
+// else; the shape that catches a class of bug is the one `kit.selftest.ts` already uses for `menuHide` —
+// slice the real emitted source out of the page, run it in a `vm` against a stub small enough to be
+// obviously honest, and assert BEHAVIOUR.
+//
+// The stub is deliberately tiny: create/append/remove, class and text, a three-form selector matcher, and
+// timers you have to flush by hand. Anything the builder needs that is not here shows up as a throw, which
+// is the right failure — a silent stub that answers every call is a harness that always passes.
+
+interface StubEl {
+  tagName: string; className: string; id: string; type: string; value: string; checked: boolean;
+  disabled: boolean; hidden: boolean; open: boolean; title: string; placeholder: string; size: number;
+  textContent: string; style: Record<string, string>; children: StubEl[]; parentNode: StubEl | null;
+  appendChild(c: StubEl): StubEl; removeChild(c: StubEl): StubEl; remove(): void;
+  setAttribute(k: string, v: string): void; getAttribute(k: string): string | null;
+  addEventListener(t: string, fn: (e: unknown) => void): void;
+  fire(t: string, ev?: unknown): void; focus(): void;
+  querySelector(sel: string): StubEl | null; querySelectorAll(sel: string): StubEl[];
+  closest(sel: string): StubEl | null;
+  /** Every descendant's text, flattened — the cheap way to ask "is this label anywhere in here?". */
+  all(sel: string): StubEl[];
+}
+
+function makeDom(ids: string[]) {
+  // Three selector forms and no more: a tag, a `.class` (optionally `tag.class`), and `details[id]`.
+  // Anything else throws rather than quietly matching nothing — a selector the stub does not understand
+  // must fail the test that used it, not weaken it.
+  const matches = (n: StubEl, sel: string): boolean => {
+    const s = sel.trim();
+    if (s === 'details[id]') return n.tagName === 'DETAILS' && !!n.id;
+    const dot = s.indexOf('.');
+    if (dot === 0) return ` ${n.className} `.includes(` ${s.slice(1)} `);
+    if (dot > 0) {
+      return n.tagName === s.slice(0, dot).toUpperCase() && ` ${n.className} `.includes(` ${s.slice(dot + 1)} `);
+    }
+    if (/^[a-z]+$/i.test(s)) return n.tagName === s.toUpperCase();
+    throw new Error(`the DOM stub does not understand the selector "${sel}" — teach it, do not widen it`);
+  };
+  const walk = (n: StubEl, fn: (x: StubEl) => void): void => { for (const c of n.children) { fn(c); walk(c, fn); } };
+  const mk = (tag: string): StubEl => {
+    let text = '';
+    const attrs: Record<string, string> = {};
+    const listeners: Record<string, ((e: unknown) => void)[]> = {};
+    const el = {
+      tagName: tag.toUpperCase(), className: '', id: '', type: '', value: '', checked: false,
+      disabled: false, hidden: false, open: false, title: '', placeholder: '', size: 0,
+      style: {} as Record<string, string>, children: [] as StubEl[], parentNode: null as StubEl | null,
+      appendChild(c: StubEl) { c.parentNode = el as StubEl; el.children.push(c); return c; },
+      removeChild(c: StubEl) {
+        const i = el.children.indexOf(c);
+        if (i >= 0) el.children.splice(i, 1);
+        c.parentNode = null;
+        return c;
+      },
+      remove() { if (el.parentNode) el.parentNode.removeChild(el as StubEl); },
+      setAttribute(k: string, v: string) { attrs[k] = String(v); },
+      getAttribute(k: string) { return k in attrs ? attrs[k]! : null; },
+      addEventListener(t: string, fn: (e: unknown) => void) { (listeners[t] = listeners[t] || []).push(fn); },
+      fire(t: string, ev?: unknown) { for (const f of listeners[t] || []) f.call(el, ev ?? {}); },
+      focus() { doc.activeElement = el as StubEl; },
+      all(sel: string) { const out: StubEl[] = []; walk(el as StubEl, (n) => { if (matches(n, sel)) out.push(n); }); return out; },
+      querySelectorAll(sel: string) { return (el as StubEl).all(sel); },
+      querySelector(sel: string) { return (el as StubEl).all(sel)[0] ?? null; },
+      closest(sel: string) {
+        let n: StubEl | null = el as StubEl;
+        while (n) { if (matches(n, sel)) return n; n = n.parentNode; }
+        return null;
+      },
+      // A <select>'s options track its children in a real DOM, and the persona bar's "already built?"
+      // guard reads exactly that. A stub that returned a fixed empty array would rebuild the bar forever.
+      get options() { return el.children; },
+    } as unknown as StubEl;
+    Object.defineProperty(el, 'textContent', {
+      get() { return text + el.children.map((c) => c.textContent).join(''); },
+      set(v: string) { el.children.length = 0; text = v === null || v === undefined ? '' : String(v); },
+    });
+    return el as StubEl;
+  };
+  const byId: Record<string, StubEl> = {};
+  for (const id of ids) { byId[id] = mk('div'); byId[id]!.id = id; }
+  const doc = {
+    activeElement: null as StubEl | null,
+    body: mk('body'),
+    createElement: (t: string) => mk(t),
+    // A text node is an element with no tag as far as this stub is concerned — enough for textContent to
+    // aggregate correctly, which is all any assertion here reads.
+    createTextNode: (t: string) => { const n = mk('#text'); n.textContent = t; return n; },
+    getElementById: (id: string) => byId[id] ?? null,
+  };
+  // Timers you flush by hand. The builder debounces both the validator and the preview, so a real timer
+  // would make the harness a race and an immediate one would recurse.
+  let seq = 0;
+  const timers = new Map<number, () => void>();
+  const posts: Record<string, unknown>[] = [];
+  const win = {
+    scrollY: 0,
+    scrollTo: () => {},
+    parent: { postMessage: (m: Record<string, unknown>) => { posts.push(m); } },
+  };
+  (win as { parent: unknown }).parent = win.parent;
+  return {
+    byId, doc, posts,
+    ctx: {
+      document: doc, window: win, HOSTED: true, console,
+      setTimeout: (fn: () => void) => { timers.set(++seq, fn); return seq; },
+      clearTimeout: (id: number) => { timers.delete(id); },
+    } as Record<string, unknown>,
+    flush() {
+      // One generation at a time: a callback that schedules another must not spin this loop forever, and
+      // "did that edit schedule a second round?" is exactly what the loop regression is about.
+      const now = [...timers.entries()];
+      timers.clear();
+      for (const [, fn] of now) fn();
+      return now.length;
+    },
+    pending: () => timers.size,
+  };
+}
+
+/** Slice the whole builder — declarations included, so the harness runs the values the page really ships. */
+function builderSource(script: string, exports: string): string {
+  const a = script.indexOf('  var MB_MENUS = [');
+  const b = script.indexOf('if (mbHost && HOSTED)', a);
+  if (a < 0 || b < 0) throw new Error('could not slice the menu builder out of the page');
+  return `${script.slice(a, b)}\n;(${exports})`;
+}
+
+{
+  const d = buildStatus(
+    { NS_SERVER: 'api.example.com', NS_PORTAL_ISS: 'manage.example.com', PORTAL_MODE: '1',
+      PORTAL_HANDOFF_URL: '', PORTAL_SUPERADMINS: 'boss@example.com', CACHE_SCOPE: 'dev',
+      RINGOTEL_API_KEY: 'k', DOCUMO_DOMAINS: 'acme.example',
+      PORTAL_MENUS: JSON.stringify({
+        apps: {
+          hide: { app: { ringotel: ['SNAPmobile Web'] }, '*': [] },
+          // ⚠️ A {variable} on purpose. menuItemAt interpolates it and the preview resolves with no user
+          // facts, so the plan's url is NOT this url — which is what made every entry using the feature
+          // report itself as "not editable here".
+          add: { app: { ringotel: [{ label: 'App Admin', url: 'https://admin.example/?ext={ext}' }] }, '*': [] },
+        },
+        account: { hide: { scopes: { Reseller: [] }, '*': ['My Account'] } },
+      }) },
+    { principal: P('Super User'), hostname: 'svc-dev.example.com' });
+  const html = statusHtml(d);
+  const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+
+  const dom = makeDom(['spkmb-status', 'spkmb-menus', 'spkmb-out', 'spkmb-json', 'spkmb-wr', 'spkmb-verdict',
+    'spkmb-reset', 'spkmb-scope', 'spkmb-apps', 'spkmb-domain', 'spkmb-appswrap', 'spkmb-changed', 'spkmb-caveat', 'spkmb-capture', 'spkmb-domclear', 'spkmb-domnote',
+    'spkmb-rules']);
+  const api = runInNewContext(
+    builderSource(script, '{ mbStart: mbStart, mbRebuild: mbRebuild, mbOnResolve: mbOnResolve, mbOnStock: mbOnStock, mbPersona: mbPersona, mbStockRaw: function(){ return mbStock }, mbMarkScopes: mbMarkScopes }'),
+    dom.ctx,
+  ) as {
+    mbStart: (live: unknown) => void;
+    mbRebuild: () => void;
+    mbOnResolve: (rv: unknown, rid?: unknown) => void;
+    mbOnStock: (st: unknown) => void;
+    mbStockRaw: () => unknown;
+    mbMarkScopes: () => void;
+    mbPersona: { scope: string; apps: string[]; domain: string };
+  };
+
+  const LIVE = {
+    apps: { present: true, entries: ['User Portal', 'SNAPmobile Web', 'Attendant Console'] },
+    account: { present: true, entries: ['My Account', 'Log Out'] },
+    management: { present: false, entries: [] },
+  };
+  api.mbPersona.scope = 'Office Manager';
+  api.mbPersona.apps = ['ringotel'];
+  api.mbPersona.domain = 'acme.example';
+  api.mbStart(LIVE);
+
+  const host = dom.byId['spkmb-menus']!;
+
+  // ── REGRESSION 1: mbCard returned the disclosure it had rebound `card` to, so the real card was built,
+  // never attached, and the tab rendered as three bare summaries. A grep can only pin the one line that
+  // was wrong; this pins the property — every menu's own name is on the page.
+  ok(host.children.length === 3, `[dom] one panel per menu (got ${host.children.length})`);
+  for (const label of ['Apps', 'Account', 'Management']) {
+    ok(host.children.some((c) => c.textContent.includes(label)),
+      `[dom] and the ${label} panel carries its own name — mbCard returns the card, not something inside it`);
+  }
+
+  // ── REGRESSION 2: reply → rebuild → render → ask → reply, every 250ms, wiping the DOM under the reader.
+  //
+  // ⚠️ THE HARNESS HAS TO CLOSE THE CIRCUIT. A first cut delivered ONE reply and then flushed timers, and
+  // it passed with the loop guard deleted — because nothing answered the ask that the rebuild produced,
+  // so of course it stopped. A loop test that never completes the loop is a test that cannot fail.
+  // Answering every request the way the bridge does is what makes the runaway actually run away.
+  // THE REPLY IS COMPUTED BY THE REAL RESOLVER, not hand-written. A canned payload is a second opinion
+  // about the wire shape, and the console's job is to render the first one — the "not editable here" bug
+  // lived exactly in the gap between the plan's url and the config's, which a hand-written reply that
+  // used the same string for both could never show.
+  const MENU_CTX = { domain: 'acme.example', app: ['ringotel'], scope: 'Office Manager' };
+  const REPLY = (() => {
+    const matched = {} as never;
+    const rawAdds = {} as never;
+    const plan = resolveMenus({ PORTAL_MENUS: d.menus.raw } as never, MENU_CTX as never, matched, rawAdds);
+    return { plan, matched, rawAdds, appsHide: appsHideSources({ PORTAL_MENUS: d.menus.raw } as never, MENU_CTX as never) };
+  })();
+  const askCount = () => dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.resolveRequest).length;
+  /** Run the real cycle to a standstill: fire the timers, answer whatever they asked, repeat. */
+  const askedIds = () => dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.resolveRequest)
+    .map((m) => m[SPK_BRIDGE.idKey]);
+  const pump = (max: number) => {
+    let asks = 0, rounds = 0;
+    while (dom.pending() && rounds < max) {
+      const before = askCount();
+      dom.flush();
+      const ids = askedIds();
+      const added = ids.length - before;
+      asks += added;
+      // ANSWERED THE WAY THE PARENT ANSWERS — the question's own id echoed back. A harness that replies
+      // untagged takes the compatibility path and never drives the stale-answer guard at all.
+      for (let i = 0; i < added; i++) api.mbOnResolve(REPLY, ids[before + i]);
+      rounds++;
+    }
+    return { asks, rounds, settled: dom.pending() === 0 };
+  };
+  const lastAsk = () => {
+    const asks = dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.resolveRequest);
+    return (asks[asks.length - 1] ?? {})[SPK_BRIDGE.resolveKey] as
+      { c: string; domain: string; scope: string; apps: string[] } | undefined;
+  };
+  const run = pump(12);
+  // ⚠️ THE HARNESS ANSWERED EVERY ASK WITH ONE CANNED REPLY AND NEVER READ THE QUESTION. Dropping the
+  // persona from mbAskPreview entirely would have left every assertion here green while every preview
+  // in production answered for the wrong audience — the same family as the loop test that settled for
+  // the wrong reason. So check the payload, not just that something was sent.
+  const asked = lastAsk();
+  ok(!!asked && asked.scope === api.mbPersona.scope && asked.domain === api.mbPersona.domain
+    && asked.apps.slice().sort().join('+') === api.mbPersona.apps.slice().sort().join('+'),
+    `[ask] the Worker is asked about the persona actually on screen (${JSON.stringify(asked && { s: asked.scope, d: asked.domain, a: asked.apps })})`);
+  ok(!!asked && JSON.parse(asked.c) && Object.keys(JSON.parse(asked.c)).length > 0,
+    '[ask] and about the candidate config, not an empty one');
+  ok(run.settled && run.rounds < 12,
+    `[dom] the reply cycle reaches a standstill instead of redrawing forever (${run.asks} asks, ${run.rounds} rounds)`);
+  ok(askCount() <= 2, `[dom] and it asks the Worker once per real question, not once per redraw (${askCount()})`);
+
+  // The picture itself: hidden rows are struck through IN the menu rather than listed in a second section,
+  // and an added row sits in the same list. This is the whole layout decision, asserted once.
+  const appsPanel = host.children[0]!;
+  const rows = appsPanel.all('.fm');
+  const rowText = rows.map((r) => `${r.className}:${r.textContent}`);
+  ok(rows.some((r) => r.className.includes('hid') && r.textContent.includes('SNAPmobile Web')),
+    `[dom] a hidden stock entry is a struck-through row in the menu (${rowText.join(' | ')})`);
+  ok(rows.some((r) => r.className.includes('add') && r.textContent.includes('App Admin')),
+    '[dom] and an added entry is a marked row in the same menu, not a second section');
+
+  // ⚠️ THE IDENTITY OF A DRAWN ROW IS THE ENTRY AS WRITTEN, not as resolved. This entry's url carries a
+  // {variable}; the preview resolves with no user facts, so the plan's url is the template with the
+  // placeholder emptied. Matching by the resolved url found nothing and the row said "not editable here"
+  // — on exactly the entries that use the feature. The endpoint supplies the written form; nothing here
+  // re-derives the substitution.
+  const addRow = rows.find((r) => r.textContent.includes('App Admin'))!;
+  ok(addRow.all('button').some((b) => b.textContent === 'edit')
+    && addRow.all('button').some((b) => b.textContent === 'remove'),
+    `[dom] an entry whose url carries a variable is still editable (${addRow.textContent})`);
+  ok(!addRow.textContent.includes('not editable here'),
+    '[dom] and it does not claim otherwise');
+
+  // The kit's OWN rows are drawn and marked not-config: they are in the menu the user opens, they cannot
+  // be hidden by config (menuHide skips them), and a picture missing them invites an operator to add a
+  // link the menu already has.
+  const fixed = appsPanel.all('.fm').filter((r) => r.className.includes('fixed'));
+  ok(fixed.some((r) => r.textContent.includes('Sign in details')),
+    `[dom] the app sign-in row is drawn where the app is active (${fixed.map((f) => f.textContent).join(' | ')})`);
+  ok(fixed.every((r) => r.all('input').length === 0 && r.all('button').length === 0),
+    '[dom] with no control on it — there is nothing in the config to change');
+  ok(host.children[1]!.all('.fm').every((r) => !r.className.includes('fixed')),
+    '[dom] and only on the Apps menu, which is the one the kit appends to');
+  // ⚠️ AND ONLY WHEN THAT INTEGRATION IS THE ACTIVE ONE. They are one integration's sign-in block; drawn
+  // for ANY active app, a domain running a different one was promised a panel the portal would never
+  // render there (David, toggling documo on its own).
+  {
+    const apps = dom.byId['spkmb-apps']!.all('button');
+    const ringotel = apps.find((b) => b.textContent === 'ringotel')!;
+    const documo = apps.find((b) => b.textContent === 'documo')!;
+    documo.fire('click');                              // documo ON  → ringotel + documo
+    ringotel.fire('click');                            // ringotel OFF → documo only
+    pump(12);
+    ok(host.children[0]!.all('.fm').every((r) => !r.className.includes('fixed')),
+      '[dom] a different integration active alone draws no sign-in rows for this one');
+    ringotel.fire('click');
+    documo.fire('click');                              // back to ringotel only
+    pump(12);
+    ok(host.children[0]!.all('.fm').some((r) => r.className.includes('fixed')),
+      '[dom] and they come back when it is the active one');
+  }
+
+  // ── the placeholders are offered WHERE A URL IS TYPED ─────────────────────────────────────────────
+  // They were documented in the reference and nowhere near the box, so the feature existed for whoever
+  // had already read about it. Opening an entry's form must offer every variable the runtime accepts —
+  // from the module that validates them, so one this deployment would refuse at startup is unofferable.
+  addRow.all('button').find((b) => b.textContent === 'edit')!.fire('click');
+  const form = host.children[0]!.all('.fmvars')[0]!;
+  const chips = form.all('button');
+  ok(chips.length === MENU_VARS.length,
+    `[vars] every placeholder is offered at the point of use (${chips.map((c) => c.textContent).join(' ')})`);
+  ok(chips.every((c) => c.title.includes('—') && c.title.length > c.textContent.length + 3),
+    '[vars] and each says what it fills, rather than being a token you have to go look up');
+  // AT THE CARET, not appended: every url with a query string after the insertion point breaks otherwise.
+  const urlField = host.children[0]!.all('.mbin-url')[0]!;
+  urlField.value = 'https://x.example/?a=1&b=2';
+  (urlField as unknown as { selectionStart: number; selectionEnd: number }).selectionStart = 22;
+  (urlField as unknown as { selectionStart: number; selectionEnd: number }).selectionEnd = 22;
+  urlField.fire('focus');
+  chips.find((c) => c.textContent === '{ext}')!.fire('click');
+  ok(host.children[0]!.all('.mbin-url')[0]!.value === 'https://x.example/?a=1{ext}&b=2',
+    `[vars] inserted where the caret was (${host.children[0]!.all('.mbin-url')[0]!.value})`);
+
+  // Close it again: an open form suppresses the redraw on a preview reply (replacing the DOM under
+  // someone mid-keystroke is the complaint this whole rebuild answers), so leaving it open would make
+  // everything after this assert against a deliberately frozen picture.
+  host.children[0]!.all('.fmform')[0]!.all('button').find((b) => b.textContent === 'Done')!.fire('click');
+
+  // ── SEEDING A CARVE MUST KEEP THE TEMPLATE, NOT THE SUBSTITUTION ──────────────────────────────────
+  // A new rung is seeded with what the persona already gets — and "what they get" in the preview is the
+  // RESOLVED plan, in which every server-side {variable} has already been interpolated to empty, because
+  // the preview has no user facts. Seeding from it wrote the emptied url into the new rung and the
+  // result validated green: the operator's placeholder was gone and nothing said so. The raw forms are
+  // on the same reply. This is the assertion the fix had no guard for.
+  {
+    const addRows = host.children[0]!.all('.fm').filter((r) => r.className.includes('add'));
+    const addBtn = host.children[0]!.all('button').find((b) => b.textContent.startsWith('Add an entry'));
+    ok(!!addBtn, '[seed] the Apps menu offers a way in');
+    addBtn!.fire('click');
+    const prompt = host.children[0]!.all('.mbfork')[0]!;
+    // A CARVE, not the rung that already answered — that is the path that seeds.
+    prompt.all('button').find((b) => b.textContent.startsWith('just Office Manager'))!.fire('click');
+    const cfg = JSON.parse(dom.byId['spkmb-json']!.textContent) as
+      { apps: { add: { scopes?: Record<string, { url: string }[]> } } };
+    const carved = cfg.apps.add.scopes?.['Office Manager'] ?? [];
+    ok(carved.length > 0 && carved.some((e) => e.url.includes('{ext}')),
+      `[seed] the carved rung keeps the operator's placeholder, not the emptied substitution (${JSON.stringify(carved)})`);
+    ok(!carved.some((e) => /\?ext=$/.test(e.url)),
+      '[seed] and does not silently emit the interpolated form, which validates green while being wrong');
+    ok(addRows.length > 0, '[seed] (the persona genuinely had an added entry to seed from)');
+    // "Add an entry…" opens a form on a blank entry, and an open form deliberately suppresses the
+    // rebuild a preview reply would otherwise cause. Leaving it open makes every later assertion read a
+    // frozen picture — which is how the failure-branch block below started failing for a reason that had
+    // nothing to do with it. Done on a blank entry drops it and leaves the carved rung behind.
+    host.children[0]!.all('.fmform')[0]!.all('button').find((b) => b.textContent === 'Done')!.fire('click');
+  }
+
+
+  // A stock entry the portal only shows to someone with something to manage is WITHHELD while previewing
+  // a user who has nothing — and NAMED, because a picture that quietly shrinks is a different lie from the
+  // one being fixed. `My Account` is the case: the account menu relabels itself by context, and a Basic
+  // User is only ever in the row that says `Profile`. The fixture hides it by config too, so the third
+  // assertion covers the interaction — a hide naming a withheld row is working, not failing to match.
+  //
+  // Previewed as a BASIC USER, since the floor is what it is: an Office Manager manages a domain and sees
+  // the row. That means resolving a reply for that audience rather than reusing this block's — the harness
+  // answering with the wrong persona's plan is the failure mode the ask-payload assertions exist for.
+  {
+    const BASIC_CTX = { domain: 'acme.example', app: [] as string[], scope: 'Basic User' };
+    const REPLY_BASIC = (() => {
+      const matched = {} as never;
+      const rawAdds = {} as never;
+      const plan = resolveMenus({ PORTAL_MENUS: d.menus.raw } as never, BASIC_CTX as never, matched, rawAdds);
+      return { plan, matched, rawAdds, appsHide: appsHideSources({ PORTAL_MENUS: d.menus.raw } as never, BASIC_CTX as never) };
+    })();
+    const wasScope = api.mbPersona.scope, wasApps = api.mbPersona.apps.slice();
+    api.mbPersona.scope = 'Basic User';
+    api.mbPersona.apps = [];
+    api.mbRebuild();
+    dom.flush();
+    api.mbOnResolve(REPLY_BASIC, askedIds().pop());
+    const acctB = host.children[1]!;
+    ok(!acctB.all('.fm').some((r) => r.textContent.includes('My Account')),
+      `[scope] a row this reader's scope never sees is not drawn for them (${acctB.all('.fm').map((r) => r.textContent).join(' | ')})`);
+    ok(acctB.all('.fmfoot').some((f) => f.textContent.includes('My Account') && f.textContent.includes('your own session')),
+      '[scope] and the picture says what it withheld rather than quietly shrinking');
+    ok(!acctB.all('.fmfoot').some((f) => f.textContent.includes('not on this page')),
+      '[scope] a hide naming a withheld row is not then reported as matching nothing — it is doing its job');
+    // Back to the audience the rest of this block is written about.
+    api.mbPersona.scope = wasScope;
+    api.mbPersona.apps = wasApps;
+    api.mbRebuild();
+    dom.flush();
+    api.mbOnResolve(REPLY, askedIds().pop());
+  }
+  const acct = host.children[1]!;
+  ok(acct.all('.fm').some((r) => r.textContent.includes('My Account')),
+    '[scope] while an Office Manager, who does manage something, is shown the row (and its hide)');
+  ok(appsPanel.all('.halfhead').length === 0,
+    '[dom] "Hidden entries" and "Added entries" are gone as headings — one picture, per the layout decision');
+
+  // ── THE FAILURE BRANCH, EXECUTED ──────────────────────────────────────────────────────────────────
+  // Never run until now: the harness only ever delivered a successful reply, and the claim that a failed
+  // preview does not draw a menu was a grep for /return;/ that any later function satisfied. An empty
+  // plan drawn as a menu asserts "nothing is hidden or added for this audience", which is a confident
+  // wrong answer when the truth is that we could not ask.
+  const before = api.mbPersona.domain;
+  for (const [i, bad] of [{ unavailable: 'the Worker could not be reached.' },
+    { invalid: 'apps.hide must be an array' }].entries()) {
+    // A reply is only applied while an ask is outstanding — which is the guard that stops a late reply
+    // being taken for an answer to a question nobody asked. So genuinely ask first: change the persona,
+    // let the debounce fire, and answer THAT.
+    api.mbPersona.domain = `bad${i}.example`;
+    api.mbRebuild();
+    dom.flush();
+    api.mbOnResolve(bad);
+    const drawn = host.all('.fm');
+    const notice = host.all('.pv-bad').map((n) => n.textContent).join(' | ');
+    ok(drawn.length === 0, `[failed] ${Object.keys(bad)[0]}: nothing menu-shaped is drawn (${drawn.length} rows)`);
+    ok(host.all('.fake').length === 0, `[failed] ${Object.keys(bad)[0]}: not even an empty menu frame`);
+    ok(notice.includes('Preview unavailable') || notice.includes('cannot be resolved'),
+      `[failed] ${Object.keys(bad)[0]}: and it says which of the two happened (${notice})`);
+  }
+  api.mbPersona.domain = 'unavail.example';
+  api.mbRebuild();
+  dom.flush();
+  api.mbOnResolve({ unavailable: 'the Worker could not be reached.' });
+  ok(host.all('.pv-bad').some((n) => n.textContent.includes('Nothing below is a statement about your config')),
+    '[failed] could-not-ask is not reported as a fact about the config');
+  api.mbPersona.domain = before;
+  api.mbRebuild();
+  dom.flush();
+
+  // Back to a good reply, or everything after this asserts against a deliberately blank picture.
+  api.mbPersona.domain = before;
+  api.mbRebuild();
+  dom.flush();
+  api.mbOnResolve(REPLY);
+  ok(host.all('.fm').length > 0, '[failed] and a good reply afterwards restores the picture');
+
+  // ── A LATE ANSWER TO A QUESTION THAT IS NO LONGER ON SCREEN ───────────────────────────────────────
+  // Asking again does not cancel the round-trip already in flight, so two answers can be outstanding and
+  // can land in either order. Untagged, the first one to arrive was handed to the callback waiting for
+  // the second — the picture drawn from a config nobody is looking at — and it emptied the slot, so the
+  // RIGHT answer was then dropped with the no-repeat guard already holding the newer key. Nothing ever
+  // re-asked. The second assertion below is the one that fails without the id: the correct answer must
+  // still be able to land after a stale one has been ignored.
+  {
+    const shows = (what: string) => host.children[0]!.all('.fm').some((r) => r.textContent.includes(what));
+    ok(shows('App Admin'), '[stale] the picture starts from the answer to the question on screen');
+    // Q1 — a different audience: no apps active, so this config adds nothing to the Apps menu. Its answer
+    // is therefore visibly different from the one already drawn, which is what makes the race observable.
+    api.mbPersona.apps = [];
+    api.mbRebuild();
+    dom.flush();
+    const rid1 = askedIds().pop();
+    const NONE_CTX = { domain: api.mbPersona.domain, app: [] as string[], scope: api.mbPersona.scope };
+    const REPLY_NONE = (() => {
+      const matched = {} as never;
+      const rawAdds = {} as never;
+      const plan = resolveMenus({ PORTAL_MENUS: d.menus.raw } as never, NONE_CTX as never, matched, rawAdds);
+      return { plan, matched, rawAdds, appsHide: appsHideSources({ PORTAL_MENUS: d.menus.raw } as never, NONE_CTX as never) };
+    })();
+    // Q2 — the operator moves on before Q1 comes back. This is now the question on screen.
+    api.mbPersona.apps = ['ringotel'];
+    api.mbRebuild();
+    dom.flush();
+    const rid2 = askedIds().pop();
+    ok(typeof rid1 === 'number' && typeof rid2 === 'number' && rid1 !== rid2,
+      `[stale] each question carries its own id (${String(rid1)} → ${String(rid2)})`);
+    // Q1's answer arrives now, late and correct — about an audience nobody is looking at.
+    api.mbOnResolve(REPLY_NONE, rid1);
+    ok(shows('App Admin'),
+      '[stale] a late answer to the previous question does not redraw the picture for this one');
+    api.mbOnResolve(REPLY, rid2);
+    ok(shows('App Admin'),
+      '[stale] and the answer to the question on screen still lands — the stale one did not consume the '
+      + 'slot it was waiting in, which is what left the wrong picture up with nothing left to re-ask');
+  }
+
+
+  // ── EDITING HAPPENS IN THE PICTURE, and the first edit asks where it lands ─────────────────────────
+  // The tick is ambiguous by construction once two apps can be active, so the fork question is not
+  // decoration: without it a tick silently widens to an audience the operator is not looking at.
+  const box = rows.find((r) => r.textContent.includes('Attendant Console'))!.all('input')[0]!;
+  box.checked = true;
+  box.fire('change');
+  const fork = host.children[0]!.all('.mbfork');
+  ok(fork.length === 1, `[dom] the first edit to a half asks where it should land (${fork.length} prompts)`);
+  const opts = fork[0]!.all('button');
+  ok(opts.some((b) => b.textContent.includes('ringotel')),
+    '[dom] offering the shared rule that answered — named as the operator wrote it');
+  ok(opts.some((b) => b.textContent.includes('Office Manager')),
+    '[dom] and a narrower rule for exactly the persona being previewed');
+
+  // Answer it: the edit that was held is applied, and the answer STICKS — a second tick must not re-ask.
+  opts.find((b) => b.textContent.includes('ringotel'))!.fire('click');
+  const cfg1 = JSON.parse(dom.byId['spkmb-json']!.textContent) as
+    { apps: { hide: { app: { ringotel: string[] } } } };
+  ok(cfg1.apps.hide.app.ringotel.includes('Attendant Console'),
+    `[dom] the held edit lands in the rung that was chosen (${JSON.stringify(cfg1.apps.hide)})`);
+  // One line PER HALF that has an answer — this menu now has an add target too, carved by the seeding
+  // block above, and each half's line must name its own target rather than the count being pinned.
+  const whereLines = host.children[0]!.all('.mbwhere').map((w) => w.textContent);
+  ok(whereLines.some((w) => w.startsWith('Hiding lands in') && w.includes('ringotel')),
+    `[dom] and a persistent line says where hides are landing while the answer is stuck (${whereLines.join(' | ')})`);
+  ok(whereLines.every((w) => /^(Hiding|Adding) lands in \S/.test(w)),
+    '[dom] each line names its own half and a target, rather than being a bare marker');
+
+  const box2 = host.children[0]!.all('.fm').find((r) => r.textContent.includes('User Portal'))!.all('input')[0]!;
+  box2.checked = true;
+  box2.fire('change');
+  ok(host.children[0]!.all('.mbfork').length === 0, '[dom] a second edit to the same half does not ask again');
+  const cfg2 = JSON.parse(dom.byId['spkmb-json']!.textContent) as
+    { apps: { hide: { app: { ringotel: string[] } } } };
+  ok(cfg2.apps.hide.app.ringotel.includes('User Portal'),
+    '[dom] it goes straight to the stuck target');
+
+  // THE RAIL, and the one property that decides whether it helps or repeats the failure it replaces: each
+  // rule is filed under the menu it belongs to. A Reseller answer sitting beside the Management panel
+  // while showing Apps data is the lost-track failure moved one column right.
+  const rules = dom.byId['spkmb-rules']!;
+  const groups = rules.all('.railmenu').map((g) => g.textContent);
+  ok(groups.includes('Apps') && groups.includes('Account'),
+    `[rail] rules are grouped under the menu they belong to (${groups.join(', ')})`);
+  const appsGroupAt = rules.children.indexOf(rules.all('.railmenu').find((g) => g.textContent === 'Apps')!);
+  const acctGroupAt = rules.children.indexOf(rules.all('.railmenu').find((g) => g.textContent === 'Account')!);
+  const appsRules = rules.children.slice(appsGroupAt + 1, acctGroupAt).map((r) => r.textContent).join(' | ');
+  const acctRules = rules.children.slice(acctGroupAt + 1).map((r) => r.textContent).join(' | ');
+  ok(appsRules.includes('ringotel') && !acctRules.includes('ringotel'),
+    `[rail] and the Apps rule is filed under Apps, not floating (apps: ${appsRules} / account: ${acctRules})`);
+  ok(rules.all('.rule').some((r) => r.className.includes('live')),
+    '[rail] and the rule that answered for this persona is marked as applying now');
+  const changed = dom.byId['spkmb-changed']!;
+  ok(changed.textContent.includes('Attendant Console') && changed.textContent.includes('User Portal'),
+    `[rail] the change log names what this session actually did (${changed.textContent})`);
+
+  // ── THE LIMIT, SAID WHERE IT CANNOT BE MISSED ─────────────────────────────────────────────────────
+  // The rules are exact; the stock entries are one session's DOM read as whoever opened it. Without this
+  // said out loud the picture invites the belief it is what that role sees — which is a worse failure
+  // than the list of labels it replaced, because it looks authoritative. It appears only when the persona
+  // is somebody else: on your own scope the entries are your own, and a caveat that is always on screen
+  // is one nobody reads.
+  const caveat = dom.byId['spkmb-caveat']!;
+  ok(!caveat.hidden && caveat.textContent.includes('Office Manager') && caveat.textContent.includes('Super User'),
+    `[caveat] previewing another role names both roles and says the entries are approximate (${caveat.textContent.slice(0, 80)}…)`);
+  ok(/rules below are exact/i.test(caveat.textContent) && /stock entries are not/i.test(caveat.textContent),
+    '[caveat] and separates what IS exact from what is not, rather than hedging both');
+  ok(/Remember this role/i.test(caveat.textContent) && /a hide still works on the rest/i.test(caveat.textContent),
+    '[caveat] and says what to do about it — both the real fix and the one available right now, because a '
+    + 'limit with no remedy is just discouragement');
+
+  // ── A MENU THE READER DOES NOT HAVE ───────────────────────────────────────────────────────────────
+  // Every applier finds its menu before it applies anything and returns when it is not there, so an add
+  // aimed at a menu this reader does not have never happens. The panel is drawn anyway (you can still
+  // write config for it), which is exactly why it has to say so — a drawn menu looks like somewhere an
+  // entry could go. Management is absent from LIVE here and there is no capture yet, so this is the
+  // weaker of the two sentences: it is a fact about the reader's own page, not about the persona.
+  {
+    const mgmt = host.children[2]!.textContent;
+    ok(/only ever\s+added to a menu the reader already has/.test(mgmt.replace(/\s+/g, ' ')),
+      `[absent] a menu missing from this page says an add would not appear (${mgmt.slice(0, 120)})`);
+    ok(/Remember this role/.test(mgmt),
+      '[absent] and points at the one thing that would settle it for another role');
+  }
+
+  // ── A CAPTURE REPLACES THE APPROXIMATION ──────────────────────────────────────────────────────────
+  // The whole point of capturing a role's menus while masquerading: the picture stops being drawn from
+  // the reader's own page. Delivered the way the bridge delivers it, then asserted on the DRAWN ROWS —
+  // a test that only checked the caveat text would pass with the capture stored and never used.
+  api.mbOnStock({
+    'office manager': {
+      scope: 'Office Manager',
+      at: new Date('2026-08-09T00:00:00Z').getTime(),
+      // The context the capture was taken in. Without it the picture pairs a role's real entries with
+      // whatever the persona bar happened to say — David, on his own capture: a Basic User on a domain
+      // with no app still had that app's entry struck through, because the toggles default to all-on.
+      domain: 'other.example',
+      appRows: false,
+      // Management ABSENT for this role, which is the real shape: it is shown to administrative scopes
+      // only, so an Office Manager on many portals has no such dropdown at all.
+      menus: { apps: { present: true, entries: ['User Portal', 'Softphone'] },
+        management: { present: false, entries: [] } },
+    },
+  });
+  pump(12);
+  // ⚠️ THE APP STATE IS ADOPTED; THE DOMAIN IS OFFERED. A capture is about a ROLE, and filling its domain
+  // in silently adds a second dimension to what you are editing — a domains rung outranks everything, so
+  // the preview and the fork's narrower option both become specific to one customer without anyone
+  // choosing it. It also could not be undone: adopt-once is per capture, so switching to a SECOND
+  // captured role filled the field again and a Clear never survived (David, on his own two captures).
+  ok(api.mbPersona.apps.length === 0,
+    `[capture] the app state the capture observed is adopted (${api.mbPersona.apps.join('+') || 'none'})`);
+  ok(api.mbPersona.domain !== 'other.example',
+    `[capture] but the DOMAIN is not — narrowing to one customer is a decision, not a side effect (${api.mbPersona.domain})`);
+  ok(dom.byId['spkmb-apps']!.all('button').every((b) => b.getAttribute('aria-pressed') === 'false'),
+    '[capture] and the controls show what was adopted, rather than disagreeing with what is drawn');
+  ok(/No app rows were on that page/.test(caveat.textContent) && /an inference, not a reading/.test(caveat.textContent),
+    '[capture] the app state is reported as the inference it is — one bit of evidence, and absence is ambiguous');
+  // Adopted ONCE. An operator who turns a toggle back on must not have it reset under them by the next
+  // preview reply, which arrives every time anything changes.
+  api.mbPersona.apps = ['ringotel'];
+  api.mbOnStock(api.mbStockRaw());
+  ok(api.mbPersona.apps.join('') === 'ringotel',
+    '[capture] and adopting is once per capture, so a correction sticks');
+  const appsRows = host.children[0]!.all('.fm').map((r) => r.textContent).join(' | ');
+  ok(appsRows.includes('Softphone') && !appsRows.includes('Attendant Console'),
+    `[capture] the picture is drawn from the captured role, not from the reader's own menus (${appsRows})`);
+  ok(caveat.textContent.includes('capture of Office Manager') && /days ago|today|yesterday/.test(caveat.textContent),
+    `[capture] and the caveat becomes the capture's age, because a snapshot presented as current is the next wrong answer (${caveat.textContent.slice(0, 90)})`);
+  ok(!/stock entries are not/i.test(caveat.textContent),
+    '[capture] the approximation warning is replaced, not stacked on top of it');
+  // A menu the capture does not carry falls back rather than rendering empty — an empty menu is a claim.
+  ok(host.children[1]!.all('.fm').some((r) => r.textContent.includes('My Account')),
+    '[capture] a menu missing from the capture falls back to this session rather than drawing nothing');
+  // ⚠️ CARRIED-AND-EMPTY IS NOT MISSING. The capture says this role HAS no Management menu, which is
+  // evidence about the role rather than about the reader — so the sentence gets stronger, and it is the
+  // question an operator actually has: will the entry I add here show up? (David, 2026-08-11.)
+  {
+    const mgmt = host.children[2]!.textContent.replace(/\s+/g, ' ');
+    ok(/has no Management menu/.test(mgmt) && /this role does not get one/.test(mgmt),
+      `[absent] a capture with the menu absent says so about the ROLE (${mgmt.slice(0, 140)})`);
+    ok(/the kit never creates one/.test(mgmt),
+      '[absent] and answers the question directly: nothing configured here will appear for them');
+  }
+
+  // ── AN AUTO-FILLED DOMAIN MUST NOT BE MISSED ──────────────────────────────────────────────────────
+  // It is not cosmetic. A domains rung outranks every other rule, so a domain sitting in that box makes
+  // the preview AND the fork's carve options specific to one customer — an operator making a fleet-wide
+  // change would be looking at one domain and offered "just that domain" as their narrower option. The
+  // capture filling it is correct and useful; being unable to tell that it happened is the defect.
+  // The domains the captures came from, OFFERED under the field — for any role, not only the one they
+  // were taken on. A domain is a domain, and previewing one role against a domain you happened to
+  // capture another on is an ordinary thing to want.
+  const note = dom.byId['spkmb-domnote']!;
+  ok(note.textContent.includes('Captured from') && note.textContent.includes('other.example'),
+    `[domain] the captured domain is offered, not applied (${note.textContent})`);
+  const offer = note.all('button').find((b) => b.textContent === 'other.example')!;
+  ok(!!offer, '[domain] as something to click');
+  offer.fire('click');
+  ok(api.mbPersona.domain === 'other.example' && dom.byId['spkmb-domain']!.value === 'other.example',
+    '[domain] clicking it narrows the preview, which is now a decision the operator made');
+  ok(!dom.byId['spkmb-domnote']!.textContent.includes('other.example'),
+    '[domain] and it stops being offered once it is in the field — a control that does nothing is worse than none');
+  const clearBtn = dom.byId['spkmb-domclear']!.all('button')[0];
+  ok(!!clearBtn && clearBtn.textContent === 'Clear', '[domain] with a way out beside the field');
+  clearBtn!.fire('click');
+  ok(api.mbPersona.domain === '' && dom.byId['spkmb-domain']!.value === '',
+    '[domain] clearing it clears the persona too');
+  ok(dom.byId['spkmb-domclear']!.all('button').length === 0,
+    '[domain] and the control goes away with nothing left to clear');
+  // ⚠️ AND A CLEAR SURVIVES A ROLE SWITCH. The bug this replaced: adopt-once is per capture, so moving to
+  // a second captured role adopted ITS domain and the field filled itself again.
+  const sel0 = dom.byId['spkmb-scope']!;
+  const was = sel0.value;
+  sel0.value = 'Reseller'; sel0.fire('change');
+  sel0.value = was; sel0.fire('change');
+  ok(api.mbPersona.domain === '',
+    `[domain] and switching roles does not fill it back in (${api.mbPersona.domain})`);
+
+  // ── ARMING CAPTURE, and being able to tell whether it worked ──────────────────────────────────────
+  const cap = dom.byId['spkmb-capture']!;
+  ok(cap.textContent.includes('Arm capture before you masquerade'),
+    `[arm] the console offers to arm capture, which is the only place you can do it before one starts (${cap.textContent.slice(0, 60)})`);
+  ok(cap.textContent.includes('Captured: Office Manager') && /\d+ entries/.test(cap.textContent),
+    `[arm] and says what is stored, with the entry count that makes a mid-load capture visible (${cap.textContent})`);
+  const armBox = cap.all('input')[0]!;
+  armBox.checked = true;
+  armBox.fire('change');
+  const armed = dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.stockRequest)
+    .map((m) => m[SPK_BRIDGE.stockKey]).filter(Boolean);
+  ok(armed.some((q) => (q as { mode?: boolean }).mode === true),
+    `[arm] ticking it asks the PARENT to store the mode — this frame has no storage of its own (${JSON.stringify(armed)})`);
+  // Armed state comes back from the store, never from the checkbox: the frame is not the authority.
+  api.mbOnStock({ ...(api.mbStockRaw() as Record<string, unknown>), __mode: { on: true, at: 1 } });
+  ok(dom.byId['spkmb-capture']!.textContent.includes('beside End Masquerade'),
+    '[arm] and once the store says it is armed, the panel says where the button will be');
+
+  // ── THE TWO FOOT CONTROLS BELONG TO DIFFERENT HALVES ──────────────────────────────────────────────
+  // They were on one row with a single button between them, so the button next to the hide box belonged
+  // to the ADD half and the hide box answered only to Enter. Nothing in the emitted source said which
+  // control drove which — the reader had to try it.
+  {
+    const panel = host.children[2]!;                       // Management: no config, so both are offered
+    const feet = panel.all('.fmfoot');
+    const addFoot = feet.find((f) => f.all('button').some((b) => b.textContent.startsWith('Add an entry')));
+    const hideFoot = feet.find((f) => f.all('input').length);
+    ok(!!addFoot && !!hideFoot && addFoot !== hideFoot,
+      '[foot] the add control and the hide-by-name control are separate rows');
+    ok(hideFoot!.all('button').some((b) => b.textContent === 'Hide it'),
+      '[foot] and the hide box has its own button, not the neighbouring half\'s');
+    ok(!addFoot!.all('input').length,
+      '[foot] with no input beside the add button to be mistaken for its argument');
+    // And it works by click, not only by Enter — which was the whole of the confusion.
+    const box = hideFoot!.all('input')[0]!;
+    box.value = 'Some Vendor Thing';
+    hideFoot!.all('button').find((b) => b.textContent === 'Hide it')!.fire('click');
+    const askedOrDone = host.children[2]!.all('.mbfork').length > 0
+      || JSON.stringify(JSON.parse(dom.byId['spkmb-json']!.textContent)).includes('Some Vendor Thing');
+    ok(askedOrDone, '[foot] clicking Hide it acts — asking where it lands counts, typing Enter is not required');
+  }
+
+  // ── THE PICKER SAYS WHICH ROLES YOU HAVE ──────────────────────────────────────────────────────────
+  // ⚠️ Bold AND a word. font-weight on an <option> is honoured by some browsers and dropped by others —
+  // macOS draws that menu natively — so a signal that is only weight is invisible on the machine the
+  // operator uses. The text always renders.
+  {
+    const opts = dom.byId['spkmb-scope']!.all('option');
+    const captured = opts.filter((o) => /\(captured\)/.test(o.textContent));
+    ok(captured.length > 0 && captured.every((o) => o.style.fontWeight === '700'),
+      `[picker] a role with a capture is marked in the picker (${captured.map((o) => o.textContent).join(', ')})`);
+    ok(opts.filter((o) => !/\(captured\)/.test(o.textContent)).every((o) => !o.style.fontWeight),
+      '[picker] and one without is left plain');
+    // ⚠️ The VALUE is untouched — it is what the persona is read from, and marking must not rename a
+    // scope into one no rung could spell.
+    ok(opts.every((o) => KNOWN_SCOPES.includes(o.value)),
+      '[picker] the option VALUES stay the scopes themselves, whatever the labels say');
+    // Rebuilt from the value each pass, or a redraw says "(captured) (captured)". Redrawn several times
+    // AND with a deliberately dirtied value, because that is the one input another pass could poison and
+    // the result is silent and permanent once it happens.
+    api.mbRebuild(); api.mbRebuild(); api.mbRebuild();
+    const twice = (t: string) => (t.match(/\(captured\)/g) || []).length > 1;
+    ok(!dom.byId['spkmb-scope']!.all('option').some((o) => twice(o.textContent)),
+      `[picker] redrawing does not stack the marker (${dom.byId['spkmb-scope']!.all('option').map((o) => o.textContent).join(' | ')})`);
+    const dirty = dom.byId['spkmb-scope']!.all('option').find((o) => /\(captured\)/.test(o.textContent))!;
+    dirty.value = `${dirty.value} (captured)`;
+    // The marker function directly, not through a redraw: this is a unit test of the STRIP, and routing
+    // it through mbRebuild would have it depend on whatever else that does first.
+    api.mbMarkScopes();
+    ok(!twice(dirty.textContent) && KNOWN_SCOPES.includes(dirty.value),
+      `[picker] and a value that somehow arrived already marked is cleaned rather than compounded (text="${dirty.textContent}" value="${dirty.value}")`);
+  }
+
+  // ── FORGET THE CAPTURES ────────────────────────────────────────────────────────────────────────────
+  // Understated on purpose: for debugging and for people who like a clean slate, not something to reach
+  // for by accident. ⚠️ TWO CLICKS RATHER THAN A confirm(): this frame is sandboxed without allow-modals,
+  // so confirm() and alert() are blocked in it — the same class of fact that made the Copy button
+  // silently do nothing for months and localStorage unavailable here. A confirmation that never appears
+  // would either destroy the captures without asking or do nothing at all.
+  const capPanel = () => dom.byId['spkmb-capture']!;
+  const forget = () => capPanel().all('button').find((b) => /forget/i.test(b.textContent));
+  ok(!!forget(), '[forget] there is a way to start fresh');
+  const postsBefore = dom.posts.length;
+  forget()!.fire('click');
+  ok(dom.posts.length === postsBefore, '[forget] the first click sends nothing — it asks');
+  ok(/click again/i.test(forget()!.textContent), `[forget] and says so (${forget()!.textContent})`);
+  forget()!.fire('click');
+  const cleared = dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.stockRequest)
+    .map((m) => m[SPK_BRIDGE.stockKey]).filter((q) => (q as { clear?: boolean })?.clear === true);
+  ok(cleared.length === 1,
+    `[forget] the second click asks the parent to forget them, since this frame has no storage (${JSON.stringify(cleared)})`);
+  // The parent keeps the arming and drops the captures — one is data the operator gathered by walking
+  // around the portal, the other is a preference about how the tool behaves.
+  api.mbOnStock({ __mode: { on: true, at: 1 } });
+  ok(capPanel().textContent.includes('Nothing captured yet')
+    && capPanel().textContent.includes('beside End Masquerade'),
+    `[forget] and the panel comes back empty but still armed (${capPanel().textContent.slice(0, 70)})`);
+  ok(!capPanel().all('button').some((b) => /forget/i.test(b.textContent)),
+    '[forget] with nothing left to forget, the control is gone');
+
+  // Changing the persona RESETS the fork: the answer was about one audience, and carrying it to another is
+  // exactly the silent widening the indicator exists to prevent.
+  const scopeSel = dom.byId['spkmb-scope']!;
+  scopeSel.value = 'Reseller';
+  scopeSel.fire('change');
+  pump(12);
+  ok(!host.children[0]!.all('.mbwhere').some((w) => w.textContent.includes('ringotel')),
+    '[dom] the stuck target does not survive a persona change');
+  const box3 = host.children[0]!.all('.fm').find((r) => r.textContent.includes('Attendant Console'))!;
+  const cb3 = box3.all('input')[0]!;
+  cb3.checked = !cb3.checked;
+  cb3.fire('change');
+  ok(host.children[0]!.all('.mbfork').length === 1,
+    '[dom] and the next edit asks again, against the audience now on screen');
+}
+
+// ── the persona opens on the READER'S OWN scope ──────────────────────────────────────────────────────
+// Not the head of the scope list. Their own is the one persona whose stock entries are genuinely
+// accurate — they came off their page, as them — so it is the only starting point that is not already an
+// approximation, and it is what keeps the caveat above correctly silent until you move off it. It also
+// matters practically: this console is reachable by Reseller and above, so the head of the list is a
+// scope its own operator may have no account for.
+{
+  const forScope = (scope: string): string => {
+    const doc = buildStatus(
+      { NS_SERVER: 'api.example.com', NS_PORTAL_ISS: 'manage.example.com', PORTAL_MODE: '1',
+        PORTAL_HANDOFF_URL: '', PORTAL_SUPERADMINS: 'boss@example.com', CACHE_SCOPE: 'dev' },
+      { principal: P(scope, 'boss@example.com'), hostname: 'svc.example.com' });
+    const html = statusHtml(doc);
+    const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+    const dom = makeDom(['spkmb-status', 'spkmb-menus', 'spkmb-out', 'spkmb-json', 'spkmb-wr',
+      'spkmb-verdict', 'spkmb-reset', 'spkmb-scope', 'spkmb-apps', 'spkmb-domain', 'spkmb-appswrap',
+      'spkmb-changed', 'spkmb-caveat', 'spkmb-capture', 'spkmb-domclear', 'spkmb-domnote', 'spkmb-rules']);
+    const api = runInNewContext(
+      builderSource(script, '{ mbStart: mbStart, mbPersona: mbPersona }'), dom.ctx,
+    ) as { mbStart: (l: unknown) => void; mbPersona: { scope: string } };
+    api.mbStart({});
+    return api.mbPersona.scope;
+  };
+  ok(forScope('Reseller') === 'Reseller', `[persona] a Reseller opens previewing as a Reseller (got ${forScope('Reseller')})`);
+  ok(forScope('Super User') === 'Super User', '[persona] and a Super User as a Super User');
+  // A scope the deployment does not know cannot go in the picker — it would be unspellable in a rung and
+  // refused at startup — so it falls back rather than seeding a value nothing accepts.
+  ok(KNOWN_SCOPES.includes(forScope('Nonesuch')), '[persona] and an unknown scope falls back to one the picker can offer');
 }
 
 // ── the menu builder seeds from NORMALIZED keys (Fable review, 2026-08-09) ─────────────────────────────
@@ -1131,6 +2352,52 @@ const DOC = () => buildStatus(
   const html = statusHtml(d);
   const seedLine = html.slice(html.indexOf('MB_BASE'), html.indexOf('MB_BASE') + 400);
   ok(!seedLine.includes('</script>'), 'a label cannot terminate the script element it is embedded in');
+}
+
+// ── AN UNTOUCHED CONFIG COMES BACK BYTE FOR BYTE ──────────────────────────────────────────────────────
+// The CHANGELOG makes this claim and it was not quite true. `menuItemAt` reads label/url/title and ignores
+// every other key, so `{"label","url","note"}` is valid running config — and the editor rebuilt each entry
+// from the three fields it understands, dropping the rest and normalising the key order, on menus nobody
+// had opened. An empty flat list went the same way. Neither is a change to what the config DOES, which is
+// precisely why they are pure noise in the diff the operator runs before pasting: a menu they never
+// touched shows up as changed, and the change they did make is one line further down.
+{
+  const written = {
+    apps: {
+      // A key that means "nothing", written down. Dropping it is not tidying — it is a diff on an
+      // untouched menu.
+      hide: [],
+      // Key order as the operator typed it, and a key this editor has no idea about.
+      add: [{ url: 'https://a.example/x', label: 'Alpha', note: 'why this is here' }],
+    },
+    account: {
+      hide: { scopes: { Reseller: [] }, '*': ['My Account'] },
+      add: { '*': [{ label: 'Beta', title: 'tip', url: 'https://b.example/y', note: 'keep me' }] },
+    },
+  };
+  const raw = JSON.stringify(written);
+  ok(menuConfigError({ PORTAL_MENUS: raw }) === null,
+    `[roundtrip] the premise: a config carrying an unknown key is accepted and runs (${menuConfigError({ PORTAL_MENUS: raw })})`);
+
+  const d = DOC();
+  d.menus.raw = raw;
+  const html = statusHtml(d);
+  const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+  const dom = makeDom(['spkmb-status', 'spkmb-menus', 'spkmb-out', 'spkmb-json', 'spkmb-wr', 'spkmb-verdict',
+    'spkmb-reset', 'spkmb-scope', 'spkmb-apps', 'spkmb-domain', 'spkmb-appswrap', 'spkmb-changed',
+    'spkmb-caveat', 'spkmb-capture', 'spkmb-domclear', 'spkmb-domnote', 'spkmb-rules']);
+  const api = runInNewContext(builderSource(script, '{ mbStart: mbStart }'), dom.ctx) as
+    { mbStart: (live: unknown) => void };
+  api.mbStart({ apps: { present: true, entries: ['User Portal'] },
+    account: { present: true, entries: ['My Account', 'Log Out'] },
+    management: { present: false, entries: [] } });
+
+  const emitted = dom.byId['spkmb-json']!.textContent;
+  ok(emitted === JSON.stringify(written, null, 2),
+    `[roundtrip] a config nobody edited is emitted exactly as it was written\n--- emitted ---\n${emitted}\n--- written ---\n${JSON.stringify(written, null, 2)}`);
+  // And the wrangler line is the same value, escaped — the thing actually pasted into the config file.
+  ok(dom.byId['spkmb-wr']!.textContent === `"PORTAL_MENUS": ${JSON.stringify(raw)}`,
+    '[roundtrip] and the wrangler line escapes that same value, not a re-serialised one');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

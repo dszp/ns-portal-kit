@@ -24,7 +24,7 @@ shows every setting *with the value yours currently has*, its real default, and 
 - [Self-service app access](#group-appaccess) — `RINGOTEL_SSO_SERVICE` · `SSO_AUTO_ACTIVATE` · `PORTAL_APP_DOWNLOADS`
 - [Change events](#group-events) — the 15 `NS_EVENTS_*` settings
 - [Background service identity](#group-identity) — `NS_API_KEY`, or admin credentials + OAuth
-- [Branding](#group-branding) — `BRAND_NAME` · `BRAND_ACCENT` · `BRAND_LABEL`
+- [Branding](#group-branding) — `BRAND_NAME` · `BRAND_ACCENT`
 - [Worker bindings](#group-bindings) — `ASSETS` · `JWT_RATE_LIMITER`
 - **Reference sections**
   - [Features and gating](#features-and-gating) — the level vocabulary, the feature registry, `PORTAL_FEATURES`, resolution rules
@@ -357,6 +357,14 @@ would break on portal updates and would turn an environment variable into a DOM-
 | `account` | the signed-in user's **own name** dropdown | into the first group, **above** the divider and the sign-out entry |
 | `management` | the top-nav **Management** dropdown — **not stock**, added by a vendor add-on, shown to administrative scopes only. Targeting it on a portal that lacks it is not an error; nothing appears. | appended at the **end** |
 
+**⚠ A menu is modified, never created.** Each of these is found in the page before anything is applied, so
+an entry aimed at a menu a given reader does not have is simply absent for them — no error, no empty menu
+conjured to hold it. This is per **reader**, not per portal: `Management` is shown to administrative scopes
+only, so adding an entry to it for an Office Manager who has no Management dropdown changes nothing they
+see. The same is true of `apps` and `account` wherever a portal omits them. If you are unsure whether a
+role has a menu, masquerade as one and use the console's **Remember this role** button — the builder then
+draws that role's real menus and says outright when one of them is absent.
+
 An unknown menu name is a startup error. The `account` menu carries no id and shares a generic class with
 other dropdowns, so it is located by its sign-out entry — the one item present in every variant. The
 `management` menu likewise has no id and its toggle carries no link, so it is found by the toggle's
@@ -385,6 +393,22 @@ hiding it removes a modal launcher rather than a link to somewhere. `My Account`
 **Hides are applied before adds.** A hide names a *stock* entry, so it acts on the menu as the portal
 shipped it, before any of your own entries exist. That keeps the two lists independent: a hide can never
 remove something you added, and neither list's meaning depends on the other.
+
+<a id="DOCUMO_DOMAINS"></a>
+
+### `DOCUMO_DOMAINS` · `vars`
+
+Which domains count as running the fax integration, **for menu targeting only**.
+
+- **Example** `acme.example`, or `*` for every domain
+- **Why it exists** A menu rule can target `app`, and one of the app names is `documo`. That integration
+  cannot answer "am I active on this domain?" yet, so this answers for it. When it ships, it answers
+  directly and this becomes an override rather than the source.
+- **Unset** No domain counts as running it — the state every deployment is in today. A menu rule naming
+  `documo` is then written but inert, which is legitimate ahead-of-launch config: the console's menu
+  preview resolves against the audience you ask for, not against live state, so you can write and check
+  those rules before the integration exists.
+- **It changes nothing else.** Nothing outside menu targeting reads it.
 
 <a id="PORTAL_APPS_HIDE"></a>
 
@@ -746,6 +770,9 @@ Which domains get a subscription.
 - **Dropping a domain removes its subscription** on the next reconcile. So does emptying the list — see
   [retiring the feature](#events-reference).
 - It names real customer domains: treat it like the write rail.
+- **This value is a request, not a report.** What is subscribed lives in NetSapiens. The
+  event-subscription check on the console's **Checks** tab lists every subscription this deployment owns,
+  with its expiry — including one still live for a domain this list no longer names.
 
 <a id="NS_EVENTS_BASE_URL"></a>
 
@@ -959,20 +986,11 @@ Your company name. Produces `"Acme Voice Portal Kit v<version>"` and an `"Acme V
 
 ### `BRAND_ACCENT` · `vars`
 
-Accent colour used in the flow modal and the branded theme.
+Accent colour for the call-flow diagrams this deployment renders.
 
 - **Example** `#1a6bb0`
 - **Must be hex** (`#rgb` or `#rrggbb`). Anything else is ignored.
-- **Unset** The neutral `ns-portal` theme, which matches the stock Manager-Portal scheme.
-
-<a id="BRAND_LABEL"></a>
-
-### `BRAND_LABEL` · `vars`
-
-Override the theme picker's label for your brand theme.
-
-- **Example** `Acme Portal`
-- **Unset** `"<BRAND_NAME> portal"` when `BRAND_NAME` is set, else `"Brand"`.
+- **Unset** The neutral `ns-portal` palette, which matches the stock Manager-Portal scheme.
 
 ---
 
@@ -1391,7 +1409,7 @@ limit, but potentially over a free plan's. Size `NS_EVENTS_MAX_EVENTS` according
 `PORTAL_APP_DOWNLOADS`, `NS_EVENTS`, `NS_EVENTS_BASE_URL`, `NS_EVENTS_MODELS`,
 `NS_EVENTS_TARGET_LIFETIME`, `NS_EVENTS_RENEW_HORIZON`, `NS_EVENTS_GEO_SUPPORT`, `NS_EVENTS_MAX_EVENTS`,
 `NS_EVENTS_SWEEP_MAX`, `NS_EVENTS_DIAG_RAW`, `NS_EVENTS_OFFBOARD`, `NS_EVENTS_DEVICE_REPAIR`,
-`NS_EVENTS_ALLOW_IPS`, `NS_EVENTS_PREFERRED_SERVER`, `NS_OAUTH_SERVER`, `BRAND_ACCENT`, `BRAND_LABEL`.
+`NS_EVENTS_ALLOW_IPS`, `NS_EVENTS_PREFERRED_SERVER`, `NS_OAUTH_SERVER`, `BRAND_ACCENT`.
 
 **Secrets** — `wrangler secret put <NAME>`, never committed:
 

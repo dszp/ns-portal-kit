@@ -64,8 +64,14 @@ ok(grants({ levels: ['reseller'], users: ['om@d.example'] }, P('Office Manager',
 // superadmin as a targetable level.
 ok(grants('superadmin', P('Reseller', 'boss@0000.svc'), ['boss@0000.svc']) && !grants('superadmin', P('Reseller', 'other@d.example'), ['boss@0000.svc']), 'superadmin level = only the configured accounts');
 
-// raw rules pass through.
+// Raw rules pass through — BOTH SIDES. The deny case alone was satisfied by a pass-through that dropped
+// the rule on the floor and denied everything, which is the failure mode a "does it pass through?" test
+// exists to catch. Every principal here is in d.example, so the domain conjunct is the variable.
+ok(grants([{ scopes: ['Office Manager'], domains: ['d.example'] }], P('Office Manager')) === true,
+  'raw rule passes through and GRANTS when scope and domain both match');
 ok(grants([{ scopes: ['Office Manager'], domains: ['acme'] }], P('Office Manager', 'u@acme'), []) === false, 'raw rule ANDs scope+domain (wrong domain denies)');
+ok(grants([{ scopes: ['Reseller'], domains: ['d.example'] }], P('Office Manager')) === false,
+  'and ANDs the other way too — right domain, wrong scope denies');
 
 // unknown level ⇒ throw (fail closed at config time).
 let threw = false; try { resolveGate('wizard', []); } catch (e) { threw = e instanceof FeaturesConfigError; }

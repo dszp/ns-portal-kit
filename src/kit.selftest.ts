@@ -3,7 +3,7 @@
  * ASSETS (R2) binding, and drives worker.fetch. Mirrors portal.selftest.ts.
  *   pnpm test:kit
  */
-import { Script } from 'node:vm';
+import { Script, runInNewContext } from 'node:vm';
 import { buildKitBundle, buildSelfBundle, buildSpkBundle, featurePolicyKeys, selfFeaturePolicyKeys, primaryJs, SELF_FEATURE_KEYS, SPK_FEATURE_KEYS, FEATURE_KEYS } from './kit.js';
 import { keysDeliveredBy, FEATURE_REGISTRY } from './features.js';
 import { parseManifest, kitGateAllows, kitConfigError } from './kit.js';
@@ -145,12 +145,16 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     let ok2 = true; try { new Script(neutral); } catch (e) { ok2 = false; }
     ok(ok2, '[neutral] neutral bundle also compiles');
   }
-  // portal-mode-only: a non-portal (dia/local) env must NOT serve the gated bundle (or its label), even
-  // to a valid reseller ns_t — it stays a 404, byte-identical to before this feature existed.
-  {
-    const npEnv = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '', NS_API_TOKEN: 't', ALLOW_UNGATED_SERVICE_TOKEN: '1', RINGOTEL_LABEL: 'App' };
-    const r = await call('/kit/portal.js', reseller, npEnv);
-  }
+  // ⚠️ TWO ASSERTION-FREE BLOCKS WERE DELETED HERE (2026-08-11, found by review). They built an env and
+  // called a route and then asserted NOTHING — the response was never read, and the second one did not
+  // even make the call. They dated from before the 0.3.0 split, when a non-portal mode existed: the
+  // property they described ("a non-portal env must not serve the gated bundle") went away with
+  // PORTAL_MODE and ALLOW_UNGATED_SERVICE_TOKEN, and the husks stayed behind reading as coverage for a
+  // security property that no longer has a mode to be violated in.
+  //
+  // Deleted rather than given assertions, deliberately: writing a test for a mode this Worker no longer
+  // has would be inventing coverage twice over. What replaces them is nothing, and that is the honest
+  // state — the delivery gates that DO exist are covered by the [self-route] and [fence] blocks below.
 
   // ── Self bundle builder + primary fetch (Task 2, 2026-07-18) ──────────────────────
   {
@@ -190,8 +194,6 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok((await call('/kit/portal.js', basic)).status === 403, '[fence] Basic → admin bundle 403 (unchanged)');
     ok((await call('/domains', basic)).status === 403, '[fence] Basic → /domains 403 (fenced)');
     ok((await call('/flow?domain=acme.example&kind=user&ref=100', basic)).status === 403, '[fence] Basic → /flow 403');
-    // Non-portal env: no delegated self surface.
-    const npEnv2 = { NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, ALLOWED_ORIGINS: '', NS_API_TOKEN: 't', ALLOW_UNGATED_SERVICE_TOKEN: '1' };
   }
 
   // ── Secondary manifest /kit/asset/<name>.js ─────────────────────────────────────────
@@ -355,8 +357,14 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(!/log..s\*out..b\/i\.test\(ls\[i\]\.textContent/.test(b), '[menus] ...never against the concatenated <ul> text');
     ok(b.includes('divider'), '[menus] added account entries go above the divider + Log Out, not after them');
     // One add/hide implementation shared by both menus — a second copy is how two menus drift apart.
-    ok((b.match(/function menuApply\(/g) || []).length === 1 && (b.match(/_svxadd/g) || []).length === 1,
+    // Counts the marker being ASSIGNED, not mentioned: menuReset reads it too, and a second reader is not
+    // a second implementation. Pinning every occurrence made the guard fire on the reset being added.
+    ok((b.match(/function menuApply\(/g) || []).length === 1
+      && (b.match(/className='_svxadd'/g) || []).length === 1,
       '[menus] add/hide is implemented once and reused, not duplicated per menu');
+    // And the reset is the only thing that undoes it, for the same reason.
+    ok((b.match(/function menuReset\(/g) || []).length === 1,
+      '[menus] and undone in exactly one place');
     // The Management dropdown is reseller-level nav with no id and a toggle carrying no href — the only
     // anchor is the toggle's own LABEL, read from the toggle itself (never a container, for the same
     // reason sign-out is tested per item).
@@ -659,13 +667,350 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
   {
     const b = buildSelfBundle(selfFeaturePolicyKeys(), { PORTAL_HANDOFF_URL: '' } as any);
     const body = b.slice(b.indexOf('function menuApply'));
-    const hideAt = body.indexOf('.hide||[]).forEach');
+    const hideAt = body.indexOf('menuHide(ul,plan)');
     const addAt = body.indexOf('var add=(plan&&plan.add)');
     ok(hideAt > -1 && addAt > -1 && hideAt < addAt,
       `[order] menuApply hides before it adds (hide@${hideAt}, add@${addAt})`);
+    // ── item 37: hides re-run, adds do not ────────────────────────────────────────────────────────────
+    // The bug this replaced was one guard covering both halves, so an entry appended by anything after our
+    // single pass was never hidden. The tests here can only read the emitted SOURCE — DOM behaviour is not
+    // observable from them — so they assert the two structural facts the fix rests on: the hide pass is
+    // registered like any other repeating feature, and it survives the observer disconnect.
+    ok(/\{p:\/\^\\\/\/,m:menuHides,/.test(b), '[item37] the hide pass is in the feature registry, so it runs on every pass');
+    ok(/menuHides\(\)/.test(b.slice(b.indexOf('var VLT='))), '[item37] and on the late timers, past the 8s observer disconnect');
+    // The adds keep their one-shot guards — the whole point of splitting them.
+    for (const flag of ['svxacct', 'svxmgmt']) {
+      ok(b.includes(`dataset.${flag}='1'`), `[item37] the ${flag} add pass is still one-shot`);
+    }
+    // And the hide pass never reaches a menu the add pass could not: same gate, per menu.
+    const hides = b.slice(b.indexOf('function menuHides'), b.indexOf('function accountMenu'));
+    ok(/if\(_AF\.menuConfig\)\{var a=acctUl\(\)/.test(hides) && /_AF\.appAccess\|\|_AF\.menuConfig\)\{var p=appsUl\(\)/.test(hides),
+      '[item37] gated per menu exactly as the add pass is');
+
+    // The claim the whole fix rests on is BEHAVIOURAL — "running a hide twice is running it once, and a
+    // late entry gets hidden by the next pass" — and a source grep cannot see it. Both prior menu
+    // regressions passed every test in this file for exactly that reason. So run the real emitted
+    // menuHide against a menu stub small enough to be obviously honest: children with a queryable <a> and
+    // a style object, which is the entire surface the function touches.
+    const menuHideSrc = b.slice(b.indexOf('function labelText('), b.indexOf('function menuApply('));
+    const menuHide = runInNewContext(`${menuHideSrc}; menuHide`, {}) as (ul: unknown, plan: unknown) => void;
+    // `anchor` is what the row's <a> says; `text` is the row's own, which can differ ("Messages" inside a
+    // row reading "Messages 0") or be all there is (a vendor row with no anchor at all).
+    const entry = (label: string, className = '', anchor: string | null = label) => {
+      // Attributes are real here because menuHide now RECORDS what it hid — the marker menuReset reads
+      // to tell a row this config hid from one the portal had hidden all along. A stub that answered
+      // hasAttribute() with a constant would make the reset test meaningless.
+      const attrs: Record<string, string> = {};
+      return {
+        className,
+        style: { display: '' },
+        textContent: label,
+        parentNode: null as unknown,
+        setAttribute: (k: string, v: string) => { attrs[k] = String(v); },
+        getAttribute: (k: string) => (k in attrs ? attrs[k]! : null),
+        hasAttribute: (k: string) => k in attrs,
+        removeAttribute: (k: string) => { delete attrs[k]; },
+        querySelector: (sel: string) => (sel === 'a' && anchor !== null ? { textContent: anchor } : null),
+      };
+    };
+    const stock = entry('Voicemail'), keep = entry('Call History'), late = entry(' voicemail ');
+    const ul = { children: [stock, keep] as ReturnType<typeof entry>[] };
+    const plan = { hide: ['Voicemail'], add: [] };
+
+    menuHide(ul, plan);
+    ok(stock.style.display === 'none' && keep.style.display === '', '[item37] a hide matches by label and leaves the rest alone');
+    menuHide(ul, plan);
+    ok(stock.style.display === 'none' && keep.style.display === '', '[item37] and running it a second time changes nothing');
+
+    // The bug, reproduced: an entry appended after the first pass. Under the old one-shot guard nothing
+    // ran again and this stayed visible until reload.
+    ul.children.push(late);
+    ok(late.style.display === '', '[item37] a late-arriving entry starts visible');
+    menuHide(ul, plan);
+    ok(late.style.display === 'none', '[item37] and the next pass hides it — case-insensitively, trimmed');
+
+    // The regression the re-run creates if nothing guards it: hiding the portal's "Voicemail" and adding
+    // your own entry with that label is a legitimate config. The old single pass hid before it added, so
+    // ours did not exist yet; a repeating pass would find it and hide the operator's own entry on the
+    // second run. This is that case, and it must survive every pass.
+    const ours = entry('Voicemail', '_svxadd');
+    ul.children.push(ours);
+    menuHide(ul, plan);
+    menuHide(ul, plan);
+    ok(ours.style.display === '', '[item37] and it never hides an entry the kit itself added');
+
+    // ── anchorless rows (David's live capture, 2026-08-09) ────────────────────────────────────────────
+    // A vendor Management menu renders rows as plain list items with no <a> inside. Both the reader and
+    // the hider keyed on the anchor, so those entries were invisible to the builder AND unhidable by
+    // config — the operator could not even find out why. Now the row's own text is the fallback.
+    const anchorless = entry('Add-on Report', 'admin-menu-list-item', null);
+    ul.children.push(anchorless);
+    menuHide(ul, { hide: ['Add-on Report'], add: [] });
+    ok(anchorless.style.display === 'none', '[anchorless] a row with no <a> can be hidden by its own text');
+
+    // ...without breaking the case existing configs were written against: where a row carries MORE text
+    // than its link does, the anchor's text is what a hide names, and it must keep matching.
+    const badged = entry('Messages 0', '', 'Messages');
+    ul.children.push(badged);
+    menuHide(ul, { hide: ['Messages'], add: [] });
+    ok(badged.style.display === 'none', '[anchorless] and the anchor text still matches where there is one');
+
+    // ── an unread counter INSIDE the anchor (this portal does exactly that) ───────────────────────────
+    // The row's text is "Messages 0", so that is what the console offered to hide — and a config naming
+    // it stops matching at one message. An identity that carries live data is not an identity.
+    const badgeAttrs: Record<string, string> = {};
+    const withBadge = {
+      className: '',
+      style: { display: '' },
+      textContent: 'Messages 0',
+      setAttribute: (k: string, v: string) => { badgeAttrs[k] = String(v); },
+      getAttribute: (k: string) => (k in badgeAttrs ? badgeAttrs[k]! : null),
+      hasAttribute: (k: string) => k in badgeAttrs,
+      removeAttribute: (k: string) => { delete badgeAttrs[k]; },
+      cloneNode: () => ({
+        textContent: 'Messages 0',
+        querySelectorAll: () => [{ parentNode: { removeChild: () => {} } }],
+      }),
+      querySelector: (sel: string) => (sel === 'a' ? {
+        textContent: 'Messages 0',
+        // The clone the reader takes: badge removed, so the text settles to "Messages".
+        cloneNode: () => ({ textContent: 'Messages', querySelectorAll: () => [] }),
+      } : null),
+    };
+    ul.children.push(withBadge as never);
+    menuHide(ul, { hide: ['Messages'], add: [] });
+    ok(withBadge.style.display === 'none',
+      '[badge] a counter inside the anchor is stripped, so the stable name is what matches');
+
+    // ── menuReset: undo OUR effect, and only ours ─────────────────────────────────────────────────────
+    // The preview needs it, and the preview is why it has to be exact: applying a draft plan on top of
+    // the live one does not produce the draft. menuApply de-duplicates within one call only, so shared
+    // entries would draw twice; menuHide never un-hides, so a removal would be invisible. Reset, then
+    // apply. What makes running this on a live page safe is that it can tell its own work apart from the
+    // portal's — so that is what these assert.
+    const menuResetSrc = b.slice(b.indexOf('function menuReset('), b.indexOf('function menuApply('));
+    if (!menuResetSrc || menuResetSrc.length > 1200) throw new Error('could not slice menuReset — the guard is broken, not the code');
+    const menuReset = runInNewContext(`${menuResetSrc}; menuReset`, {}) as (ul: unknown) => void;
+    {
+      const ours = entry('Voicemail');
+      const theirs = entry('Billing');
+      const already = entry('Hidden By Portal');
+      already.style.display = 'none';                 // inline-hidden before we ever ran
+      const inline = entry('Odd');
+      inline.style.display = 'inline-block';          // a row with its own inline display
+      const added = entry('Our Entry', '_svxadd');
+      const menu = { children: [ours, theirs, already, inline, added] as ReturnType<typeof entry>[] };
+      (added as { parentNode: unknown }).parentNode = {
+        removeChild: (c: unknown) => { menu.children = menu.children.filter((x) => x !== c); },
+      };
+
+      menuHide(menu, { hide: ['Voicemail', 'Hidden By Portal', 'Odd'], add: [] });
+      ok(ours.style.display === 'none' && already.style.display === 'none' && inline.style.display === 'none',
+        '[reset] all three are hidden by the plan');
+      ok(already.getAttribute('data-svxh') === null,
+        '[reset] but a row ALREADY inline-hidden is not marked — we did not hide it, so it is not ours to reveal');
+      ok(inline.getAttribute('data-svxh') === 'inline-block',
+        '[reset] and the marker records the PRIOR display, so the restore is exact rather than a guess at the default');
+
+      menuReset(menu);
+      ok(ours.style.display === '' && inline.style.display === 'inline-block',
+        '[reset] our hides come back, each to what it was');
+      ok(already.style.display === 'none',
+        '[reset] and the portal\'s own hidden row stays hidden — the property that makes this safe on a live page');
+      ok(theirs.style.display === '' && menu.children.indexOf(theirs) >= 0,
+        '[reset] a row nobody touched is untouched');
+      ok(menu.children.indexOf(added) < 0, '[reset] and rows we added are removed');
+      ok(ours.getAttribute('data-svxh') === null, '[reset] the marker is cleared, so a second reset is a no-op');
+
+      // IDEMPOTENT, because a preview redraw will run it again. A second pass must not reveal the
+      // portal's own hidden row, which is the one way this could damage a live page.
+      menuReset(menu);
+      ok(already.style.display === 'none' && ours.style.display === '',
+        '[reset] running it twice changes nothing further');
+
+      // And re-hiding after a reset still works: the marker having been cleared must not make the row
+      // unhideable, or one preview would permanently disarm the live config on that page.
+      menuHide(menu, { hide: ['Voicemail'], add: [] });
+      ok(ours.style.display === 'none' && ours.getAttribute('data-svxh') === '',
+        '[reset] and a row can be hidden again afterwards, marker and all');
+    }
+
+    // A menu whose plan has not arrived yet must be a no-op, not a throw: menuHides runs on every mutation
+    // from the first one, which is long before /me/app-access answers.
+    let nullOk = true;
+    try { menuHide(ul, null); } catch { nullOk = false; }
+    ok(nullOk, '[item37] and a pass before the plan arrives does nothing rather than throwing');
   }
 
-  // ── the status banner (portal.statusBanner) ──────────────────────────────────────────────────────────
+  // ── the capture BUTTON sits where the operator already is, and only when armed ───────────────────────
+// David: "Masq, capture, exit masq is not much harder than wait-exit and is under operator control."
+// The bar region exists only while masquerading, so a control there cannot appear where it would be
+// nonsense — and the account-menu entry stops being a Management-with-fallback pretence and becomes the
+// genuine fallback for a portal whose bar we cannot find.
+{
+  const cap = buildSpkBundle(['kit.captureMenus'], { PORTAL_HANDOFF_URL: '' } as any);
+
+  ok(/function masqBar\(\)/.test(cap) && cap.includes("querySelector('.mask-bar')")
+    && cap.includes('endMasquerade'),
+    '[capbtn] the bar is found by the handles masq() already knew, not by a third invention');
+  ok(!/mask-bar[^\n]*\.style/.test(cap),
+    '[capbtn] and the button is OUR element, never a restyle of theirs');
+  // ⚠️ IT BORROWS THEIR SHAPE. Styled from scratch it sat beside theirs at a different height with a
+  // different baseline (David's second screenshot) and read as broken rather than as ours. Same tag as
+  // the neighbour — an <a> styled as a button will not take a <button>'s CSS — plus their classes, then
+  // colour on top. Agreeing to look like their control is the opposite of repainting it.
+  ok(/end&&end\.tagName==='A'/.test(cap) && /b\.className='_svxcap'\+\(\(end&&end\.className\)/.test(cap),
+    '[capbtn] taking the neighbour\'s tag and classes so the box geometry is theirs');
+  // Scoped to capBtn: `b` is a common local name in this bundle (the copy button, the modal box) and an
+  // unscoped search for it found theirs, not ours — a guard that tests the wrong function.
+  const capBtnFn = cap.slice(cap.indexOf('function capBtn()'), cap.indexOf('function capDo('));
+  ok(capBtnFn.length > 200 && capBtnFn.length < 2000, '[capbtn] (sliced the right function)');
+  // ⚠️ NO STYLING OF OUR OWN BEYOND SPACING. Three attempts: from scratch it sat at a different height;
+  // with their classes but repainted purple it read worse, because their class carries padding, weight,
+  // radius and often a gradient, and a flat override lands on top of all of it. The bar is already
+  // unmistakable and the label names the role — that is the distinction, and it does not need a second.
+  ok(!/style\.cssText=/.test(capBtnFn) && !/style\.background=/.test(capBtnFn)
+    && !/style\.color=/.test(capBtnFn) && !/style\.borderColor=/.test(capBtnFn),
+    '[capbtn] and no colour, padding, height or font of our own to disagree with their stylesheet');
+  ok(/b\.style\.marginRight=/.test(capBtnFn),
+    '[capbtn] only the spacing that keeps it off the control beside it');
+  // ⚠️ BESIDE the End Masquerade control, not appended to the bar. Appending put it on a second line
+  // under the bar (David's screenshot): the bar is a block whose contents are one inline row, so an
+  // appended child starts a new one. Being next to that control is also the point of the placement.
+  ok(/function masqEnd\(\)/.test(cap) && /bar\.insertBefore\(b,end\)/.test(cap),
+    '[capbtn] and it is inserted before End Masquerade, in that control\'s own row');
+  ok(/end&&end\.parentNode===bar/.test(cap) && /else bar\.appendChild\(b\)/.test(cap),
+    '[capbtn] falling back to the bar itself only when that control is not where we expect');
+  // Found by href OR by its own words, because it carries no id — the same two-handle discipline
+  // mgmtUl() and acctUl() already use for menus that cannot be selected directly.
+  ok(/end\\s\+masquerad/i.test(cap) || /end\\s\+masquerad/.test(cap),
+    '[capbtn] and by its label where the href does not name it');
+
+  // ARMED, or nothing is offered at all. The mode's only job is that decision — which is precisely why
+  // it needs no expiry: a mode whose worst failure is an unused button cannot go stale.
+  ok(/if\(!\(!_AF\.status&&_AF\.capture\)\|\|!capOn\(\)\)return;/.test(cap),
+    '[capbtn] the button appears only for a masked operator with capture armed');
+  ok(/if\(CAP&&!capOn\(\)\)return;/.test(cap),
+    '[capbtn] and the menu fallback obeys the same arming, so one switch governs both');
+  // ⚠️ THE FALLBACK ASKS WHETHER THE BAR EXISTS, not whether the button is in it yet. The first version
+  // asked the latter — a question about ORDER — and the menu pass runs first, so it added its own copy
+  // and the bar then added the button: both on screen at once (David's screenshot). Both passes re-run
+  // on every mutation, so their interleaving is not ours to control and the predicate cannot depend on
+  // it. The ordering is fixed too, but the predicate is what makes it correct rather than lucky.
+  // Scoped to spkMenu: capBtn has its own ._svxcap check and that one is legitimate — it is how the bar
+  // pass stays idempotent across mutations. An unscoped search found it and tested the wrong function.
+  const spkMenuFn = cap.slice(cap.indexOf('function spkMenu()'), cap.indexOf('var _spkF='));
+  ok(spkMenuFn.length > 400 && spkMenuFn.length < 4000, '[capbtn] (sliced the right function)');
+  ok(/if\(CAP&&masqEnd\(\)\)return;/.test(spkMenuFn) && !/_svxcap/.test(spkMenuFn),
+    '[capbtn] the menu fallback stands down when a bar EXISTS, not when the button has already landed');
+  ok(cap.indexOf('m:capBtn') < cap.indexOf('m:spkMenu'),
+    '[capbtn] and the bar runs first, so the fallback is the pass that happens last');
+  ok(!/setTimeout\([^)]*capSet/.test(cap) && !/expire/i.test(cap.slice(cap.indexOf('var MODEK'), cap.indexOf('var MODEK') + 400)),
+    '[capbtn] with no expiry, deliberately — see the comment on MODEK for why an automatic mode needed one');
+
+  // The COUNT is what makes a capture taken mid-load visible rather than authoritative.
+  // ⚠️ THE CONFIRMATION IS ON THE BUTTON, NOT IN A MODAL. It is a control pressed several times in a
+  // row while walking through roles, and an alert() makes the operator click twice to learn something
+  // they could have read in place. The COUNT is the load-bearing part — two entries where you expected
+  // nine is how you notice you clicked mid-load — so it goes in the label; the remedy rides the tooltip.
+  const capDoFn = cap.slice(cap.indexOf('function capDo(el,transient)'), cap.indexOf('function spkMenu()'));
+  ok(capDoFn.length > 200 && capDoFn.length < 2400, '[capbtn] (sliced the right function)');
+  ok(/r\.n\+' entries'/.test(capDoFn) && /el\.textContent=/.test(capDoFn),
+    '[capbtn] success reports how many entries it stored, on the control that was clicked');
+  // ⚠️ FEEDBACK MUST OUTLIVE THE SURFACE IT IS ON, which cuts both ways. On the BAR the button stays
+  // put, so the label is the confirmation and a modal would only cost a second click. In the account-
+  // menu fallback the dropdown closes on the click that triggered it, taking the label with it — so the
+  // capture succeeded and looked like nothing happened (David, on that entry). Same principle, opposite
+  // conclusion, and the call site says which case it is.
+  ok(/if\(transient\)\{alert\(/.test(capDoFn),
+    '[capbtn] a control that is about to vanish gets a modal, because nothing else would survive');
+  ok(/capDo\(b\)/.test(cap) && /capDo\(a,true\)/.test(cap),
+    '[capbtn] and the bar does not — its button is still there to carry the answer');
+  ok(!/confirm\(/.test(capDoFn),
+    '[capbtn] and neither path asks a question it already has the answer to');
+  ok(/looks wrong/.test(capDoFn) && /el\.title=/.test(capDoFn),
+    '[capbtn] with what to do about a wrong-looking count kept, on the tooltip');
+  ok(cap.indexOf('function capDo') > 0 && (cap.match(/capDo\(/g) || []).length >= 3,
+    '[capbtn] and one function says it, so the bar and the menu cannot report a capture differently');
+
+  // FORGETTING keeps the arming. The captures are data the operator gathered by walking around the
+  // portal; the toggle is a preference about how the tool behaves, and clearing one is not a request to
+  // undo the other. Rewritten rather than removeItem'd for exactly that reason.
+  const con2 = buildSpkBundle(['kit.status'], { PORTAL_HANDOFF_URL: '' } as any);
+  ok(/q\.clear===true/.test(con2) && /var keep=stockAll\(\)\[MODEK\]/.test(con2)
+    && /if\(keep\)fresh\[MODEK\]=keep/.test(con2),
+    '[capbtn] forgetting the captures keeps the arming, which is a preference and not part of what was gathered');
+  ok(!/removeItem\(SK\)/.test(con2),
+    '[capbtn] and rewrites the store rather than dropping the key, so the preference has somewhere to survive');
+}
+
+// ── TWO DEPLOYMENTS ON ONE PORTAL PAGE ───────────────────────────────────────────────────────────────
+// A staging bundle loaded beside the live one is a real configuration — it is how the harness works — and
+// the primary used to handle it almost right: the second one bailed out, but only AFTER assigning
+// __kitCfg.base. Bundles read that base when they execute, which is after their fetch resolves, so the
+// loser's origin was already sitting there. The deployment whose code was running then called the OTHER
+// deployment's Worker: its config, its menu plan, its app rows, and non-deterministic between reloads
+// because it turned on which primary parsed first. Run the real emitted primary twice and check.
+{
+  const primary = primaryJs({ PORTAL_HANDOFF_URL: "" } as any);
+  const run = (src: string, ctx: Record<string, unknown>): void => {
+    ctx.document = { currentScript: { src }, getElementsByTagName: () => [], createElement: () => ({ style: {}, setAttribute() {}, appendChild() {} }), head: { appendChild() {} }, documentElement: { appendChild() {} }, addEventListener() {}, readyState: 'complete' };
+    try { runInNewContext(primary, ctx); } catch { /* the fetches and DOM work are not the subject */ }
+  };
+  const win: Record<string, unknown> = {};
+  const ctx: Record<string, unknown> = {
+    window: win, console, localStorage: { getItem: () => null, setItem() {} },
+    fetch: () => ({ then: () => ({ then: () => ({ catch() {} }) }) }),
+    URL: globalThis.URL, Blob: function () {}, location: { pathname: '/' },
+    MutationObserver: function () { return { observe() {} }; }, requestAnimationFrame: () => 0,
+    setTimeout: () => 0, setInterval: () => 0,
+  };
+  (ctx as { window: Record<string, unknown> }).window = win;
+  run('https://dev.example.com/kit/spk.js', { ...ctx, window: win });
+  const afterFirst = (win.__kitCfg as { base?: string } | undefined)?.base;
+  run('https://prod.example.com/kit/spk.js', { ...ctx, window: win });
+  const afterSecond = (win.__kitCfg as { base?: string; seen?: string[] } | undefined);
+
+  ok(afterFirst === 'https://dev.example.com', `[twobases] the first primary claims the page (${afterFirst})`);
+  ok(afterSecond?.base === 'https://dev.example.com',
+    `[twobases] and a second deployment's primary changes nothing — not even on its way out (${afterSecond?.base})`);
+  ok((afterSecond?.seen ?? []).length === 2,
+    `[twobases] but both are RECORDED, so the page can say it happened instead of leaving it unanswerable (${(afterSecond?.seen ?? []).join(', ')})`);
+}
+
+// ── the capture entry: one menu item, and only for a masked operator ─────────────────────────────────
+// The two gates are mutually exclusive in practice — masked in, the console's own gate refuses you
+// because it matches on the effective identity, which is now the masked user. So the same menu slot
+// carries whichever one this bundle was built for, and the label names the role, which is the only
+// confirmation the operator gets that the masquerade is actually in effect before they store anything.
+{
+  const cap = buildSpkBundle(['kit.captureMenus'], { PORTAL_HANDOFF_URL: '' } as any);
+  const con = buildSpkBundle(['kit.status'], { PORTAL_HANDOFF_URL: '' } as any);
+
+  ok(/capture:true/.test(cap) && !/status:true/.test(cap), '[capture] the capture tier carries only its own flag');
+  ok(/status:true/.test(con) && !/capture:true/.test(con), '[capture] and the console tier only its own');
+
+  // Both bundles carry the code (they are one body, tiered by flags) — what differs is which branch can
+  // run. Assert the BRANCH, not the presence of the string, or this passes on a bundle that can never
+  // take it.
+  ok(/var CAP=!_AF\.status&&_AF\.capture;/.test(cap),
+    '[capture] the menu entry chooses its role from the flags rather than from a second gate');
+  ok(cap.includes('Remember this role'), '[capture] and names what it does');
+
+  // It writes to the PORTAL PAGE's storage. The console frame is a sandboxed srcdoc with an opaque
+  // origin where localStorage throws — the same fact that made Copy silently do nothing for months — so
+  // a capture written there would vanish and a capture read there would never be found.
+  ok(/localStorage\.setItem\(SK,/.test(cap), '[capture] storing in the page that has storage');
+  ok(!/fetch\(/.test(cap.slice(cap.indexOf('function stockSave'), cap.indexOf('function stockSave') + 500)),
+    '[capture] and sending nothing anywhere — the capability is "write down what is already on this screen"');
+
+  // The scope decoded out of the token is a LABEL. Nothing is authorized by it, and the comment says so;
+  // this asserts the code matches the claim by pinning that no gate consults it.
+  ok(/function myScope\(\)/.test(cap) && !/if\(myScope\(\)/.test(cap),
+    '[capture] the locally-decoded scope labels a capture and gates nothing');
+}
+
+// ── the status banner (portal.statusBanner) ──────────────────────────────────────────────────────────
   {
     const URL_ = 'https://automation.example.com/hook';
     const on = buildSelfBundle(selfFeaturePolicyKeys(), { STATUS_BANNER_WEBHOOK: URL_, PORTAL_HANDOFF_URL: '' } as any);

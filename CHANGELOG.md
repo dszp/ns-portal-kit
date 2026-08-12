@@ -20,10 +20,251 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
-## [Unreleased]
+## [0.4.0] — 2026-08-11
+
+### Fixed
+
+- **The menu preview can no longer get stuck showing the wrong audience.** Changing who you are previewing
+  as does not cancel the request already in flight, so two answers could be outstanding at once — and the
+  first one back was taken as the answer to the *second* question. The picture, the rule tags and the rail
+  were then drawn for a persona you had already moved off, and because the real answer arrived with nothing
+  waiting for it, nothing ever corrected it: the wrong preview stayed up until your next edit. Each request
+  now carries its own id and an answer to a question you have moved past is ignored. The config validator
+  beside the output had the same shape and got the same fix.
+- **A menu you did not touch is emitted exactly as you wrote it.** The builder emits your complete config
+  every time, so the first thing you do with it is diff it against what you are running — and it was
+  rebuilding each added entry from the three fields it understands, which dropped any other key you had
+  written beside them and reordered the ones it kept. An empty list (`"hide": []`) was dropped outright.
+  None of that changed what your config *does*, which is exactly why it was noise: menus you never opened
+  showed up as changed, and the change you actually made was harder to find. Entries now round-trip
+  verbatim, and an edited one keeps whatever else you wrote on it.
+- **Creating a targeted rule no longer silently rewrites another audience's menu.** The editor seeds a
+  new rule with what the audience already gets — but it used the audience *on screen*, and a rule applies
+  to everyone it names. Carving a domain rule while previewing one role, on a menu that already had a
+  rule for a different role, handed that other role the first one's entries. No seed can fix that (a rule
+  holds one list for its whole audience), so the editor now **names the rules a new one would override,
+  before you create it**, and the change log says so instead of claiming nothing moved.
+- **A rule carved under a link that uses a `{variable}` keeps the variable.** The preview resolves with
+  no user details, so the entries it reports have already had their placeholders emptied — and those were
+  what got written into the new rule. It validated green while quietly dropping the placeholder.
+- **A captured role is matched however your platform spells the scope.** Captures were keyed
+  case-sensitively-ish while this kit deliberately compares scopes ignoring punctuation, so a platform
+  emitting `office_manager` where the picker says `Office Manager` stored a capture that was never found
+  — leaving you told to go and capture a role you already had.
+- **The kit's own sign-in rows are only drawn for the integration they belong to.** The preview showed
+  them whenever *any* integration was active, so a domain running a different one was shown a sign-in
+  panel the portal would never put there.
+- Adopting a capture now clears the "where do edits land" answer, like every other change of audience.
+- Deleting a menu's default rule and immediately adding an entry could produce a config the validator
+  rejects.
+- **A feature bounded to specific gate levels can no longer be widened by naming a user.** The check that
+  enforces those bounds only inspected levels, so a config naming an account slipped past it. Where that
+  escape is deliberate it is now declared next to the bound it is an exemption from.
+
+- **Two deployments' scripts on one portal page no longer cross their wires.** Loading a staging bundle
+  beside a live one is a real thing to do, and the primary script handled it almost right: the second one
+  bailed out, but only *after* claiming the shared base URL. The bundles read that value when they run,
+  which is after their own fetch resolves — so whichever deployment's code was executing would send its
+  API calls to the other one, picking up the other's menu config, plan and app rows. It varied between
+  reloads, because it turned on which script parsed first. The first script on the page now owns it
+  outright and a second changes nothing; both are recorded, so a page can report that it happened instead
+  of leaving it unanswerable.
+
+### Added
+
+- **The builder now says when a menu the reader does not have cannot be added to.** A menu is *modified*,
+  never created: each one is found in the page before anything is applied, so an entry aimed at a menu a
+  given reader has no dropdown for is simply absent for them. `Management` is shown to administrative
+  scopes only, so this is the ordinary case rather than an edge one — and the builder drew a panel for it
+  either way, which made it look like somewhere an entry could go. Where you have **captured** that role,
+  the note is definite: *this role does not get one, and nothing configured here will appear for them*.
+  Where the menu is only missing from your own page, it states the rule and points at the capture button,
+  because your page is evidence about you and not about them. [CONFIG.md](./CONFIG.md#PORTAL_MENUS) says
+  the same thing for readers who never open the console.
+- **The preview withholds `My Account` from a role that never sees it.** The account menu relabels itself
+  by context — `My Account` while managing a domain or organisation, `Profile` inside your own account —
+  so a user with nothing to manage is only ever in the second row. Previewing one of those roles no longer
+  draws a row they will never have, which was an invitation to write a hide rule for something that is not
+  there. The row is **named** under the menu rather than quietly dropped, and a hide that targets it is
+  still reported as doing its job. This is the only entry the kit assumes, because it is the only one true
+  of every deployment: for anything your own portal's add-ons contribute, capture the role instead.
+- **Capture what another role actually sees, by masquerading once.** The menu editor gets the rules right,
+  but the stock entries it draws come from the page you opened the console from, read as you — so
+  previewing another role was always an approximation, and a browser cannot fix that on its own (you can
+  only be one identity at a time). So: while you are masquerading, the portal menu now offers **"Remember
+  this role's menus"**, naming the role. It stores that role's menu entries in your own browser. Stop
+  masquerading, open the console, pick that role, and the picture is drawn from the capture instead of
+  from your menus — with its age on screen, because a snapshot presented as current is the next wrong
+  answer. A role you have not captured still falls back to your own menus and still says so.
+  - **Groundwork for previewing a draft on the live menus:** hiding an entry now records that this kit
+    was what hid it, so its effect can be undone exactly — the rows it added removed, the rows it hid
+    restored to what they were, and anything your portal hid for its own reasons left alone. Nothing
+    about what you see changes; it is what makes a preview possible without it lying, since a draft
+    applied *on top of* the live config would double up added entries and could never show a removal.
+  - **The role picker marks the roles you have captured** — in bold *and* in words, because a browser
+    that draws that dropdown natively ignores the styling, and a signal your machine does not render is
+    not a signal.
+  - **The button sits beside *End Masquerade*, where you already are** when you have finished looking at
+    that user — not behind a dropdown. It appears only when you have armed capture from the console
+    beforehand, which is the one place that exists before a masquerade starts, and the console then lists
+    what you have captured, with entry counts and ages, so "did that one take?" is answerable by looking.
+    Success reports how many entries it stored: a capture of two where you expected nine is how you
+    notice you clicked while the page was still loading.
+  - **The domains your captures came from are offered under the Domain box**, newest first, usable for
+    any role — not filled in for you. Narrowing a preview to one customer changes which rules apply, so
+    it is a decision rather than a side effect of having captured something. The box has a Clear beside
+    it and is wide enough to show a real domain.
+  - **A capture carries the session it was taken in** — the domain, and whether the app integration was
+    showing on that page — and selecting that role adopts them. Without it the picture pairs a role's
+    real entries with whatever the persona controls happened to say, so a user on a domain with no app
+    still had that app's entry struck through. The app state is one bit of evidence rather than a
+    reading, and the page says so instead of presenting a guess as a fact.
+  - **Captures are per deployment.** Your portal is one origin, so a staging deployment and a production
+    one share its browser storage; a capture taken against one is not offered to the other.
+  - It reads only labels already rendered on the page in front of you and writes only to your own
+    browser. Nothing is sent anywhere and no configuration changes.
+  - New feature gate **`kit.captureMenus`**, and a new gate level `masked_by_superadmin` — masking on
+    **and** the operator behind the mask a superadmin. That pairing is why this needs its own gate at all:
+    while masquerading, your effective identity is the account you are masked into, so a superadmin stops
+    passing every user-based gate, the console's included. That stays exactly as it was — a masked session
+    is handed the capture entry and **not** the console.
+
+- **The builder says what it cannot know.** The rules it previews are exact — your deployment resolves
+  them for the audience you pick. The **stock entries are not**: they are whatever was on the page you
+  opened the console from, read as you. So previewing another role now carries a line saying exactly
+  that, because a picture that looks like what someone else sees, without saying it is an approximation,
+  invites a more specific wrong belief than the list of labels it replaced. It appears only when the role
+  you are previewing is not your own.
+- **The preview opens on your own role**, rather than the first in the list. It is the one audience whose
+  stock entries are genuinely accurate, so it is the only starting point that is not already an
+  approximation — and this console is reachable by senior scopes only, so the top of the list may be a
+  role its own operator has no account for.
+
+## [0.3.2] — 2026-08-10
+
+### Added
+
+- **A menu rule can target more than one app, and two active apps no longer fight.** The `app` axis meant
+  "which app is active", which only works while at most one can be. With a second integration registered,
+  "this app is active" and "that one is active" are independent facts that can both be true of a domain —
+  and picking one rule to apply would have silently dropped the other integration's entries. Now every
+  rule whose app is active applies: hidden entries merge, added entries appear in registry order, and one
+  entry listed under two apps is still one entry. Rules that name a domain, a scope or an account still
+  win outright over all of them, so "turn it off for this customer" is unchanged. **Every config that
+  worked before resolves identically** — with one app active, applying-all and picking-one are the same
+  thing, and a test asserts exactly that across every shape the setting accepts.
+- **`DOCUMO_DOMAINS`** names the domains that count as running the fax integration, for menu targeting
+  only, until that integration can answer for itself. Unset — which is every deployment today — no domain
+  counts, and nothing changes. It exists so menu rules for that integration can be written and previewed
+  before it ships, rather than in a scramble on the day.
+
+### Fixed
+
+- **The menu builder's validator can say "accepted, and some of it reaches nobody" again.** Your
+  deployment reports that state — a config it will happily serve, part of which can never apply to anyone
+  — and the builder had the wording for it, but the message carrying the answer back into the console
+  dropped the warnings and kept only the verdict. So the whole branch was unreachable and the config read
+  as plainly valid. It now reports all three states: valid, valid-with-warnings, and rejected.
+- **A menu entry with no link is now visible to the editor, and can be hidden.** Some portals render menu
+  rows as plain list items with no anchor inside them — a vendor Management menu in the wild does exactly
+  this. Both the code that reads your menus and the code that hides an entry keyed on the link, so those
+  entries were invisible in the console *and* impossible to hide from config, with nothing anywhere
+  explaining why: you could name one in `hide` and nothing would happen. A row is now identified by its
+  link text where it has one and by its own text otherwise, in a single place both halves read, so what
+  the console offers to hide is always something hiding can act on. Existing configs are unaffected —
+  where a row carries more text than its link does, the link's text still wins.
+
+### Added
+
+- **A preview endpoint for the menu editor** (`GET /kit/menus/check`'s sibling, `/kit/menus/resolve`). It
+  answers what a candidate config would actually produce for one audience — domain, scope and app state —
+  so the console never carries its own copy of the targeting rules. Precedence decided in two places is
+  precedence that drifts, and the half that drifted would be the one deciding whose menu you are looking
+  at. It reads your live `PORTAL_APPS_HIDE` while resolving the candidate's `PORTAL_MENUS`, because the
+  apps hide list is the union of the two and a preview missing half of it would send you hunting a bug in
+  your own config.
+- **The menu builder is now the menu, drawn.** It used to be two lists per menu — the entries you hide and
+  the entries you add — as separate, structurally identical sections, so a menu with rules for four
+  audiences was a page of near-duplicate blocks you had to reassemble in your head. Now you pick who you
+  are previewing as (scope, which apps are active, optionally a domain) and each menu is drawn the way
+  that person would see it: stock entries in place, struck through where your config hides them, your own
+  entries marked where they land, and a tag on each row naming the rule it came from. You edit the
+  picture. Ticking a row hides it; untick and it comes back; an added entry has *edit* and *remove* on the
+  row itself. Every menu whose targeting this editor can round-trip is editable this way — by account, by
+  domain, by scope, by app state, and the whole-menu default — and anything it cannot round-trip is still
+  shown, read-only, and carried through byte for byte. The per-menu summary that used to sit above the
+  builder is **gone**: it resolved every menu at one arbitrary audience, which is why each targeted card
+  carried a paragraph explaining that what it showed was not really the config. The raw value is still on
+  the Config tab.
+- **It asks where an edit should land, once, and then says so.** With two apps active, more than one rule
+  can be answering for the same menu — so ticking a row is genuinely ambiguous about which rule takes the
+  change. The first edit to a menu's hides (or its adds) asks: change one of the rules that answered, or
+  carve a new one for exactly the reader on screen. The answer sticks until you change who you are
+  previewing as, and while it is stuck a line under the menu reads *"Hiding lands in the ringotel rule"*
+  with a way to change it. A new rule is **seeded with whatever that audience already gets**, so creating
+  one changes nobody's menu until you change something — a rule that names you suppresses the default, and
+  an empty new rule would otherwise take away everything the default was giving them.
+- **Every key and legal value, annotated, under the config output.** `CONFIG.md` explains the model in
+  prose and the builder composes the JSON for you — but nothing anywhere showed the whole vocabulary in
+  one shape, which is what you want at 2am with the file open. It lists the menu names, both keys, all
+  four targeting axes with the precedence they resolve in, the scopes and integration keys **this
+  deployment** accepts, and the variables. Generated from the code that validates it, so it cannot
+  describe a config your deployment would refuse at startup. It carries comments, so it says plainly that
+  it is not valid JSON as written.
+- **The link placeholders are offered where you type a link.** `{ext}`, `{domain}`, `{name}` and the rest
+  were documented in the settings reference and nowhere near the box, so the feature existed for whoever
+  had already read about it. The entry form now lists every one this deployment accepts, each saying what
+  it fills, and clicking one inserts it **at the cursor** — appending would break every URL with a query
+  string after the insertion point. They come from the module that validates them, so a placeholder that
+  would be refused at startup cannot be offered, and a test asserts the reference and the runtime still
+  agree in both directions.
+- **A right-hand rail** carries what this session changed and every rule on every menu, each filed under
+  the menu it belongs to, marked when it applies to the reader on screen, and removable. A rule for an app
+  this deployment cannot run is listed as kept-but-not-active-here rather than hidden — that is a fact
+  about your config, and the config is carried through untouched either way.
+
+## [0.3.1] — 2026-08-09
+
+### Removed
+
+- **`BRAND_LABEL` is gone.** It named the brand theme in the standalone viewer's theme picker; that viewer
+  became a separate product in 0.3.0, and this deployment renders diagrams server-side with one palette
+  and no picker — so nothing has read the setting since. Removing it changes no behaviour: a deployment
+  that still sets it keeps working, and the value is simply ignored, as it already was. `BRAND_NAME` and
+  `BRAND_ACCENT` are the branding values this kit reads.
+
+### Added
+
+- **The event-subscription check now lists what is actually subscribed.** It reported a count, which is
+  the weakest true thing it could say — under `NS_EVENTS_DOMAINS=*` it passed identically whether one
+  domain was monitored or forty. The check now enumerates every subscription this deployment owns, one row
+  per domain with its expiry, in a table below the result that is collapsed by default. It costs no extra
+  API call: the check already held the full list. The last column is the reason to look — a subscription
+  for a domain `NS_EVENTS_DOMAINS` no longer names is still live, still being sent events, and nothing
+  else on the page showed it. Subscriptions belonging to another integration are counted, never listed.
+- **Every Config row links to its full entry in `CONFIG.md`.** A console row is a summary — what the
+  setting controls, what happens without it, the literal line to type — and the reference has the syntax,
+  the worked examples and the failure modes that do not fit on a card. Each row carries a `reference` link
+  to its own anchor, each group section links its own, and a test asserts every anchor exists, so a new
+  setting cannot ship a link that lands nowhere.
+
+### Fixed
+
+- **A hidden menu entry stays hidden even when it arrives late.** Menus fill from several sources that
+  each load on their own schedule — the portal's own markup, a vendor add-on, this kit — and the hide pass
+  ran once per menu, so an entry appended after that pass was never hidden. Nothing failed visibly: it
+  worked or it did not depending on which script finished first, which is why it looked fine every time it
+  was tested. Hides now re-run on every pass and keep running for 25 seconds, past the point where the
+  page-watching stops. Added entries are still added exactly once, and a hide still cannot remove an entry
+  you added yourself — including one whose label matches the stock entry you are hiding.
 
 ### Changed
 
+- **Setting descriptions render their formatting instead of printing it.** Identifiers in the Config tab
+  were written between backticks and drawn with the backticks — and inside a hover tip, which cannot draw
+  formatting at all, they were pure noise. Names now render as code, tips are reduced to plain words, and
+  the descriptions themselves are shorter: several were carrying material that belongs in `CONFIG.md`,
+  which every row now links to.
 - **`SETUP.md` is a setup guide again, and the settings reference moved to a new `CONFIG.md`.** The old
   file had grown to 1,400 lines that opened by asking you to choose between two products and then defined
   66 settings inline — which meant the reader had to finish a reference manual before deploying anything.
@@ -1603,6 +1844,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.4.0]: https://github.com/dszp/ns-portal-kit/compare/v0.3.0...v0.4.0
 [0.2.17]: https://github.com/dszp/ns-portal-kit/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/dszp/ns-portal-kit/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/dszp/ns-portal-kit/compare/v0.2.14...v0.2.15

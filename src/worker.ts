@@ -66,7 +66,7 @@ import { getServiceToken } from './nsIdentity.js';
 import { syncIdentity, deactivateAppOnly, repairDeviceForEvent } from './ringotelActivation.js';
 import { NsSubscriptionsClient, planSubscriptions } from '@dszp/netsapiens-lib';
 import { resolveFeaturePolicies, featuresConfigError, parseSuperadmins, kitStatusLockedReason, fleetReadAllowed } from './features.js';
-import { resolveMenus, menuConfigError, type MenuPlan } from './menus.js';
+import { resolveMenus, menuConfigError, appsHideSources, activeApps, unreachableDefaults, type MenuPlan } from './menus.js';
 import { resolveAppAccess, ssoEnabled, autoActivates, parseDownloads, parseHideList, appAccessConfigError, appStatusView, type AppAccessMode, type DownloadLink } from './appAccess.js';
 import {
   primaryBasename,
@@ -115,14 +115,12 @@ interface Env {
 
   // ── Optional: branding (see src/brand.ts) ──────────────────────────────────
   // The shared library ships vendor-neutral themes only, so branding is deploy config, not source.
-  /** Brand accent hex (e.g. "#b3282d") for the flow modal + the viewer's brand theme. Absent ⇒
-   *  unbranded: the neutral `ns-portal` theme. */
+  /** Brand accent hex (e.g. "#b3282d") for the call-flow diagrams this Worker renders. Absent ⇒
+   *  unbranded: the neutral `ns-portal` palette. */
   BRAND_ACCENT?: string;
-  /** Company name, e.g. "Acme Voice" — drives the product name ("<name> Portal Kit v<ver>") and the
-   *  default theme label ("<name> portal"). A white-label NAME ⇒ set as a SECRET, never a var. */
+  /** Company name, e.g. "Acme Voice" — drives the product name ("<name> Portal Kit v<ver>") shown in page
+   *  titles and the portal footer. A white-label NAME ⇒ set as a SECRET, never a var. */
   BRAND_NAME?: string;
-  /** Theme label override for the viewer's picker. Defaults to "<BRAND_NAME> portal", else "Brand". */
-  BRAND_LABEL?: string;
 
   // ── Optional integration: Ringotel enrichment ──────────────────────────────
   // Fully gated: absent RINGOTEL_API_KEY ⇒ the Worker behaves exactly as the NS-only baseline
@@ -170,6 +168,9 @@ interface Env {
    *  by domain/scope/app state (see src/menus.ts). Setting both this AND PORTAL_APPS_HIDE for the apps
    *  menu's hide list is a config error, not a precedence rule — PORTAL_MENUS supersedes when unambiguous. */
   PORTAL_MENUS?: string;
+  /** Domains to treat as Documo-active for menu targeting, until that integration ships and can answer
+   *  for itself. A stand-in for a live signal, not a feature flag — see `documoEnabled` in menus.ts. */
+  DOCUMO_DOMAINS?: string;
   /** JSON array of `{label,url,title?}` download links shown on the app-access surface. Unset ⇒ none. */
   PORTAL_APP_DOWNLOADS?: string;
 
@@ -361,6 +362,10 @@ export const ROUTES = {
   // string, touching neither env nor any upstream. Still gated on `kit.status` like the rest of the
   // console, and still a GET, so the "non-GET means write" invariant is untouched.
   '/kit/menus/check': { sensitivity: 'read' },
+  // Same classification and the same grounds as the check route above: a pure function of the query
+  // string plus this deployment's own PORTAL_APPS_HIDE, disclosing nothing a console caller cannot
+  // already read from the Config tab.
+  '/kit/menus/resolve': { sensitivity: 'read' },
   '/me/status': { sensitivity: 'read' },
   '/me/devices': { sensitivity: 'read' },
   '/me/resetPassword': { sensitivity: 'write' },
@@ -1589,11 +1594,19 @@ export default {
     // beyond what Task 6's brief spelled out for this route; see the Task 6 report for why. Scoped to
     // exactly these two pathnames: no other route's auth timing changes, and resolveAuth is not called
     // twice for a single request — a match here returns before the normal routing section's own call.
-    if ((url.pathname === '/kit/status' || url.pathname === '/kit/spk.js' || url.pathname === '/kit/menus/check')) {
+    if ((url.pathname === '/kit/status' || url.pathname === '/kit/spk.js' || url.pathname === '/kit/menus/check'
+      || url.pathname === '/kit/menus/resolve')) {
       try {
         const auth = await resolveAuth(request, env, policies);
         if (!auth.principal) throw new HttpError(403, 'The console requires a delegated ns_t');
-        if (!can(auth.principal, 'kit.status', policies)) {
+        // TWO WAYS TO BE HANDED THE CONSOLE BUNDLE, and they are never the same principal at the same
+        // moment. `kit.status` is the console proper. `kit.captureMenus` exists only DURING a masquerade
+        // — while masking, `sub` is the masked user, so a superadmin stops passing every `users:`-shaped
+        // gate including this one, which is correct and stays that way. The capture gate matches on the
+        // masquerade itself plus the operator behind it.
+        const canConsole = can(auth.principal, 'kit.status', policies);
+        const canCapture = url.pathname === '/kit/spk.js' && can(auth.principal, 'kit.captureMenus', policies);
+        if (!canConsole && !canCapture) {
           // If nobody at all can reach the console (off, or no superadmin named), say so and name the
           // setting to fix — that's actionable. Otherwise this caller just isn't on a list that does
           // admit others, and the terse message is correct as-is (naming who IS admitted would leak it).
@@ -1622,7 +1635,14 @@ export default {
           }
           throw new HttpError(403, lockedReason ? `Not authorized: kit.status — ${lockedReason}` : 'Not authorized: kit.status');
         }
-        requireFleetRead(auth.principal, env); // the second, structural gate — see its own doc comment
+        // ⚠️ FLEET READ IS A CONSOLE GATE, NOT A BUNDLE GATE. It exists because the console DOCUMENT
+        // reports settings naming other customers' domains, and every scope below Reseller is
+        // domain-locked — so a `users:` grant to a domain-locked account must still be refused. A
+        // capture-only caller receives none of that: their bundle carries one menu item that reads the
+        // labels already rendered on the page in front of them and writes to their own browser. Running
+        // the fleet gate on them would refuse the whole feature for exactly the case it is for, since a
+        // masqueraded user is domain-locked by construction.
+        if (canConsole) requireFleetRead(auth.principal, env);
         if (url.pathname === '/kit/spk.js') {
           // Both gates above already ran (kit.status + requireFleetRead) — this is the tier-cached bundle
           // response, same shape as /kit/portal.js and /kit/self.js below. Its own tier namespace (`spk`)
@@ -1653,7 +1673,74 @@ export default {
           // Probed against ONLY the candidate: passing the live env would let a deployment that is already
           // misconfigured report every candidate as broken, which is the opposite of useful while fixing it.
           const error = menuConfigError({ PORTAL_MENUS: candidate });
-          return json({ ok: error === null, error }, 200, { ...cors, "Cache-Control": "no-store" });
+          // WARNINGS ARE NOT ERRORS, and the distinction is the point: a config whose default can never
+          // apply is accepted and deployed, because refusing it in the pre-routing gauntlet is how a
+          // cosmetic menu mistake once took the whole injection down. It is told to the operator here,
+          // where they are writing it, which is the only place the telling is useful.
+          const warnings = error === null ? unreachableDefaults({ PORTAL_MENUS: candidate }) : [];
+          return json({ ok: error === null, error, warnings }, 200, { ...cors, "Cache-Control": "no-store" });
+        }
+        // RESOLVE a candidate config for one audience — what the editor's preview renders from. Same
+        // shape and same reasoning as the check route above, one step further on: `check` answers "would
+        // this be accepted", this answers "what would it PRODUCE for this person".
+        //
+        // It exists so the console never re-implements precedence. `resolveTargeted` selects exactly one
+        // rung per half (users → domains → scopes → app, then the most specific in-axis `*`, then the
+        // whole-object `*`), and a browser-side copy of that is a copy that drifts — the same argument
+        // that keeps validation server-side, except the half that drifted would be the one deciding whose
+        // menu an operator is looking at. A preview that quietly disagrees with the runtime is worse than
+        // no preview: it is a wrong answer delivered with a picture.
+        //
+        // GET, deliberately. `WRITE_PATHS` is this Worker's whole POST allowlist and everything else is
+        // 405, so "non-GET means write" holds by construction; a POST that only computes would be the
+        // first exception to it. The 8192-char cap is the price, shared with the check route, and a
+        // config past it is already past what the editor can usefully render.
+        //
+        // ⚠️ MIXED SOURCES, on purpose, and this is the one place in the console where that is right.
+        // `PORTAL_MENUS` comes from the CANDIDATE (the whole point). `PORTAL_APPS_HIDE` comes from the
+        // LIVE env, because the editor does not edit that setting and the apps hide list is the UNION of
+        // the two (`appsHideSources`). Resolving the candidate alone would draw an apps menu missing
+        // entries this deployment really hides, and the operator would go looking for a bug in their own
+        // config. The check route's "candidate only" rule is the opposite case and stays as it is: there,
+        // the live env's own breakage must not be reported against a config being written to fix it.
+        if (url.pathname === '/kit/menus/resolve') {
+          const candidate = url.searchParams.get('c') ?? '';
+          if (candidate.length > 8192) throw new HttpError(413, 'Candidate config too large to resolve');
+          const menuEnv = { PORTAL_MENUS: candidate, PORTAL_APPS_HIDE: env.PORTAL_APPS_HIDE };
+          // The active SET the preview resolves against — the editor's persona picker sends one `app` per
+          // active integration. Multiple values are a legal question now that the axis unions across them;
+          // the refusal that used to live here was the union seam, and it is gone with the join.
+          //
+          // The ASKED-FOR set, never the live one: authoring config for a state a domain is not in yet is
+          // most of what the preview is for, and it is why a Documo rung can be written before Documo
+          // ships. What the preview does not claim is that any persona's stock menu looks like this — see
+          // the observe-and-cache caveat.
+          const apps = url.searchParams.getAll('app').flatMap((a) => a.split(',')).map((a) => a.trim()).filter(Boolean);
+          const ctx = {
+            domain: (url.searchParams.get('domain') ?? '').trim(),
+            app: apps,
+            ...(url.searchParams.get('scope') ? { scope: url.searchParams.get('scope')!.trim() } : {}),
+            ...(url.searchParams.get('user') ? { user: url.searchParams.get('user')!.trim() } : {}),
+          };
+          try {
+            // WHICH RUNG ANSWERED, per half, reported by the code that chose it. Without this the console
+            // would have to re-derive precedence to draw a provenance chip — precedence in a second place,
+            // which is the whole reason this endpoint exists. Arrays for the same reason `app` is a list.
+            const matched = {} as Record<string, { hide: unknown[]; add: unknown[] }>;
+            // AS WRITTEN, beside as resolved. `menuItemAt` interpolates {variable} placeholders and this
+            // preview resolves with no user facts, so a plan url is not a config url — an editor matching
+            // a drawn row back to its config entry by url fails on exactly the entries that use the
+            // feature. Index-aligned with plan.add by construction; see MenuItemPair.
+            const rawAdds = {} as Record<string, unknown[]>;
+            const plan = resolveMenus(menuEnv, ctx, matched as never, rawAdds as never);
+            // The apps provenance split rides along: the editor renders a legacy-hidden entry as ticked,
+            // disabled and attributed, and it cannot work that out from the effective list alone.
+            return json({ ok: true, plan, matched, rawAdds, appsHide: appsHideSources(menuEnv, ctx) }, 200, { ...cors, 'Cache-Control': 'no-store' });
+          } catch (e) {
+            // A candidate that does not parse is the normal case while typing one, not a server fault —
+            // same 200-with-a-verdict shape the check route uses, so the editor has one thing to read.
+            return json({ ok: false, error: e instanceof Error ? e.message : 'Could not resolve this config' }, 200, { ...cors, 'Cache-Control': 'no-store' });
+          }
         }
         if (needsFreshAuth(ROUTES['/kit/status'].sensitivity)) await requireFreshAuth(auth, env);
         const wantProbes = url.searchParams.get('probe') === '1';
@@ -2036,7 +2123,7 @@ export default {
           // Pass the same vars as the integrated path: without them {ext}/{name} would silently resolve
           // empty on exactly the deployments this branch exists to serve.
           const { ext: e0, domain: d0, record: r0 } = await resolveSelfNsUser(client, auth.principal);
-          return json({ menus: resolveMenus(env, { domain: d0, app: 'none', scope: auth.principal.scope, user: auth.principal.id, vars: menuVars(r0, e0, d0) }) }, 200, cors);
+          return json({ menus: resolveMenus(env, { domain: d0, app: activeApps(env, d0, false), scope: auth.principal.scope, user: auth.principal.id, vars: menuVars(r0, e0, d0) }) }, 200, cors);
         }
 
         // Identity from `~` ONLY (resolveSelfNsUser). The org/status/eligibility/decision logic — incl.
@@ -2052,7 +2139,9 @@ export default {
         if (wantMenus) {
           // `principal.scope` is the EFFECTIVE scope — the masked user's while masquerading — so an
           // operator viewing a masked session sees the menu that user sees, which is the point of masking.
-          menus = resolveMenus(env, { domain, app: proj.present ? 'ringotel' : 'none', scope: auth.principal.scope, user: auth.principal.id, vars: menuVars(record, ext, domain) });
+          // The ACTIVE SET, not one app: two integrations can be live on one domain, and the axis unions
+          // across them. `proj.present` is the Ringotel half; `activeApps` owns the rest.
+          menus = resolveMenus(env, { domain, app: activeApps(env, domain, proj.present), scope: auth.principal.scope, user: auth.principal.id, vars: menuVars(record, ext, domain) });
         }
 
         // The sign-in fields (mode/username/appDomain/downloads) belong to me.appAccess — a menus-only

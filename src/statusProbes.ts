@@ -31,7 +31,7 @@ import { NsClient, NsApiError, assertBareServer, NsSubscriptionsClient } from '@
 import { RingotelReadClient, RingotelApiError } from '@dszp/ringotel-lib';
 
 import { PROBE_CATALOG, probeCatalogFor } from './statusModel.js';
-import type { ProbeResult, ProbeCatalogEntry } from './statusModel.js';
+import type { ProbeResult, ProbeCatalogEntry, ProbeTable } from './statusModel.js';
 import type { StatusEnv } from './status.js';
 import { ringotelEnabled } from './ringotel.js';
 import { resolveWriteIdentity, parseNsEventsConfig, ownedPrefix, type NsEventsConfig } from './nsEvents.js';
@@ -50,7 +50,7 @@ export interface ProbeCtx {
  *  `statusModel.ts` (pure data) so the page can describe the checks without importing this I/O module. */
 const CATALOG_BY_ID: Record<string, ProbeCatalogEntry> = Object.fromEntries(PROBE_CATALOG.map((c) => [c.id, c]));
 
-type ProbeOutcome = Pick<ProbeResult, 'state' | 'detail'>;
+type ProbeOutcome = Pick<ProbeResult, 'state' | 'detail' | 'table'>;
 
 /** A string reports set when non-blank; a binding/other value reports set when non-null. Mirrors
  *  `status.ts`'s own `isSet` — kept as a small local copy rather than exporting one more surface from
@@ -65,8 +65,8 @@ function isSet(v: unknown): boolean {
 async function guarded(id: string, fn: () => Promise<ProbeOutcome>): Promise<ProbeResult> {
   const entry = CATALOG_BY_ID[id]!;
   try {
-    const { state, detail } = await fn();
-    return { id: entry.id, name: entry.name, cost: entry.cost, state, detail };
+    const { state, detail, table } = await fn();
+    return { id: entry.id, name: entry.name, cost: entry.cost, state, detail, ...(table ? { table } : {}) };
   } catch {
     return { id: entry.id, name: entry.name, cost: entry.cost, state: 'fail', detail: `${entry.name} could not be checked — the probe failed unexpectedly.` };
   }
@@ -159,6 +159,13 @@ function eventsNotArmedDetail(inertReason: string | undefined): string {
  * A `NS_EVENTS_DOMAINS=*` wildcard no longer needs resolving into a concrete list: with the full
  * subscription set already in hand from the one `list()` call, "does this work" is just "is at least one
  * subscription ours" — no Ringotel directory dig required.
+ *
+ * THE VERDICT IS NOT THE ANSWER, THOUGH — item 35/53. The config value cannot tell you whether a
+ * subscription exists, and "at least one is ours" is the weakest true thing that can be said about a
+ * wildcard deployment: it passes identically whether one domain is monitored or forty. So the same
+ * `list()` result the verdict comes from is also enumerated into a table, which costs nothing extra and
+ * answers the questions the count cannot — which domains are actually monitored, when each expires, and
+ * whether any of them is one this deployment should no longer be subscribed to.
  */
 async function nsEventsProbe(env: StatusEnv, identityPassed: boolean): Promise<ProbeOutcome> {
   let cfg: NsEventsConfig;
@@ -192,14 +199,16 @@ async function nsEventsProbe(env: StatusEnv, identityPassed: boolean): Promise<P
 
   const prefix = ownedPrefix(cfg);
   const ours = actual.filter((s) => (s.postUrl ?? '').startsWith(prefix));
+  const table = subscriptionTable(ours, actual.length - ours.length, cfg);
 
   if (cfg.domains === '*') {
     if (ours.length > 0) {
-      return { state: 'pass', detail: `${ours.length} owned subscription${ours.length === 1 ? '' : 's'} found (${actual.length} total on the account).` };
+      return { state: 'pass', detail: `${ours.length} owned subscription${ours.length === 1 ? '' : 's'} found (${actual.length} total on the account).`, table };
     }
     return {
       state: 'fail',
       detail: `No owned subscriptions found (${actual.length} total on the account) — an armed wildcard deployment should have reconciled at least one.`,
+      table,
     };
   }
 
@@ -207,8 +216,48 @@ async function nsEventsProbe(env: StatusEnv, identityPassed: boolean): Promise<P
   const missing = cfg.domains.filter((d) => !oursByDomain.has(d.toLowerCase()));
   const covered = cfg.domains.length - missing.length;
   const summary = `${covered} of ${cfg.domains.length} configured domain${cfg.domains.length === 1 ? '' : 's'} have an owned subscription (${actual.length} total, ${ours.length} ours)`;
-  if (missing.length === 0) return { state: 'pass', detail: `${summary}.` };
-  return { state: 'fail', detail: `${summary} — missing: ${missing.join(', ')}.` };
+  if (missing.length === 0) return { state: 'pass', detail: `${summary}.`, table };
+  return { state: 'fail', detail: `${summary} — missing: ${missing.join(', ')}.`, table };
+}
+
+/**
+ * The subscriptions this deployment owns, one row each. Ownership is by `postUrl` prefix — the same test
+ * the reconcile uses to decide what it may touch — so the table shows exactly the set this deployment
+ * considers its own, which is what makes a stray row meaningful rather than curious.
+ *
+ * The last column is the one worth having. A subscription whose domain is no longer in `NS_EVENTS_DOMAINS`
+ * is still LIVE: the deployment is being posted events for a domain it has been told to stop handling, and
+ * nothing else on this page surfaces that. Under a wildcard every domain is configured by definition, so
+ * the column says so rather than implying a check happened.
+ *
+ * Subscriptions belonging to something else are counted, never listed: they are another integration's, the
+ * count is the whole useful fact about them, and a table of foreign post URLs is somebody else's business
+ * rendered in ours.
+ */
+const SUB_ROW_CAP = 200;
+
+function subscriptionTable(ours: { domain?: string; model?: string; expiresAt?: string }[], others: number, cfg: NsEventsConfig): ProbeTable {
+  const configured = cfg.domains === '*' ? null : new Set(cfg.domains.map((d) => d.toLowerCase()));
+  const sorted = [...ours].sort((a, b) => (a.domain ?? '').localeCompare(b.domain ?? ''));
+  const shown = sorted.slice(0, SUB_ROW_CAP);
+  const rows = shown.map((s) => {
+    const domain = s.domain ?? '(no domain filter)';
+    const inConfig = configured === null
+      ? 'every domain is configured'
+      : configured.has(domain.toLowerCase()) ? 'yes' : 'NO — this deployment is still being sent its events';
+    return [domain, s.model ?? '—', s.expiresAt ?? 'no expiry set', inConfig];
+  });
+
+  const notes: string[] = [];
+  if (sorted.length > shown.length) notes.push(`${sorted.length - shown.length} further owned subscription(s) are not listed here — this table stops at ${SUB_ROW_CAP} rows.`);
+  if (others > 0) notes.push(`${others} subscription(s) on this account post somewhere else and belong to another integration; they are counted, not listed.`);
+
+  return {
+    caption: `Event subscriptions this deployment owns (${sorted.length})`,
+    columns: ['Domain', 'Events', 'Expires', 'In NS_EVENTS_DOMAINS'],
+    rows,
+    ...(notes.length ? { note: notes.join(' ') } : {}),
+  };
 }
 
 /**

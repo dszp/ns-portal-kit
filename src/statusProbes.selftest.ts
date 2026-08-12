@@ -112,6 +112,40 @@ globalThis.fetch = modeFetch;
   rs = await runProbes({ ...baseEnv, NS_EVENTS_DOMAINS: '*' } as any, NO_READ_CTX);
   ok(byId(rs, 'ns-events').state === 'fail', 'an armed wildcard config with ZERO owned subscriptions ⇒ fail');
 
+  // ── item 35/53: the same list() result, enumerated ────────────────────────────────────────────────
+  // The verdict is a count; the table is the answer to the questions a count cannot reach. Under a
+  // wildcard especially — "at least one is ours" passes identically for one monitored domain and forty.
+  {
+    const expiring = { ...subRecord('acme.example'), 'subscription-expires-datetime': '2027-01-01 00:00:00' };
+    stubList([expiring, subRecord('beta.example')]);
+    rs = await runProbes({ ...baseEnv, NS_EVENTS_DOMAINS: '*' } as any, NO_READ_CTX);
+    const t = byId(rs, 'ns-events').table;
+    ok(!!t && t.rows.length === 2, 'a wildcard result enumerates every owned subscription, not just a count');
+    ok(!!t && t.rows.map((r: string[]) => r[0]).join(',') === 'acme.example,beta.example',
+      'one row per monitored domain, sorted');
+    ok(!!t && t.rows[0]!.includes('2027-01-01 00:00:00'), 'carrying the expiry NetSapiens reported');
+    ok(!!t && t.rows.every((r: string[]) => /every domain is configured/.test(r[3]!)),
+      'and a wildcard says every domain is configured rather than implying a check happened');
+
+    // A subscription that is OURS but whose domain is no longer configured is live and should not be —
+    // the reason for enumerating rather than counting. Nothing else on the page surfaces it.
+    stubList([subRecord('acme.example'), subRecord('gone.example')]);
+    rs = await runProbes({ ...baseEnv, NS_EVENTS_DOMAINS: 'acme.example' } as any, NO_READ_CTX);
+    const t2 = byId(rs, 'ns-events').table;
+    const stray = t2.rows.find((r: string[]) => r[0] === 'gone.example');
+    ok(!!stray && /^NO/.test(stray[3]!), 'an owned subscription for an unconfigured domain is flagged in the table');
+    ok(t2.rows.find((r: string[]) => r[0] === 'acme.example')![3] === 'yes', 'and a configured one is not');
+
+    // Foreign subscriptions are counted, never listed — the count is the whole useful fact, and a bounded
+    // table must say what it is not showing.
+    stubList([subRecord('acme.example'), { id: 'other', model: 'subscriber', 'post-url': 'https://someone.else/hook', domain: 'third.example' }]);
+    rs = await runProbes({ ...baseEnv, NS_EVENTS_DOMAINS: 'acme.example' } as any, NO_READ_CTX);
+    const t3 = byId(rs, 'ns-events').table;
+    ok(t3.rows.length === 1 && !JSON.stringify(t3).includes('third.example'),
+      'a subscription belonging to another integration is not listed');
+    ok(/1 subscription\(s\).*another integration/.test(t3.note ?? ''), 'but it is counted, in a note on the table');
+  }
+
   // the list() read itself fails
   globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
   rs = await runProbes({ ...baseEnv, NS_EVENTS_DOMAINS: 'acme.example' } as any, NO_READ_CTX);

@@ -284,15 +284,41 @@ const ok = (c: boolean, m: string) => {
   // baseline is byte-identical (asserted above) and ZERO Ringotel calls were made.
   ok(ringotelCalls === 0, '[ringotel] disabled (no key) → zero Ringotel calls; NS baseline unchanged');
 
-  // Enabled: stub a Ringotel org whose branch.address == this domain, with a user per ###r device.
-  const rtExts = [...new Set([...JSON.stringify(expected).matchAll(/\((\d+)r\)/g)].map((m) => m[1]!))];
-  if (rtExts.length) {
+  // ⚠️ THIS BRANCH NEEDS ITS OWN ENTITY, and used to borrow the one the rest of the suite tests. A ###r
+  // token only ever appears where a device is NAMED — a sim-ring parameter — and a queue diagram lists its
+  // agents without expanding anyone's ring set, so on a queue-bearing snapshot the token was never there.
+  // The whole enrichment branch then skipped, reporting `ok(true, 'skipped')`: a green tick over dead code,
+  // which is worse than a red one because nothing ever asks why. So find the entity that can show it.
+  const rtProbe = (() => {
+    const rules = (raw as any).answerrulesByUser as Record<string, any[]> | undefined;
+    for (const [user, list] of Object.entries(rules ?? {})) {
+      for (const r of list ?? []) {
+        const ps = r?.['simultaneous-ring']?.parameters;
+        if (!Array.isArray(ps)) continue;
+        const devs = ps.map((p: unknown) => String(p)).filter((p: string) => /^\d+r$/i.test(p));
+        if (devs.length) return { user: String(user), exts: [...new Set(devs.map((p) => p.slice(0, -1)))] };
+      }
+    }
+    return null;
+  })();
+  // A LOUD SKIP, not a silent pass. The committed fixture carries a device-suffixed sim-ring precisely so
+  // this runs; an external snapshot passed on the command line may not, and that is a real gap in what
+  // that run covered rather than something to nod through.
+  ok(!!rtProbe || snapPath !== DEFAULT_SNAP,
+    '[ringotel] the fixture names a ###r device in a sim-ring — the only shape that exercises enrichment');
+  if (rtProbe) {
+    const rtExts = rtProbe.exts;
+    // Stub a Ringotel org whose branch.address == this domain, with a user per ###r device.
     clearOrgParams(); rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
     rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain, provision: { proxy: { paddr: 'sbc.example.net' } } }];
     rtUsers = rtExts.map((e) => ({ id: `u${e}`, extension: e, branchid: 'RTBR', name: `RT ${e}`, devs: [{ id: `d${e}`, st: 0 }] }));
 
     const rEnv = { ...sEnv, RINGOTEL_API_KEY: 'rt-key' };
-    const rr = await worker.fetch(new Request(`https://w.dev/flow?domain=${domain}&kind=${kind}&ref=${ref}`), rEnv as any, ctx);
+    const flow = `https://w.dev/flow?domain=${domain}&kind=user&ref=${rtProbe.user}`;
+    // AUTHENTICATED, like every other call in this suite. The old form sent no Authorization header and
+    // nobody noticed, because the branch it sat in never ran — a 401 would have read as "no enrichment".
+    const rflow = (u: string) => new Request(u, { headers: { Authorization: `Bearer ${resellerTok}` } });
+    const rr = await worker.fetch(rflow(flow), rEnv as any, ctx);
     const rg = await rr.json();
     const mmd = String(rg.__mermaid ?? '');
     // Default label "Ringotel"; inline suffix inserted right after an (###r) token.
@@ -300,12 +326,14 @@ const ok = (c: boolean, m: string) => {
     ok(ringotelCalls > 0, '[ringotel] enabled → Ringotel API called (directory + users)');
     // Disable per-request even when configured.
     rtUsers = [];
-    const rr0 = await worker.fetch(new Request(`https://w.dev/flow?domain=${domain}&kind=${kind}&ref=${ref}&enrich=0`), rEnv as any, ctx);
+    const rr0 = await worker.fetch(rflow(`${flow}&enrich=0`), rEnv as any, ctx);
     const before = ringotelCalls;
-    await rr0.json();
+    const rg0 = await rr0.json();
     ok(ringotelCalls === before, '[ringotel] ?enrich=0 → no Ringotel calls even when configured');
-  } else {
-    ok(true, '[ringotel] enabled enrichment skipped — no ###r devices in this fixture');
+    // ...and the output is the un-enriched diagram, which is what the flag says it is. Asserting only the
+    // call count would pass on a cached enriched response served for the opt-out request.
+    ok(!/\(Ringotel, /.test(String(rg0.__mermaid ?? '')),
+      '[ringotel] ?enrich=0 → and the diagram comes back without the suffix, not from an enriched cache');
   }
 
   // ================= /rapp/org route (standalone mode; ?refresh bypasses cross-test cache) =================
@@ -1229,6 +1257,126 @@ const ok = (c: boolean, m: string) => {
       const rBundle = await kcall('/kit/spk.js', resTok);
       ok(rBundle.status === 204, '[spk] the bundle route answers a routine not-entitled refusal with a quiet 204, not 403');
       ok((await rBundle.text()) === '', '[spk] and the 204 body is empty');
+    }
+
+    // ── CAPTURE WHILE MASQUERADING: a second way to be handed this bundle, and a strictly smaller one ──
+    //
+    // While masking, `sub` is the MASKED user, so a superadmin stops passing every `users:`-shaped gate —
+    // including the console's own. That is correct and must stay: the console reports other customers'
+    // domains. But it also means the one capability that only makes sense DURING a masquerade had no way
+    // to be expressed, which is what `masked_by_superadmin` is for: masking on, operator a superadmin.
+    {
+      const masked = mkTok({
+        user_scope: 'Office Manager', sub: 'user@cust.local', user: 'user', domain: 'cust.local',
+        mask_chain: 'boss@mock.local',
+      });
+      const rCap = await kcall('/kit/spk.js', masked);
+      ok(rCap.status === 200, '[capture] a superadmin masked into another account IS handed the bundle');
+      const body = await rCap.text();
+      // The tier it gets is the capture flag ALONE. Shipping the console flag to a masked session would
+      // hand the console to whoever the operator happens to be masked into.
+      ok(/capture:true/.test(body) && !/status:true/.test(body),
+        '[capture] carrying the capture flag and NOT the console flag');
+      ok(body.includes('_svxStock'), '[capture] and the store it writes to');
+
+      // The console document itself stays refused for that same session — the bundle is not a key to it.
+      ok((await kcall('/kit/status', masked)).status === 403,
+        '[capture] while the console document stays refused for that same masked session');
+
+      // ⚠️ THE GATE IS THE OPERATOR, NOT THE MASQUERADE. A reseller who is not a superadmin masking into
+      // someone gets nothing — otherwise "capture" would be available to anyone who can masquerade at
+      // all, which on this platform is a much larger set than the console's audience.
+      const maskedByReseller = mkTok({
+        user_scope: 'Office Manager', sub: 'user@cust.local', user: 'user', domain: 'cust.local',
+        mask_chain: 'someone@else.local',
+      });
+      ok((await kcall('/kit/spk.js', maskedByReseller)).status === 204,
+        '[capture] but a non-superadmin operator masking in gets nothing');
+    }
+
+    // ── /kit/menus/resolve — the editor's preview, resolved SERVER-side ──────────────────────────────
+    // The route exists so the console never re-implements precedence. These cases pin the two properties
+    // that make it worth having: it selects the same rung the runtime would, and it merges the LIVE
+    // PORTAL_APPS_HIDE into the apps hide list even though the candidate config knows nothing about it.
+    {
+      // A candidate shaped like a real config: an app-targeted hide, a scope-targeted add with a default.
+      const cand = JSON.stringify({
+        apps: { hide: { app: { ringotel: ['SNAPmobile Web'], none: [] } } },
+        account: { add: { scopes: { Reseller: [] }, '*': [{ label: 'Email Support', url: 'mailto:s@example.com' }] } },
+      });
+      const q = (extra: string) => `/kit/menus/resolve?c=${encodeURIComponent(cand)}&${extra}`;
+      const legacyEnv = { ...kEnv, PORTAL_APPS_HIDE: 'SNAPbuilder' };
+
+      const rr = await jbody(await kcall(q('domain=acme.example&app=ringotel&scope=Reseller'), bossTok, legacyEnv));
+      ok(rr.ok === true, '[resolve] a valid candidate resolves');
+      ok(rr.plan.apps.hide.includes('SNAPmobile Web'),
+        '[resolve] the app axis selects the rung matching the asked-for app state');
+      // The whole reason the route reads PORTAL_APPS_HIDE off the LIVE env rather than the candidate: a
+      // preview that omitted this would draw an apps menu this deployment does not have.
+      ok(rr.plan.apps.hide.includes('SNAPbuilder'),
+        '[resolve] and the live PORTAL_APPS_HIDE is merged in, though the candidate never mentions it');
+      ok(rr.appsHide.legacy.join() === 'SNAPbuilder' && rr.appsHide.menus.includes('SNAPmobile Web'),
+        '[resolve] with the provenance split the editor needs to attribute each entry');
+
+      // Select-one-rung, not merge: a Reseller gets the empty exemption, NOT the default's entry.
+      const res = await jbody(await kcall(q('domain=acme.example&app=ringotel&scope=Reseller'), bossTok, legacyEnv));
+      ok(res.plan.account.add.length === 0,
+        '[resolve] an empty scope rung is an exemption — the default is not merged into it');
+      const om = await jbody(await kcall(q('domain=acme.example&app=ringotel&scope=Office%20Manager'), bossTok, legacyEnv));
+      ok(om.plan.account.add.length === 1 && om.plan.account.add[0].label === 'Email Support',
+        '[resolve] while an audience no rung names falls through to the default');
+
+      // Switching the asked-for app state changes the answer — the persona picker's whole premise.
+      const noneApp = await jbody(await kcall(q('domain=acme.example&app=none&scope=Reseller'), bossTok, legacyEnv));
+      ok(!noneApp.plan.apps.hide.includes('SNAPmobile Web'),
+        '[resolve] and the other app state selects the other rung');
+
+      // A candidate that does not parse is the normal case while typing one: a verdict, not a 500.
+      const bad = await jbody(await kcall('/kit/menus/resolve?c=%7Bnope', bossTok, legacyEnv));
+      ok(bad.ok === false && typeof bad.error === 'string',
+        '[resolve] an unparseable candidate answers with a verdict rather than failing the request');
+
+      // WHICH RUNG ANSWERED, per half. Without this the console re-derives precedence to draw a chip,
+      // which is the thing this endpoint exists to prevent.
+      ok(rr.matched.apps.hide[0].axis === 'app' && rr.matched.apps.hide[0].key === 'ringotel',
+        '[resolve] the response names the rung that answered, with the key as written');
+      ok(res.matched.account.add[0].axis === 'scopes' && res.plan.account.add.length === 0,
+        '[resolve] an empty list WITH a source is the exemption idiom, distinguishable from nothing matching');
+      ok(om.matched.account.add[0].axis === '*',
+        '[resolve] and an audience no rung names is attributed to the default, not left unexplained');
+      const bare = await jbody(await kcall(q('domain=acme.example&app=ringotel&scope=Reseller').replace(/&scope=Reseller/, ''), bossTok, legacyEnv));
+      ok(Array.isArray(bare.matched.management.add) && bare.matched.management.add.length === 0,
+        '[resolve] a half with no config at all reports an empty source list, not a null');
+      // ARRAY-shaped from day one. A second integration makes "ringotel active" and "documo active"
+      // independent conditions that can both hold, so a half legitimately answers from two app rungs —
+      // and widening a scalar then would break a shape the editor already consumes.
+      ok(Array.isArray(rr.matched.apps.hide), '[resolve] provenance is a list, sized for the app-axis union that is coming');
+
+      // `app` is a SET on the wire, and a multi-app preview is a legal question now that the axis unions
+      // across them. Both spellings — repeated params and a comma-separated one — reach the same set.
+      {
+        const cand2 = JSON.stringify({ apps: { hide: { app: { ringotel: ['A'], documo: ['B'], none: [] } } } });
+        const q2 = (extra: string) => `/kit/menus/resolve?c=${encodeURIComponent(cand2)}&${extra}`;
+        const both = await jbody(await kcall(q2('domain=acme.example&app=ringotel&app=documo'), bossTok, kEnv));
+        ok(both.plan.apps.hide.includes('A') && both.plan.apps.hide.includes('B'),
+          '[resolve] two active apps UNION — neither integration silently loses its entries');
+        ok(both.matched.apps.hide.length === 2,
+          '[resolve] and both rungs are reported, which is why provenance had to be a list');
+        const csv = await jbody(await kcall(q2('domain=acme.example&app=ringotel,documo'), bossTok, kEnv));
+        ok(JSON.stringify(csv.plan) === JSON.stringify(both.plan),
+          '[resolve] the comma-separated spelling reaches the same set');
+        const empty = await jbody(await kcall(q2('domain=acme.example'), bossTok, kEnv));
+        ok(empty.plan.apps.hide.length === 0 && empty.matched.apps.hide[0].key === 'none',
+          '[resolve] and an empty active set matches `none`, not a default');
+      }
+
+      // Same cap as the check route, and for the same reason.
+      const big = await kcall(`/kit/menus/resolve?c=${'x'.repeat(9000)}`, bossTok, legacyEnv);
+      ok(big.status === 413, '[resolve] an oversized candidate is refused, not parsed');
+
+      // It is console-gated like everything else on this surface.
+      ok((await kcall('/kit/menus/resolve?c=%7B%7D', resTok)).status === 403,
+        '[resolve] and a caller who cannot open the console cannot call it either');
     }
 
     // kEnv DOES name a superadmin (boss@mock.local) — this reseller just isn't them. Someone IS

@@ -12,12 +12,12 @@
 import { can, type Principal, type FeaturePolicies, type Policy } from '@dszp/netsapiens-lib';
 
 import {
-  SETTINGS, SECRET_WHY_NOT, CONFIG_WHY_NOT, BINDING_WHY_NOT, SUBSYSTEM_DETAIL,
+  SETTINGS, SECRET_WHY_NOT, CONFIG_WHY_NOT, BINDING_WHY_NOT, SUBSYSTEM_DETAIL, settingDocsUrl,
   type StatusDoc, type FeatureCard, type FeatureState, type MissingRequirement,
   type SettingView, type SettingDef, type SettingGroup, type SubsystemCard, type ProbeResult,
   type Applicability, type SettingGate, type FeatureAudience, type SubsystemTab,
   type PermissionsView, type PermissionRow, type PermissionCell, type CellVerdict, type CellDelta,
-  type MenusView, type MenuView,
+  type MenusView,
 } from './statusModel.js';
 
 import {
@@ -30,8 +30,8 @@ import { productName, releaseNotesUrl, VERSION, type BrandEnv } from './brand.js
 import { needsSetup, setupIssues, nsServerConfigured, type SetupEnv } from './setup.js';
 import { isLocalRequest } from './localRequest.js';
 import { kitConfigError, primaryBasename, type KitEnv } from './kit.js';
-import { menuConfigError, resolveMenus, appsHideSources, bothAppsHideSet, MENU_NAMES, type MenuEnv } from './menus.js';
-import { appAccessConfigError, type AppAccessEnv } from './appAccess.js';
+import { menuConfigError, resolveMenus, appsHideSources, bothAppsHideSet, unreachableDefaults, availableApps, MENU_NAMES, type MenuEnv } from './menus.js';
+import { appAccessConfigError, parseDownloads, type AppAccessEnv } from './appAccess.js';
 import { nsEventsConfigError, parseNsEventsConfig, resolveWriteIdentity, type NsWriteIdentity, type NsEventsEnv } from './nsEvents.js';
 import { nsDeviceDetailsEnabled, type NsDeviceEnv } from './nsDevices.js';
 import { identityUsable, type NsIdentityEnv } from './nsIdentity.js';
@@ -403,6 +403,7 @@ function settingView(def: SettingDef, env: StatusEnv, eventsArmed = false): Sett
     example: def.example ?? null,
     gate: gateOf(def, env, eventsArmed),
     applicability: applicabilityOf(def, env),
+    docsUrl: settingDocsUrl(def.name),
     // Null for a secret by construction: `value` is already null there, so no branch can leak one.
     copy: value === null ? null : { pretty: prettyOf(value), wrangler: wranglerLine(def.name, value) },
   };
@@ -675,8 +676,8 @@ function buildSubsystems(
       settings: ['NS_SERVER', 'NS_PORTAL_ISS', 'JWT_RATE_LIMITER'],
       result: authCard(env) },
     { id: 'branding', name: 'Branding', group: 'branding', tab: 'deployment', parent: null,
-      description: 'Cosmetic accent color and product name shown in the viewer and page titles.',
-      settings: ['BRAND_NAME', 'BRAND_ACCENT', 'BRAND_LABEL'],
+      description: 'Cosmetic accent colour for call-flow diagrams, and the product name shown in page titles and the portal footer.',
+      settings: ['BRAND_NAME', 'BRAND_ACCENT'],
       result: brandingCard(env) },
     { id: 'domains', name: 'Domain allow/block lists', group: 'domains', tab: 'deployment', parent: null,
       description: 'App-layer restriction on which NetSapiens domains this deployment will read, on top of the token\'s own scope.',
@@ -1385,60 +1386,46 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
   const prunedFeatures = features.map(prune);
   const prunedSubsystems = subsystems.map(prune);
 
-// ── menus: what the menu config currently does, and the builder's starting point ─────────────────────
+// ── menus: the builder's starting point, and the two verdicts on the live config ─────────────────────
 //
-// Resolved at an UNTARGETED probe rung — a domain no config names, no app active, no scope. This tab is
-// about the DEPLOYMENT's configuration, so resolving it for whoever opened the console would show a
-// different "current state" to each operator with no way to tell which was the real one. `targeted` marks
-// the menus where that distinction actually bites, so the reader is told rather than misled by omission.
-const MENU_LABEL: Record<string, { label: string; what: string }> = {
-  apps: { label: 'Apps', what: 'The Apps dropdown in the top navigation — the one most deployments customise first.' },
-  account: { label: 'Account', what: 'The signed-in user\'s own name dropdown, carrying their profile and sign-out.' },
-  management: { label: 'Management', what: 'The top-nav Management dropdown, which the portal shows only to administrative scopes.' },
-};
+// It used to resolve every menu at a fictional untargeted rung so the tab could render a per-menu summary
+// server-side. That summary is gone (see renderMenus) — one rung is not "the config", which is why every
+// targeted card had to carry a paragraph saying so — and this went with it rather than being left
+// computed for nobody. What survives is what is rung-INDEPENDENT: is it valid, does any of it reach
+// nobody, what is the raw text, and which apps could this deployment ever run.
 
-/** Does this menu's config vary by domain, scope or app state? A bare array does not; any object rung does. */
-function isTargetedCfg(v: unknown): boolean {
-  return !!v && typeof v === 'object' && !Array.isArray(v);
-}
-
-function buildMenus(env: StatusEnv, menuErr: string | null): MenusView {
+function buildMenus(env: StatusEnv, menuErr: string | null, signIn: boolean): MenusView {
   const configured = isSet(env.PORTAL_MENUS) || isSet(env.PORTAL_APPS_HIDE);
   const rawSrc = (env.PORTAL_MENUS ?? '').trim();
   const raw = prettyOf(rawSrc) ?? rawSrc;
 
-  // A broken config still has to render this tab — it is where the operator comes to fix it. So the
-  // resolution is guarded and an unresolvable menu reports empty rather than taking the page down.
-  let resolved: Record<string, { hide: string[]; add: { label: string; url: string; title?: string }[] }> = {};
-  try {
-    resolved = resolveMenus(env, { domain: 'probe.example', app: 'none' }) as never;
-  } catch { /* menuErr already carries the reason, and the tab leads with it */ }
+  // Reported here as well as in the builder's verdict: the hand-edited-var path never touches the
+  // builder, and a config whose entries reach nobody is exactly what a status page is for. Guarded
+  // because a broken config still has to render this tab — it is where the operator comes to fix it.
+  let unreachable: string[] = [];
+  try { unreachable = unreachableDefaults(env); } catch { /* invalid config is menuErr's story */ }
 
-  let rawCfg: Record<string, { hide?: unknown; add?: unknown }> = {};
-  try { rawCfg = JSON.parse((env.PORTAL_MENUS ?? '').trim() || '{}'); } catch { rawCfg = {}; }
+  // ⚠️ `parseDownloads` THROWS on a malformed value, and this function must not — the console is where
+  // an operator comes to READ the error, so a builder that dies on bad config takes the page that would
+  // have explained it. The app-access card is what reports that error; here a broken value simply means
+  // no download row is drawn.
+  let downloads = false;
+  try { downloads = parseDownloads(env).length > 0; } catch { /* reported by the app-access card */ }
 
-  const menus: MenuView[] = MENU_NAMES.map((name) => {
-    const cfg = (rawCfg as Record<string, { hide?: unknown; add?: unknown }>)[name] ?? {};
-    const r = resolved[name] ?? { hide: [], add: [] };
-    return {
-      name,
-      label: MENU_LABEL[name]?.label ?? name,
-      what: MENU_LABEL[name]?.what ?? '',
-      hide: r.hide,
-      add: r.add,
-      targeted: isTargetedCfg(cfg.hide) || isTargetedCfg(cfg.add),
-    };
-  });
-
-  let appsHide: MenusView['appsHide'] = null;
-  if (bothAppsHideSet(env)) {
-    try {
-      const src = appsHideSources(env, { domain: 'probe.example', app: 'none' });
-      appsHide = { legacy: src.legacy, menus: src.menus };
-    } catch { /* same reasoning as above */ }
-  }
-
-  return { menus, configured, raw, error: menuErr, appsHide };
+  return {
+    configured, raw, error: menuErr, unreachable, availableApps: availableApps(env),
+    injected: {
+      label: (env.RINGOTEL_LABEL ?? '').trim() || 'Ringotel',
+      downloads,
+      signIn,
+      // WHICH integration these rows belong to. The sign-in block and the downloads are the app-access
+      // feature, which is the Ringotel one — the same integration RINGOTEL_LABEL names, one line above.
+      // Naming it lets the preview draw them only when that app is the active one: a domain running a
+      // different integration does not get this integration's sign-in details, and showing them there
+      // was the picture claiming something the portal would not do.
+      app: 'ringotel',
+    },
+  };
 }
 
   // ── permissions: built FROM the feature cards, not beside them, so the matrix and the cards cannot
@@ -1454,7 +1441,9 @@ function buildMenus(env: StatusEnv, menuErr: string | null): MenusView {
     subsystems: prunedSubsystems,
     settings,
     permissions,
-    menus: buildMenus(env, menuErr),
+    // The sign-in rows are drawn only when that feature is actually on — its own card already decided
+    // that, so read the answer rather than re-deriving the gate here.
+    menus: buildMenus(env, menuErr, prunedFeatures.some((f) => f.key === 'me.appAccess' && f.state === 'on')),
     probes,
   };
 }

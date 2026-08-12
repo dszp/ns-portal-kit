@@ -54,6 +54,19 @@ function pushLevel(rules: PolicyRule[], level: string, superadmins: string[]): v
   if (level === 'off') throw new FeaturesConfigError('"off" is only valid as the entire gate, not inside a list');
   if (level === 'all') { rules.push({ domains: ['*'] }); return; } // any principal (every principal has a domain)
   if (level === 'superadmin') { if (superadmins.length) rules.push({ users: superadmins }); return; }
+  // ⚠️ THE ONLY LEVEL THAT IS ABOUT THE OPERATOR RATHER THAN THE READER.
+  //
+  // While masquerading, `sub` is the MASKED user, so `toPrincipal` makes the effective identity theirs —
+  // which is right, and is why a superadmin who masks in stops passing every `users:`-shaped gate,
+  // including the console's own. That is the correct default and must not be loosened.
+  //
+  // But it also means a capability that only makes sense DURING a masquerade cannot be expressed by any
+  // existing level. This one is: masking is on AND the operator behind the mask is a superadmin. Both
+  // conditions already exist in the policy engine and neither had a use until now.
+  if (level === 'masked_by_superadmin') {
+    if (superadmins.length) rules.push({ masking: true, operators: superadmins });
+    return;
+  }
   const scopes = LEVEL_SCOPES[level];
   if (!scopes) throw new FeaturesConfigError(`unknown level: ${level}`);
   rules.push({ scopes });
@@ -170,6 +183,18 @@ export interface FeatureDef {
    * `kit.status`. A key with no `allowedLevels` is unconstrained, as before.
    */
   allowedLevels?: string[];
+  /**
+   * Names the RUNTIME gate that still refuses a domain-locked account admitted by name — and its
+   * presence is what permits a `users:` grant past {@link allowedLevels} at all.
+   *
+   * ⚠️ The floor checked LEVELS only, so `{"users":["100@customer"]}` sailed through a declaration that
+   * says "only these levels". On `kit.status` that was survivable because `requireFleetRead` refuses the
+   * caller a second time at the route; on a feature with no such gate it was the floor not enforcing
+   * what it claims. Rather than banning `users:` everywhere (a legitimate way to admit one account, and
+   * this kit ships to operators whose configs we cannot see), the exemption has to be DECLARED, next to
+   * the level list it is an exemption from.
+   */
+  usersBackstop?: string;
 }
 
 /** Single source of truth for gate-able features. Defaults = today's per-scope matrix. */
@@ -271,7 +296,20 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
   // NS_EVENTS_DOMAINS, RINGOTEL_WRITE_DOMAINS, PORTAL_MENUS targeting), and every scope below Reseller
   // is domain-locked by resolveAuth. `superadmin` + an unset PORTAL_SUPERADMINS resolves to deny-all,
   // so an operator who has named nobody gets no console.
-  { key: 'kit.status', name: 'Super Portal Kit', description: 'Read-only status and configuration console for this deployment.', default: 'superadmin', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'] },
+  { key: 'kit.status', name: 'Super Portal Kit', description: 'Read-only status and configuration console for this deployment.', default: 'superadmin', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'], usersBackstop: 'requireFleetRead (worker.ts) — a domain-locked account admitted by name is still refused at the route' },
+  {
+    key: 'kit.captureMenus',
+    name: 'Remember a role\u2019s menus',
+    description: 'While masquerading, lets the operator store that role\u2019s stock menu entries in their own browser, so the menu editor can draw them.',
+    default: 'masked_by_superadmin',
+    deliveredBy: 'console',
+    allowedLevels: ['off', 'masked_by_superadmin'],
+    detail: [
+      'The menu editor draws each menu the way the audience you pick would see it. It gets the rules right — your deployment resolves them — but the stock entries it starts from are whatever was on the page you opened the console from, read as you. Preview another role and those entries are an approximation, and nothing in a browser can fix that on its own: you can only be one identity at a time, so there is no way to load another role\u2019s page beside your own.',
+      'What there is: you already masquerade. This adds one menu entry while you are masqueraded that stores that role\u2019s menu entries in your own browser. Un-masquerade, open the console, pick that role, and the picture is drawn from what you captured rather than from your own menus — with the capture date on screen, because a snapshot that does not say when it was taken is the next wrong answer.',
+      'It reads only the labels already rendered on the page in front of you, and writes only to your own browser. Nothing is sent anywhere, no configuration changes, and the capability is gated on the masquerade itself: the rule requires masking to be on and the operator behind the mask to be a superadmin, so it cannot be reached by anyone signing in normally.',
+    ],
+  },
 ];
 
 /** The registry's policy keys, in order (drives `_AF` + the default policy set). */
@@ -420,6 +458,9 @@ export function parseFeatures(env: FeaturesEnv): Record<string, Gate> {
       const shape = gateLevels(v);   // throws on an unknown shape — do not soften this
       if (shape.hasRawRules) {
         throw new FeaturesConfigError(`PORTAL_FEATURES["${k}"] may not use raw policy rules: a raw rule can name any scope, which would bypass this feature's allowed levels (${def.allowedLevels.join(', ')})`);
+      }
+      if (shape.users.length && !def.usersBackstop) {
+        throw new FeaturesConfigError(`PORTAL_FEATURES["${k}"] may not name users directly: this feature is bounded to the levels ${def.allowedLevels.join(', ')}, and naming an account bypasses that with nothing behind it to refuse the caller a second time.`);
       }
       const bad = shape.levels.filter((l) => !def.allowedLevels!.includes(l));
       if (bad.length) {

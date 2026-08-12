@@ -84,10 +84,10 @@ ok(envBadge('svc.example.com', 'dev') === 'DEV', 'CACHE_SCOPE=dev wins over a pr
   const doc = buildStatus(OK_ENV, { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' });
   const byKey = (k: string) => doc.features.find((f) => f.key === k)!;
 
-  // EXACT, not a floor. `>= 18` against a registry of exactly 20 passes by coincidence and loosens
+  // EXACT, not a floor. `>= 18` against a registry of exactly 21 passes by coincidence and loosens
   // silently — deleting a registry entry left it green. Same reason EXPECTED_SUBSYSTEM_IDS below is a set
   // and not a count: adding a feature should be a deliberate edit here.
-  ok(doc.features.length === 20, `every registry feature gets a card, and there are exactly 20 (got ${doc.features.length})`);
+  ok(doc.features.length === 21, `every registry feature gets a card, and there are exactly 21 (got ${doc.features.length})`);
   ok(doc.features.every((f) => f.name && f.description), 'cards carry a name and description');
 
   ok(byKey('me.devices').state === 'off', 'a feature gated `off` reports off');
@@ -211,9 +211,11 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // EXACT: `>= 60` against a table of 64 was a floor that passed by coincidence — deleting a SETTINGS row
   // did not trip it. Both numbers are asserted so a shrunk table cannot hide behind a shrunk expectation.
   // 61 after the standalone viewer left this repo (2026-08-09) and took NS_API_TOKEN,
-  // ALLOW_UNGATED_SERVICE_TOKEN, ACCESS_AUD, ACCESS_TEAM_DOMAIN and PORTAL_MODE with it. Pinned as an
-  // EXACT number on purpose — `>= 60` was a floor that passed by coincidence, so deleting a row did not
-  // trip it. Bump this deliberately when adding one; the drift guard in statusModel.selftest.ts is what
+  // ALLOW_UNGATED_SERVICE_TOKEN, ACCESS_AUD, ACCESS_TEAM_DOMAIN and PORTAL_MODE with it; 60 in 0.3.1,
+  // when BRAND_LABEL followed them — its only reader was the viewer's theme picker; 61 again with
+  // DOCUMO_DOMAINS, the stand-in driving the second app's menu targeting. Pinned as an EXACT
+  // number on purpose — `>= 60` was a floor that passed by coincidence, so deleting a row did not trip
+  // it. Bump this deliberately when adding one; the drift guard in statusModel.selftest.ts is what
   // proves the table matches `interface Env`.
   ok(SETTINGS.length === 61, `sanity: the descriptor table has exactly 61 rows (got ${SETTINGS.length})`);
   // Every row is rendered now: there is one deployment shape, so no setting is inapplicable to it.

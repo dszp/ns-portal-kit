@@ -296,8 +296,26 @@ var cs=document.currentScript;
 var base=(cs&&cs.src)||(window.__kitCfg&&window.__kitCfg.base)||null;
 if(base){try{base=new URL(base);base=base.origin;}catch(e){base=null;}}
 if(!base){console.error("[kit] no base");return;}
-window.__kitCfg=window.__kitCfg||{};window.__kitCfg.base=base;
-if(window.__kitCfg.loaded)return;window.__kitCfg.loaded=1;
+window.__kitCfg=window.__kitCfg||{};
+// EVERY primary that reaches this page records itself, guard or no guard. Two deployments' primaries on
+// one portal page is a real configuration (a staging bundle loaded beside the live one), and until this
+// existed there was no way to find out from the page that it had happened -- which is how "I might have
+// been seeing some prod menus while masquerading" is a question nobody can answer by looking.
+window.__kitCfg.seen=window.__kitCfg.seen||[];
+if(window.__kitCfg.seen.indexOf(base)<0)window.__kitCfg.seen.push(base);
+// ⚠️ THE GUARD RUNS BEFORE THE BASE IS CLAIMED, and the order is the whole fix.
+//
+// It used to assign __kitCfg.base FIRST and bail second, so a second deployment's primary -- inert in
+// every other respect -- still overwrote the base on its way out. The bundles read that base when they
+// EXECUTE, which is after their fetch resolves, i.e. after the loser has already changed it. So the
+// deployment whose bundles were running would then send its API calls to the OTHER deployment: one
+// deployment's code, the other's config, the other's menu plan and app rows. Non-deterministic between
+// reloads, because it turns on which primary parsed first.
+//
+// First primary to arrive owns the page. A second one changes nothing at all.
+if(window.__kitCfg.loaded)return;
+window.__kitCfg.loaded=1;
+window.__kitCfg.base=base;
 var HANDOFF=${H},HANDOFF_MISSING=${HM},MANIFEST=${M},V=${V};
 var HO={u:HANDOFF,m:HANDOFF_MISSING,pre:false,add:false};
 if(HANDOFF){try{var hs=document.getElementsByTagName("script");for(var hi=0;hi<hs.length;hi++){if(hs[hi].src===HANDOFF){HO.pre=true;break;}}}catch(e){}if(!HO.pre){var s=document.createElement("script");s.async=true;s.src=HANDOFF;(document.head||document.documentElement).appendChild(s);HO.add=true;}}
@@ -386,10 +404,94 @@ w.appendChild(s);w.appendChild(cb);return w}
 // portal rename degrades to "it stays" rather than a broken menu) and uses display:none rather than
 // removal, since stock scripts may expect their own element to exist. The before arg inserts ahead of an
 // element instead of appending: the account menu wants new items in the first group, not after Log Out.
-function menuApply(ul,plan,before){
+// THE LABEL OF ONE MENU ROW, and the single place that decides it.
+//
+// Both halves of menu handling used to ask for an anchor child and skip a row that had none. A live
+// capture (David, 2026-08-09) showed a vendor Management menu whose rows are
+// plain list items with NO anchor at all (class admin-menu-list-item) -- so those entries were invisible to the
+// builder AND unhidable by config, silently, with nothing anywhere saying why.
+//
+// The anchor's text stays PREFERRED where there is one: existing configs name it, and an <li> can carry
+// more than its link does (a portal that renders "Messages 0" has an anchor reading "Messages", and a
+// hide naming "Messages" must keep working). The row's own text is the fallback, which is what reaches
+// the anchorless case. Read per ITEM, never off the container -- a <ul>'s textContent joins its children
+// with no separator, which is how a word-boundary test once matched nothing at all.
+// BADGES ARE STRIPPED BEFORE THE TEXT IS READ, and that is not cosmetic. This portal renders the
+// unread counter INSIDE the anchor, so the row's text is "Messages 0" -- which the console offered as the
+// label to hide, and a config saying hide "Messages 0" stops matching the moment there is one message.
+// Silently. That is the same failure class the anchorless work closed, arriving through live data instead
+// of through markup: an identity that is not stable is not an identity.
+//
+// Read off a CLONE with badge-ish children removed, so the read path and the hide path agree on
+// "Messages" and matching stays exact. Selector-based rather than a digit-stripping regex: an entry
+// legitimately named "Level 3" must not become "Level".
+function labelText(el){
+if(!el)return '';
+var c;
+try{c=el.cloneNode(true);
+var bad=c.querySelectorAll?c.querySelectorAll('.badge,.label,.count,.counter,sup,[class*="badge"],[class*="count"]'):[];
+for(var i=0;i<bad.length;i++){if(bad[i].parentNode)bad[i].parentNode.removeChild(bad[i])}
+}catch(e){c=el}
+return ((c&&c.textContent)||'').replace(/\s+/g,' ').trim()}
+function menuLabels(li){
+var out=[],a=li.querySelector&&li.querySelector('a');
+if(a){var at=labelText(a);if(at)out.push(at)}
+var lt=labelText(li);
+if(lt&&out.indexOf(lt)<0)out.push(lt);
+return out}
+// Hiding is SEPARATE from adding, and separately re-runnable, because the two have opposite repeat
+// behaviour: running an add twice duplicates an entry, running a hide twice sets display:none on a node
+// that already has it. Menus fill from several async sources -- stock markup, a vendor add-on, this kit --
+// so an entry the operator asked to hide can arrive after the pass that would have hidden it. Idempotence
+// is what lets the hides keep running until the page settles. See menuHides in the self body.
+// OUR OWN ENTRIES ARE NEVER HIDDEN. A hide names a STOCK entry, and the two lists are independent: hiding
+// the portal's "Support" link and adding your own with the same label is a config that has to work. That
+// used to hold for free, because the single pass ran hides before it ran adds -- so there was nothing of
+// ours on the menu yet. Now that hides re-run after the adds have landed, it has to be said out loud, and
+// it is said by SKIPPING our markers rather than by ordering (_svxadd on an added entry, _svxrow on a
+// sign-in row) -- an invariant that does not depend on when a pass happens to run.
+/**
+ * Hide the rows a plan names.
+ *
+ * ⚠️ IT RECORDS WHAT IT HID, and that marker is the whole of menuReset below. Without it there is no
+ * way to tell a row this config hid from one the portal itself had hidden all along, so nothing could
+ * ever be un-hidden safely — which made a PREVIEW of a draft config impossible to render honestly: a
+ * draft that stops hiding something would show no change at all, silently, while a draft that adds
+ * something would show it. Believable for one half and wrong for the other is worse than refusing.
+ *
+ * The marker stores the PRIOR inline display rather than a flag, so the restore is exact instead of
+ * assuming the row started at the stylesheet default. A row already inline-hidden when we arrived is not
+ * marked at all: we did not hide it, so it is not ours to reveal.
+ */
+function menuHide(ul,plan){
 (plan&&plan.hide||[]).forEach(function(h){
-for(var i=0;i<ul.children.length;i++){var a=ul.children[i].querySelector('a');
-if(a&&a.textContent.trim().toLowerCase()===String(h).trim().toLowerCase())ul.children[i].style.display='none'}});
+var want=String(h).trim().toLowerCase();
+for(var i=0;i<ul.children.length;i++){var li=ul.children[i];
+if(/_svx/.test(li.className||''))continue;
+var ls=menuLabels(li);
+for(var j=0;j<ls.length;j++)if(ls[j].toLowerCase()===want){
+if(li.style.display!=='none'&&!li.hasAttribute('data-svxh'))li.setAttribute('data-svxh',li.style.display||'');
+li.style.display='none';break}}})}
+/**
+ * Undo THIS config's effect on one menu: drop the rows we added, restore the rows we hid.
+ *
+ * Only ours, and only what we actually changed: _svxadd marks an added row, and data-svxh was
+ * written by menuHide only where it found the row visible. Anything the portal hid for its own reasons
+ * is untouched, which is the property that makes running this on a live page safe.
+ *
+ * Exists for the preview: applying a draft plan ON TOP of the live one does not produce the draft's
+ * result. menuApply de-duplicates within one call only, so shared entries would appear twice, and
+ * menuHide never un-hides, so a removal would be invisible. Reset first, then apply, and the picture is
+ * the draft rather than a union of two.
+ */
+function menuReset(ul){
+if(!ul)return;
+var kids=[].slice.call(ul.children);
+for(var i=0;i<kids.length;i++){var li=kids[i];
+if(/_svxadd/.test(li.className||'')){if(li.parentNode)li.parentNode.removeChild(li);continue}
+if(li.hasAttribute&&li.hasAttribute('data-svxh')){li.style.display=li.getAttribute('data-svxh')||'';li.removeAttribute('data-svxh')}}}
+function menuApply(ul,plan,before){
+menuHide(ul,plan);
 var add=(plan&&plan.add)||[];if(!add.length)return;
 // {page} is the one variable the server can't fill. PATH only — a portal URL's query can carry
 // identifiers and these links may leave for a third party.
@@ -920,13 +1022,30 @@ aaDownloads(br,true);card.appendChild(br)}
 })}
 }).catch(function(){homeStatus._p=0});
 }
-var _aaP=null;
+var _aaP=null,_aaR=null;
 // Memoise the IN-FLIGHT PROMISE, not the resolved value: two callers arriving before the first
 // response (the Apps menu + the home card both call this on /portal/home) must share ONE request —
 // /me/app-access makes three uncached upstream calls, so a duplicate is expensive. On failure,
 // null out _aaP so the next call retries (a transient error shouldn't wedge this open forever);
 // callers attached to the failed promise are swallowed, same as before.
-function aaFetch(cb){if(!_aaP)_aaP=jget('/me/app-access').catch(function(e){_aaP=null;throw e});_aaP.then(cb,function(){})}
+// The RESOLVED body is kept too (_aaR), so a synchronous pass -- the hides, which run on every mutation
+// and on the late timers -- can read the plan without attaching another handler to the promise each time.
+function aaFetch(cb){if(!_aaP)_aaP=jget('/me/app-access').catch(function(e){_aaP=null;throw e});
+_aaP.then(function(r){_aaR=r;cb(r)},function(){})}
+// The hide/add plan for one menu, or null until the response arrives. The apps menu falls back to the
+// standalone hide list (PORTAL_APPS_HIDE) exactly as appsMenu does, so the two cannot resolve differently.
+function menuPlan(which){if(!_aaR)return null;
+var m=_aaR.menus&&_aaR.menus[which];if(m)return m;
+return which==='apps'?{hide:(_aaR.hide||[]),add:[]}:null}
+// HIDES RE-RUN ON EVERY PASS; adds stay one-shot (item 37). The dataset guards below make the ADD pass
+// happen once per <ul> -- repeating it would duplicate entries -- and this runs beside them for the half
+// that is idempotent. Without it, an entry that any source appends after our single pass is never hidden:
+// load-order dependent, so it works whenever you test it and fails intermittently in production.
+// Gates match the add pass exactly, per menu, so hiding can never reach a menu adding could not.
+function menuHides(){
+if(_AF.menuConfig){var a=acctUl();if(a)menuHide(a,menuPlan('account'));
+var g=mgmtUl();if(g)menuHide(g,menuPlan('management'))}
+if(_AF.appAccess||_AF.menuConfig){var p=appsUl();if(p)menuHide(p,menuPlan('apps'))}}
 function row(k,v,hint,copy){
 var li=document.createElement('li');li.className='_svxrow';
 li.style.cssText='display:grid;grid-template-columns:62px 1fr 20px;gap:8px;align-items:baseline;padding:2px 14px 2px 16px;font-size:12.5px';
@@ -950,14 +1069,9 @@ aaFetch(function(r){
 var plan=r&&r.menus&&r.menus.account;if(!plan)return;
 if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
 var u=acctUl();if(!u||u.dataset.svxacct)return;u.dataset.svxacct='1';
-// KNOWN LIMITATION (found 2026-08-08, not yet fixed): this guard makes the whole pass one-shot, hides
-// included. The account menu is filled by several sources — stock entries, the vendor add-on (it adds
-// its own entries), and this kit — and every one of them loads async, so an entry that arrives AFTER this
-// pass is never hidden. That is load-order-dependent, which means it can work in testing and fail
-// intermittently in production. The fix is to split the guard the way the model already splits the lists:
-// adds stay one-shot (repeating them would duplicate entries), hides re-run on mutation (they are
-// idempotent — setting display:none twice is setting it once). Deliberately not done in the same pass that
-// discovered it; see item 37 in the open-items index.
+// This guard makes the ADD pass one-shot, which is what it is for -- repeating an add duplicates the
+// entry. The hides are not gated by it: menuHides re-runs them on every pass and on the late timers,
+// which is what covers an entry that arrives after this one (item 37, fixed 2026-08-09).
 // Insert into the FIRST group — above the divider that precedes Log Out — rather than after it.
 var lo=null,ch=u.children;
 for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim())){lo=ch[i];break}}
@@ -1309,6 +1423,7 @@ if(kids[r].tagName==='SPAN'&&/^[\s\u00a0]*[|\u2502][\s\u00a0]*$/.test(kids[r].te
 var cs=ref?getComputedStyle(ref):null;
 if(cs){bar.style.color=cs.color;bar.style.fontSize=cs.fontSize}else{bar.style.fontSize=BAR_SCALE}}
 var F=[{p:/^\/portal\/home/,m:homeStatus,a:function(){return !!_AF.appStatus}},
+{p:/^\//,m:menuHides,a:function(){return !!_AF.appAccess||!!_AF.menuConfig}},
 {p:/^\//,m:appsMenu,a:function(){return !!_AF.appAccess||!!_AF.menuConfig}},
 {p:/^\//,m:accountMenu,a:function(){return !!_AF.menuConfig}},
 {p:/^\//,m:managementMenu,a:function(){return !!_AF.menuConfig}},
@@ -1333,12 +1448,17 @@ setTimeout(function(){ob.disconnect()},8000);
 // lands after the 8s disconnect above, nothing runs again and the fossil it makes of our entry stays
 // until reload. That is the state the reported duplicate was captured in.
 //
-// Only verLine re-runs, and only it should: it is idempotent by construction -- it cleans, then ensures
-// exactly one entry -- so a late pass either changes nothing or repairs something. The menus and the
-// banner are deliberately one-shot (repeating an add duplicates it), so widening the observer window for
-// everyone would change their behaviour to fix this one.
+// MENU HIDES OUTLIVE IT TOO, for the same reason and on the same schedule: a vendor add-on that appends
+// to a menu after the disconnect leaves an entry the operator asked to hide sitting there until reload.
+//
+// Only the idempotent halves re-run. verLine cleans then ensures exactly one entry; menuHides only sets
+// display:none on entries the plan names. Either is safe to run any number of times, so a late pass
+// changes nothing or repairs something. The menu ADDS and the banner stay one-shot -- repeating an add
+// duplicates it -- which is why the window is widened per behaviour rather than for the whole registry.
 var VLT=[2000,5000,12000,25000];
-for(var vi=0;vi<VLT.length;vi++)setTimeout(function(){try{if(_AF.versionLine)verLine()}catch(e){}},VLT[vi]);`;
+for(var vi=0;vi<VLT.length;vi++)setTimeout(function(){
+try{if(_AF.versionLine)verLine()}catch(e){}
+try{if(_AF.menuConfig||_AF.appAccess)menuHides()}catch(e){}},VLT[vi]);`;
 
 /** Shared bundle preamble: the `(function(){ _AF; _KC; base; <body> }())` wrapper. `featureKeys` is the
  * flag↔key map for THIS bundle (admin vs self); `allowedKeys` is already `can()`-filtered by the caller,
@@ -1398,11 +1518,96 @@ export function buildSelfBundle(allowedKeys: string[], env: KitEnv): string {
 }
 
 /** Flag↔key map for the SPK bundle. One entry — but keep the shape so wrapBundle stays uniform. */
-export const SPK_FEATURE_KEYS = [{ flag: 'status', key: 'kit.status' }] as const;
+export const SPK_FEATURE_KEYS = [
+  { flag: 'status', key: 'kit.status' },
+  // Rides the same bundle because it shares its machinery (the menu finders, the reader), and because a
+  // fourth delivery path for one menu item would be a route, a cache tier and a gate for nine lines. It
+  // is a SEPARATE key, though: the two are never held by the same principal at the same moment — one
+  // requires masking to be off in practice, the other requires it to be on.
+  { flag: 'capture', key: 'kit.captureMenus' },
+] as const;
 export const spkFeaturePolicyKeys = (): string[] => SPK_FEATURE_KEYS.map((f) => f.key);
 
 const SPK_BODY = String.raw`
-if(!_AF.status)return;
+if(!_AF.status&&!_AF.capture)return;
+// ── the captured stock menus, per role ──────────────────────────────────────────────────────────────
+// WHY THIS EXISTS: the editor draws each menu the way the audience you pick would see it, and it gets
+// the RULES right because the Worker resolves them. The stock entries it starts from are whatever was on
+// the page the console was opened from, read as whoever opened it -- so previewing another role is an
+// approximation, and no amount of care in the console changes that. A browser can only be one identity
+// at a time, so there is no loading another role's page beside your own.
+//
+// What there IS: the operator already masquerades. While masked, this bundle offers ONE menu entry that
+// stores that role's menu labels here, in the portal page's own localStorage. Un-masqueraded, the
+// console reads them back over the bridge and draws from them instead of from your own menus.
+//
+// Capture, not impersonation. Nothing is sent anywhere and nothing is configured; the whole capability
+// is "write down what is already on this screen".
+// ⚠️ NAMESPACED PER DEPLOYMENT. The portal is ONE origin, so dev and prod share its localStorage — a
+// capture taken while the dev bundle was loaded would otherwise appear in the prod console, and the
+// operator would be reading one deployment's menus while editing the other's config. That is exactly the
+// class of confusion this feature exists to remove, so it must not introduce one. B is the Worker base
+// this bundle was served from, which is the only thing on the page that distinguishes them.
+var SK='_svxStock:'+B;
+function stockAll(){try{var r=localStorage.getItem(SK);var v=r?JSON.parse(r):null;return(v&&typeof v==='object'&&!Array.isArray(v))?v:{}}catch(e){return{}}}
+function stockPut(all){try{localStorage.setItem(SK,JSON.stringify(all));return true}catch(e){return false}}
+/**
+ * CAPTURE MODE — armed from the console, which is to say from OUTSIDE the masquerade, because that is
+ * the only place you can be before you start one.
+ *
+ * ⚠️ IT HAS NO EXPIRY, AND THAT IS A CONSEQUENCE OF THE DESIGN RATHER THAN AN OVERSIGHT. An earlier
+ * sketch captured automatically on entering each masquerade; that needed a timeout, because a mode that
+ * writes in the background silently rewrites captures for months and a stale capture is the confusion
+ * this feature exists to remove. It also had to decide when a menu was FINISHED, which is not knowable
+ * -- our own hide pass re-runs on late timers past the 8s observer disconnect precisely because entries
+ * arrive after everything looks settled -- so it would have stored half-built menus that then read as
+ * authoritative.
+ *
+ * Capture on a CLICK dissolves both. The operator confirms the page looks right, and this mode has no
+ * ambient behaviour left to go stale: all it decides is whether the button is offered. Its worst failure
+ * is an unused button. A mode with no failure state does not need a timeout.
+ */
+var MODEK='__mode';
+function capOn(){var a=stockAll();return !!(a[MODEK]&&a[MODEK].on)}
+function capSet(on){var a=stockAll();a[MODEK]={on:!!on,at:new Date().getTime()};return stockPut(a)}
+// The DOMAIN this capture was taken in, from the same unverified token decode as the scope, and for the
+// same reason: it labels a capture and authorizes nothing.
+function myDomain(){try{
+var t=tok();if(!t)return'';
+var p=t.split('.')[1];if(!p)return'';
+var j=JSON.parse(atob(p.replace(/-/g,'+').replace(/_/g,'/')));
+return String(j.domain||'').trim()}catch(e){return''}}
+// WAS THE APP INTEGRATION SHOWING ON THAT PAGE? The kit's own sign-in and download rows are appended to
+// the Apps menu only when the app is active for that user, so their presence is direct evidence. Their
+// ABSENCE is weaker — the masked user's self bundle may simply not have loaded — so this reports what it
+// saw rather than a verdict, and the console says which it is instead of quietly assuming.
+function appRowsSeen(){try{
+var ul=appsUl();if(!ul)return false;
+for(var i=0;i<ul.children.length;i++){
+var c=ul.children[i];
+if(c.className&&String(c.className).indexOf('_svxrow')>=0)return true}
+return false}catch(e){return false}}
+// The scope is read out of the reader's OWN token, unverified, and that is fine because nothing is
+// authorized by it: it is a LABEL on a capture. The gate that decides whether capture is available at
+// all was decided server-side before this bundle was handed over.
+function myScope(){try{
+var t=tok();if(!t)return'';
+var p=t.split('.')[1];if(!p)return'';
+var j=JSON.parse(atob(p.replace(/-/g,'+').replace(/_/g,'/')));
+return String(j.user_scope||j.scope||'').trim()}catch(e){return''}}
+function stockSave(){
+var sc=myScope();
+if(!sc){alert('Could not tell which role this session is — nothing captured.');return false}
+var all=stockAll();
+// The CONTEXT travels with the entries. Without it the console pairs a role's real menus with whatever
+// the persona bar happened to be set to — David, reading his own capture: a Basic User on a domain with
+// no app still had the app's entry struck through, because the toggles defaulted to on.
+var seen=[];try{seen=(window.__kitCfg&&window.__kitCfg.seen)||[]}catch(e){}
+all[sc.toLowerCase()]={scope:sc,at:new Date().getTime(),domain:myDomain(),appRows:appRowsSeen(),bases:seen.slice(),menus:spkMenus()};
+if(!stockPut(all)){alert('This browser refused to store the capture.');return false}
+return {scope:sc,n:((all[sc.toLowerCase()].menus.apps||{}).entries||[]).length
+  +((all[sc.toLowerCase()].menus.account||{}).entries||[]).length
+  +((all[sc.toLowerCase()].menus.management||{}).entries||[]).length}}
 var _spkFrame=null;
 // The console runs in box()'s sandboxed iframe: opaque origin, no localStorage, so it cannot fetch the
 // Worker itself. It asks US, and we hand back only probe results — never the token.
@@ -1434,8 +1639,11 @@ if(!ul){out[n]={present:false,entries:[]};return}
 var seen={},entries=[];
 for(var i=0;i<ul.children.length;i++){var li=ul.children[i];
 if(li.className&&String(li.className).indexOf('_svx')>=0)continue;
-var a=li.querySelector&&li.querySelector('a');if(!a)continue;
-var t=(a.textContent||'').replace(/\s+/g,' ').trim();
+// The FIRST label menuHide would match, so what the editor offers to hide is always something hiding
+// can actually act on. Reporting a row the hider cannot match would be worse than omitting it: the
+// operator ticks a box, pastes the config, and nothing happens anywhere.
+var t=menuLabels(li)[0];
+// A divider has no text of either kind. Nothing else legitimately reaches here empty.
 if(!t||seen[t.toLowerCase()])continue;
 seen[t.toLowerCase()]=1;entries.push(t)}
 out[n]={present:true,entries:entries}});
@@ -1449,15 +1657,58 @@ return}
 if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.menusRequest}'){
 try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.menusResponse}',${SPK_BRIDGE.menusKey}:spkMenus()},'*')}catch(x){}
 return}
+// The captures, read back out of THIS page's localStorage -- the console's own frame has none, which is
+// the whole reason this pair exists rather than the frame reading them itself.
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.stockRequest}'){
+// An optional instruction on the way in: arm or disarm capture. The console cannot write this itself --
+// its frame has no storage -- and it is the only surface that exists BEFORE a masquerade, which is when
+// arming has to happen.
+var q=d.${SPK_BRIDGE.stockKey};
+if(q&&typeof q==='object'&&typeof q.mode==='boolean')capSet(q.mode);
+// FORGET THE CAPTURES, keep the arming. The captures are data the operator gathered; the toggle is a
+// preference about how the tool behaves, and clearing one is not asking to undo the other. Rewritten
+// rather than removeItem'd for the same reason.
+if(q&&typeof q==='object'&&q.clear===true){var keep=stockAll()[MODEK];var fresh={};if(keep)fresh[MODEK]=keep;stockPut(fresh)}
+try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.stockResponse}',${SPK_BRIDGE.stockKey}:stockAll()},'*')}catch(x){}
+return}
 if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.checkRequest}'){
 // The candidate rides the query string, so bound it: a URL the edge refuses would come back as an
 // opaque failure, and "could not check" must never be shown as "valid".
 var c=String(d.${SPK_BRIDGE.checkKey}==null?'':d.${SPK_BRIDGE.checkKey});
-var reply=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.checkResponse}',${SPK_BRIDGE.checkKey}:v},'*')}catch(x){}};
+// The asker's id, echoed verbatim: two of these can be in flight at once and the frame has to know which
+// answer it is holding. We never interpret it.
+var cid=d.${SPK_BRIDGE.idKey};
+var reply=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.checkResponse}',${SPK_BRIDGE.idKey}:cid,${SPK_BRIDGE.checkKey}:v},'*')}catch(x){}};
 if(c.length>8000){reply({ok:false,error:null,unchecked:'This config is too large to validate from here. Your deployment still validates it at startup, loudly.'});return}
 jget('/kit/menus/check?c='+encodeURIComponent(c))
-.then(function(r){reply({ok:!!(r&&r.ok),error:(r&&r.error)||null})})
+// WARNINGS RIDE ALONG. Accepted-and-still-wrong is a real verdict -- this deployment will take the config
+// and some of it will reach nobody -- and the console renders it as neither valid nor rejected. Dropping
+// the field here made that whole branch dead code with nothing failing anywhere: the route computed the
+// warnings, the page had the wording, and the wire between them carried two fields out of three.
+.then(function(r){reply({ok:!!(r&&r.ok),error:(r&&r.error)||null,warnings:(r&&r.warnings)||[]})})
 .catch(function(){reply({ok:false,error:null,unchecked:'Could not reach this deployment to validate. Nothing is wrong with the config yet — this check just did not run.'})});
+return}
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.resolveRequest}'){
+// The preview. Same bound as the check pair and for the same reason -- both ride the query string, and a
+// config that previews but will not validate, or the reverse, is a worse state than either refusing.
+var q=d.${SPK_BRIDGE.resolveKey}||{};
+// Echoed verbatim -- see idKey. A slow answer for the config the operator has already edited past must be
+// recognisable AS that, or it lands as the answer to the question now on screen.
+var qid=d.${SPK_BRIDGE.idKey};
+var rr=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.resolveResponse}',${SPK_BRIDGE.idKey}:qid,${SPK_BRIDGE.resolveKey}:v},'*')}catch(x){}};
+var cc=String(q.c==null?'':q.c);
+if(cc.length>8000){rr({unavailable:'This config is too large to preview from here.'});return}
+var qs='c='+encodeURIComponent(cc)
++'&domain='+encodeURIComponent(String(q.domain||''))
++(q.scope?'&scope='+encodeURIComponent(String(q.scope)):'')
++(q.user?'&user='+encodeURIComponent(String(q.user)):'');
+var aa=q.apps||[];for(var ai=0;ai<aa.length;ai++)qs+='&app='+encodeURIComponent(String(aa[ai]));
+jget('/kit/menus/resolve?'+qs)
+// ok:false is a config the operator is mid-typing, not a broken preview -- pass the reason through and
+// let the page say which of the two it is. UNAVAILABLE is only for "we could not ask".
+.then(function(r){if(r&&r.ok)rr({plan:r.plan,matched:r.matched,rawAdds:r.rawAdds,appsHide:r.appsHide});
+else rr({invalid:(r&&r.error)||'This config cannot be resolved.'})})
+.catch(function(){rr({unavailable:'Could not reach this deployment to build the preview. Nothing here is a report about your config.'})});
 return}
 if(d.${SPK_BRIDGE.tag}!=='${SPK_BRIDGE.request}')return;
 jget('/kit/status?format=json&probe=1').then(function(r){
@@ -1474,6 +1725,99 @@ fetch(B+'/kit/status',{headers:{Authorization:'Bearer '+j}}).then(function(x){if
 .then(function(html){box('Super Portal Kit - Integration Console',html,'');
 var o=document.getElementById('_svx');_spkFrame=o&&o.querySelector('iframe')})
 .catch(function(){alert('Super Portal Kit is unavailable right now.')})}
+/**
+ * The masquerade bar. masq() already knew both handles it has — a mask-bar class, or the End
+ * Masquerade anchor — because the app-status features had to suppress themselves under a mask. Reusing
+ * that rather than inventing a third way to recognise the same bar.
+ */
+function masqEnd(){try{
+// The End Masquerade control itself, by href or by its own words. Its PARENT is the inline row, which is
+// the only thing that puts our button beside it rather than under it.
+var a=document.querySelector('a[href*="endMasquerade"],a[href*="endMask"],button[onclick*="endMasquerade"]');
+if(a)return a;
+var c=document.querySelectorAll('.mask-bar a,.mask-bar button,.mask-bar input[type="submit"]');
+for(var i=0;i<c.length;i++){
+var t=(c[i].textContent||c[i].value||'').trim();
+if(/^end\s+masquerad/i.test(t))return c[i]}
+return null}catch(e){return null}}
+function masqBar(){try{
+var e=masqEnd();
+if(e&&e.parentNode)return e.parentNode;
+return document.querySelector('.mask-bar')}catch(e2){return null}}
+/**
+ * CAPTURE, BESIDE THE CONTROL YOU WERE ALREADY REACHING FOR. The operator's next action after looking at
+ * a masqueraded page is End Masquerade; the capture belongs on the way there, not behind a dropdown.
+ * That header region exists ONLY while masquerading, so the control cannot appear anywhere it would be
+ * nonsense — which is also why the account-menu entry stays as the fallback rather than the primary.
+ *
+ * OUR OWN ELEMENT, never a restyle of theirs. Repainting the vendor's bar means fighting their CSS on a
+ * live page, and when that goes wrong it reads as "the portal is broken" rather than "this feature is
+ * on".
+ */
+function capBtn(){
+if(!(!_AF.status&&_AF.capture)||!capOn())return;
+var bar=masqBar();if(!bar||bar.querySelector('._svxcap'))return;
+var end=masqEnd();
+// ⚠️ IT LOOKS LIKE THEIR BUTTON, FULL STOP -- no colour of our own at all.
+//
+// Three attempts, and the shape of the mistake is the same each time. Styled from scratch it sat at a
+// different height with a different baseline and read as broken. Given their classes but repainted
+// purple it read WORSE: their class carries padding, weight, radius and often a gradient or text-shadow,
+// and a flat override lands on top of all of it. A control that shouts is only useful if the shouting is
+// accurate, and here it was just loud.
+//
+// The bar it sits in is already unmistakable -- the portal is telling you in orange that you are
+// masquerading -- and the label names the role. That is the distinction; it does not need a second one.
+// Same tag as the neighbour, because an <a> styled as a button will not take a <button>'s CSS.
+var tag=(end&&end.tagName==='A')?'a':'button';
+var b=document.createElement(tag);
+if(tag==='a')b.href='javascript:void(0)';else b.type='button';
+b.className='_svxcap'+((end&&end.className)?' '+end.className:'');
+// Spacing only. Anything else is us disagreeing with their stylesheet about their own bar.
+b.style.marginRight='8px';b.style.whiteSpace='nowrap';
+var sc=myScope();
+b.textContent='Remember this role'+(sc?' ('+sc+')':'');
+b.title='Store the menus this role sees, in your own browser, for the menu editor to draw.';
+b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();capDo(b)});
+// ⚠️ BEFORE the End Masquerade control, IN ITS OWN ROW — appending to the bar put the button on a second
+// line under it (David's screenshot), because the bar is a block whose contents are one inline row and
+// an appended child starts a new one. Inserting beside the control is also what the placement is FOR:
+// the two things you do at the end of looking at a user, next to each other.
+if(end&&end.parentNode===bar)bar.insertBefore(b,end);else bar.appendChild(b)}
+/** One place decides what a capture SAYS, so the bar button and the menu entry cannot report it
+ *  differently. The COUNT is the point: a capture of two entries where you expected nine is the failure
+ *  mode a success message without one hides. */
+/**
+ * @param el        the control that was clicked, which becomes the confirmation
+ * @param transient true when that control is about to disappear — a dropdown item, whose menu closes on
+ *                  the click that triggered this
+ *
+ * ⚠️ FEEDBACK HAS TO OUTLIVE THE SURFACE IT IS ON. On the masquerade bar the button stays put, so the
+ * label IS the confirmation and a modal would just cost a second click. In the account-menu fallback the
+ * dropdown closes the instant you click, taking the label with it — so the capture succeeded and looked
+ * like nothing happened at all (David, on the fallback entry). There the modal is the only thing that
+ * survives, which is the opposite conclusion from the same principle rather than a reversal of it.
+ */
+function capDo(el,transient){
+var r=stockSave();
+if(!r)return;
+if(transient){alert('Remembered '+r.scope+': '+r.n+' menu entries.\n\nIf that number looks wrong the page '
++'may still have been loading — capture again.\n\nStop masquerading and open Super Portal Kit; the Menus '
++'tab will draw '+r.scope+' from this.');return}
+if(!el)return;
+// ⚠️ NO alert(). The confirmation belongs ON the control that was just clicked, where the operator is
+// already looking — a modal makes them click twice to learn something they can read in place, and this
+// is a button they may press several times in a row while walking through roles.
+//
+// The COUNT is the load-bearing part and it goes in the label: a capture of two entries where you
+// expected nine is how you notice you clicked while the page was still loading. What to do about that,
+// and where the capture surfaces, are secondary — they ride the tooltip, and the console's own panel
+// says both again beside every capture it lists.
+el.textContent='\u2713 Remembered '+r.scope+' \u00b7 '+r.n+' entries';
+el.title='Stored the menus this role sees. If that number looks wrong the page may still have been '
++'loading — click again to recapture. Stop masquerading and open Super Portal Kit to use it: the Menus '
++'tab will draw '+r.scope+' from this instead of from your own menus.'}
+
 function spkMenu(){
 // Management FIRST, account as the FALLBACK — and the fallback is the point, not politeness.
 //
@@ -1487,29 +1831,52 @@ function spkMenu(){
 // The account menu is the better fallback because acctUl() does not depend on a NAME: it keys on a
 // sign-out entry plus the user's own profile link, and a portal without either is not a portal. Same
 // gate either way (kit.status), so which menu carries the entry changes nothing about who can see it.
-var ul=mgmtUl(),fallback=false;
+var CAP=!_AF.status&&_AF.capture;
+// ⚠️ THE CAPTURE ENTRY GOES TO THE ACCOUNT MENU, NOT MANAGEMENT-WITH-A-FALLBACK. The console prefers
+// Management because that is where an operator tool belongs for an operator. Capture only ever appears
+// while masqueraded as someone lower, and those users have no Management menu — so the preference would
+// resolve to the fallback every single time, and the primary branch would be dead code pretending to be
+// a choice. And it is only the fallback for capture at all: the bar button above is the real home, and
+// this is what happens when the bar cannot be found.
+if(CAP&&!capOn())return;
+var ul=CAP?acctUl():mgmtUl(),fallback=false;
 if(!ul){ul=acctUl();fallback=!!ul}
-if(!ul||ul.dataset.svxspk)return;ul.dataset.svxspk='1';
+if(!ul||ul.dataset.svxspk)return;
+// ⚠️ "CAN the bar take it", not "HAS it taken it". Asking whether the button is already there is a
+// question about ORDER, and this pass runs before capBtn in _spkF — so the menu added its own copy and
+// the bar then added the button, and both showed (David's screenshot). Asking whether the bar EXISTS is
+// order-independent, which matters because both run again on every mutation and the interleaving is not
+// ours to control.
+if(CAP&&masqEnd())return;
+ul.dataset.svxspk='1';
 var li=document.createElement('li');
 // Marked so anything walking this menu can tell OUR entry from the portal's. The builder skips _svx*
 // rows: offering to hide the console's own link would compose a config that contradicts itself, and the
 // hide would not even work, since hides run before adds.
 li.className='_svxspk';
-var a=document.createElement('a');a.href='javascript:void(0)';a.textContent='Super Portal Kit';
+var a=document.createElement('a');a.href='javascript:void(0)';
+// TWO ENTRIES, NEVER BOTH — the gates are mutually exclusive in practice. Masked in, the console itself
+// is refused (its gate matches on the effective identity, which is now the masked user) and capture is
+// the only thing on offer; signed in normally, the reverse. Naming the role in the label is the point:
+// it is the one confirmation that the masquerade is actually in effect before you store anything.
+a.textContent=CAP?('Remember this role\u2019s menus'+(myScope()?' ('+myScope()+')':'')):'Super Portal Kit';
 // Bold, because this is an operator/superadmin tool sitting among ordinary per-customer entries and
 // should not read as one of them.
 a.style.fontWeight='600';
 // In the account menu it sits among the reader's OWN account entries, where an operator tool is more
 // out of place than it is in Management. Say where it landed rather than let it read as one of them.
 if(fallback)a.title='Operator console. Shown here because this portal has no Management menu.';
-a.addEventListener('click',function(e){e.preventDefault();spkOpen()});
+a.addEventListener('click',function(e){e.preventDefault();
+if(!CAP){spkOpen();return}
+// TRANSIENT: this entry lives in a dropdown that closes on the click.
+capDo(a,true)});
 li.appendChild(a);
 // PREPEND, not append. Two reasons. It belongs at the top as the operator entry. And appending made the
 // position NON-DETERMINISTIC: managementMenu() (PORTAL_MENUS additions, in the self bundle) also appends
 // to this same <ul>, so whichever bundle's fetch resolved first won — observed live moving between
 // reloads. insertBefore(firstChild) is stable regardless of which runs first.
 ul.insertBefore(li,ul.firstChild)}
-var _spkF=[{p:/^\//,m:spkMenu}];
+var _spkF=[{p:/^\//,m:capBtn},{p:/^\//,m:spkMenu}];
 function spkRun(){for(var i=0;i<_spkF.length;i++){try{if(_spkF[i].p.test(location.pathname))_spkF[i].m()}catch(e){}}}
 var _spkRaf=0;function spkSched(){if(_spkRaf)return;_spkRaf=requestAnimationFrame(function(){_spkRaf=0;spkRun()})}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',spkRun);else spkRun();

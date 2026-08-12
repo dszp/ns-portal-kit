@@ -1,7 +1,7 @@
 /** Offline test for the setting descriptor table + its drift guard. pnpm test:status */
 import { readFileSync, readdirSync } from 'node:fs';
-import { APP_NAMES } from './menus.js';
-import { SETTINGS, settingNames, PROBE_CATALOG, probeCatalogFor, SUBSYSTEM_DETAIL } from './statusModel.js';
+import { APP_NAMES, MENU_VARS, MENU_VAR_HELP } from './menus.js';
+import { SETTINGS, settingNames, PROBE_CATALOG, probeCatalogFor, SUBSYSTEM_DETAIL, DOCS_BASE, settingDocsUrl } from './statusModel.js';
 import { buildStatus } from './status.js';
 
 let pass = 0, fail = 0;
@@ -81,6 +81,51 @@ ok(undeclared.length === 0,
 const unrowed = [...readKeys.keys()].filter((k) => !inTable.has(k));
 ok(unrowed.length === 0,
   `and has a SETTINGS row${unrowed.length ? ` (no row: ${unrowed.map((k) => `${k} (${readKeys.get(k)!.join(',')})`).join('; ')})` : ''}`);
+
+/**
+ * THE DOCS-LINK GUARD. Every Config row now links to `CONFIG.md#<SETTING>`, and a link that resolves to
+ * nothing is worse than no link: it reads as "documented" and lands the reader at the top of a long page
+ * with no sign that anything went wrong. `CONFIG.public.md` is the file the sync renames into the mirror's
+ * `CONFIG.md`, so it is the one to check — and the anchors are explicit `<a id>` tags rather than heading
+ * slugs precisely so a reworded heading cannot break them silently.
+ *
+ * The group anchors are asserted too. Each Config section footer links one.
+ */
+{
+  const md = readFileSync(new URL('../CONFIG.public.md', import.meta.url), 'utf8');
+  const ids = new Set([...md.matchAll(/<a id="([^"]+)"/g)].map((m) => m[1]!));
+  if (ids.size < 40) throw new Error(`found only ${ids.size} anchors in CONFIG.public.md — the guard is broken, not the docs`);
+  const noAnchor = settingNames().filter((n) => !ids.has(n));
+  ok(noAnchor.length === 0,
+    `every setting has an anchor in CONFIG.public.md to link to${noAnchor.length ? ` (missing: ${noAnchor.join(', ')})` : ''}`);
+  const groups = [...new Set(SETTINGS.map((s) => s.group))];
+  const noGroupAnchor = groups.filter((g) => !ids.has(`group-${g}`));
+  ok(noGroupAnchor.length === 0,
+    `and every group has one${noGroupAnchor.length ? ` (missing: ${noGroupAnchor.map((g) => `group-${g}`).join(', ')})` : ''}`);
+  ok(settingDocsUrl('NS_SERVER') === `${DOCS_BASE}#NS_SERVER`, 'a setting link is the base plus its anchor');
+
+  // ── the menu placeholders exist in TWO places, and neither can be dropped ──────────────────────────
+  // The reference table is the long-form answer (encoding, the host ban, who can interpolate whom); the
+  // console needs the short form at the point a url is typed, and it cannot read markdown. So the copy is
+  // deliberate — and this is what stops it drifting, which is the failure a duplicated list actually has.
+  // Both directions: a variable the runtime accepts must be documented, and one the docs promise must
+  // still be accepted, or the reference teaches a config that fails at startup.
+  // ⚠️ SCOPED TO THE TABLE, not to the file. Checked against the whole document this passed with the row
+  // deleted, because the prose underneath happens to mention `{email}` while explaining what an unfilled
+  // one does — a guard that a nearby sentence can satisfy is a guard on the wrong thing.
+  const varsTable = md.slice(md.indexOf('**Variables.**'), md.indexOf('Values are percent-encoded'));
+  if (!varsTable || varsTable.length > 2000) throw new Error('could not slice the variables table out of CONFIG.public.md — the guard is broken, not the docs');
+  const undocumented = MENU_VARS.filter((v) => !varsTable.includes(`\`{${v}}\``));
+  ok(undocumented.length === 0,
+    `every menu variable is in CONFIG.public.md's table${undocumented.length ? ` (missing: ${undocumented.join(', ')})` : ''}`);
+  const promised = [...varsTable.matchAll(/\{([a-z]+)\}/g)].map((m) => m[1]!);
+  const unknown = [...new Set(promised)].filter((v) => !(MENU_VARS as readonly string[]).includes(v));
+  ok(promised.length > 0 && unknown.length === 0,
+    `and the reference promises none the runtime would refuse${unknown.length ? ` (promised but unknown: ${unknown.join(', ')})` : ''}`);
+  const nohelp = MENU_VARS.filter((v) => !(MENU_VAR_HELP[v] ?? '').trim());
+  ok(nohelp.length === 0,
+    `and each one says what it fills, for the editor's own hint${nohelp.length ? ` (missing: ${nohelp.join(', ')})` : ''}`);
+}
 
 // Shape hygiene — a row with empty prose is a row that teaches nobody anything.
 ok(SETTINGS.every((s) => s.what.trim().length > 0), 'every row has a `what`');
