@@ -1117,15 +1117,25 @@ function menuSchema(): string {
     '    "hide": ["SNAPmobile Web"],',
     '',
     '    // ADD — your own entries. label and url required, title optional. https:// or mailto: only.',
-    '    "add": [{ "label": "Support", "url": "https://help.example/x", "title": "Opens a new tab" }]',
+    '    "add": [{ "label": "Support", "url": "https://help.example/x", "title": "Opens a new tab" }],',
+    '',
+    '    // RENAME — relabel a stock entry in place. Same destination, same position, same icon.',
+    '    // "from" is the entry as the PORTAL ships it, and it stays that name everywhere else: a hide,',
+    '    // a capture and the picture above all keep using it. There is no renaming a renamed entry.',
+    '    // "title" has THREE states — leave it out to keep the portal\u2019s own tooltip, "" to remove',
+    '    // it, or a string to set one. null is refused rather than guessed at.',
+    '    "rename": [{ "from": "SNAPAnalytics", "to": "Analytics Dashboard" }]',
     '  },',
     '',
-    '  // The same two keys, TARGETED. NARROWEST SELECTOR WINS:',
+    '  // The same three keys, TARGETED. NARROWEST SELECTOR WINS:',
     '  //   users → domains → scopes → app → "*"',
     '  // The narrowest rule that matches the reader answers on its own — lists are never merged across',
     '  // axes, so a domain rule REPLACES what a scope rule would have given that reader rather than',
     '  // adding to it. A "*" inside an axis is that axis\u2019s own catch-all: it answers only for',
     '  // readers no specific key in that axis matched.',
+    '  // A menu is MODIFIED, never created: an entry added to a menu this reader does not have simply',
+    '  // does not appear for them. Management is shown to administrative scopes only, so that is the',
+    '  // ordinary case rather than an edge one.',
     '  // EVERY KEY IS OPTIONAL, including this whole object. A menu you do not name keeps the portal\u2019s',
     '  // own; a half you do not name changes nothing; and there is no rule that another key has to be',
     '  // present for. The "*" below is a catch-all you write only if you want one.',
@@ -1505,12 +1515,30 @@ details.cfgsec > .setting-list { padding:.7rem .8rem 0; }
 .chgrow { display:flex; gap:.45rem; padding:.22rem 0; border-bottom:1px solid var(--line); align-items:baseline; }
 .chgrow:last-child { border-bottom:0; }
 .chgrow .what { flex:1; }
+/* Undo one change. Understated on purpose — this is a per-item control sitting in what is otherwise a
+   read-only log, and it must not compete with the row controls that do the same job in the picture. */
+.chgrow .act { border:0; background:none; color:var(--red); cursor:pointer; font:inherit; font-size:.9rem;
+               line-height:1; padding:0 .15rem; flex:none; opacity:.65; }
+.chgrow .act:hover { opacity:1; }
+/* The rule name, as a control. It reads as the record of a choice, so it has to look like one you can
+   still make — a link, not a red removal. */
+.chgrow .act.tgt { color:var(--blue); opacity:1; font-size:inherit; padding:0; text-align:left; }
+.chgpick { padding:.1rem 0 .4rem 2.1rem; font-size:.8rem; }
+.chgpick .act { display:block; border:0; background:none; color:var(--blue); cursor:pointer; font:inherit;
+                padding:.1rem 0; text-align:left; }
+.chgpick .warn { color:var(--amber); padding-left:.6rem; }
 .kind { font-size:.66rem; padding:.02rem .35rem; border-radius:999px; border:1px solid currentColor;
         white-space:nowrap; }
 .k-add { color:var(--green); } .k-edit { color:var(--blue); } .k-hide { color:var(--amber); }
 /* "new group" must not wear the removal colour — a rule being CREATED reading as red is the rail telling
    the operator the opposite of what happened. */
 .k-rule { color:var(--blue); } .k-rm { color:var(--red); }
+/* A rename MODIFIES an entry the portal already ships, so it reads as an edit rather than an addition —
+   but it gets its own token, because the change log is the audit trail the whole panel leans on. */
+.k-ren { color:var(--blue); }
+/* The original name in the rename form: pinned, not typed. It has to look like a fact about the row
+   rather than a box someone forgot to make editable. */
+.fmpin { font-size:.85rem; color:var(--dim); white-space:nowrap; }
 .rule { padding:.28rem 0; border-bottom:1px solid var(--line); }
 .rule:last-child { border-bottom:0; }
 .rule.live { border-left:3px solid var(--green); padding-left:.4rem; }
@@ -1569,14 +1597,23 @@ details.cfgsec > .setting-list { padding:.7rem .8rem 0; }
 .tog .off { font-size:.72em; opacity:.8; }
 /* ── the composed menu: hides and adds as ONE picture, which is what stops them reading as two
       identical sections. ── */
-.fake { border:1px solid var(--line); border-radius:8px; background:var(--bg); max-width:24rem;
+/* Wide enough for a real row. At 24rem a label sat beside a provenance tag and two buttons with nothing
+   left over, so "Acme Voice Homepage" wrapped one word per line and the remove button pushed past the
+   card's own border — the rows carrying the most information were the least readable on the page. */
+.fake { border:1px solid var(--line); border-radius:8px; background:var(--bg); max-width:34rem;
         padding:.3rem 0; margin:.55rem 0 .2rem; }
-.fm { display:flex; align-items:center; gap:.55rem; padding:.28rem .75rem; font-size:.92rem; }
+/* And where even that is not enough — a narrow viewport, a long label — the row WRAPS rather than
+   overflowing. Content leaving the card reads as a rendering bug; a second line reads as a long name. */
+.fm { display:flex; align-items:center; gap:.55rem; padding:.28rem .75rem; font-size:.92rem;
+      flex-wrap:wrap; }
 .fm .lbl { flex:1; color:var(--blue); }
 .fm.hid .lbl { color:var(--grey); text-decoration:line-through; }
 .fm.add { background:color-mix(in srgb, var(--green) 9%, transparent); }
 .fm.add .lbl { color:var(--fg); }
-.fm .tag { font-size:.68rem; color:var(--dim); white-space:nowrap; }
+.fm .tag { font-size:.68rem; color:var(--dim); white-space:nowrap; text-align:right; }
+/* A second rule acting on the same row gets its own line. Both facts on one line ran the tag out to
+   the width of the card and pushed the label into a two-line wrap beside it. */
+.fm .tag .wasline { display:block; }
 .fm input[type=checkbox] { margin:0; flex:none; }
 .fm .act { border:0; background:none; color:var(--blue); cursor:pointer; font:inherit; font-size:.76rem;
            padding:0 .1rem; }
@@ -2251,6 +2288,10 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
   function mbIsTargeted(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
   function mbClone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
 
+  function mbNorm(s) { return String(s === null || s === undefined ? '' : s).trim().toLowerCase(); }
+  function mbSame(a, b) { return mbNorm(a) === mbNorm(b); }
+  function mbSameUrl(a, b) { return !!a && !!b && mbNorm(a.url) === mbNorm(b.url) && !!mbNorm(a.url); }
+
   // ── targeted lists, editable rung by rung (item 47) ────────────────────────────────────────────────
   // A targeted half used to be read-only in full, because the flat tick-list this builder shows cannot
   // express one and flattening it would quietly narrow it to a single audience. That reasoning holds for
@@ -2314,23 +2355,197 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
    * change on a menu they did not edit. That noise is what hides the change they did make.
    */
   function mbEntryIn(a) {
-    return { label: (a && a.label) || '', url: (a && a.url) || '', title: (a && a.title) || '', _o: a };
+    return { label: (a && a.label) || '', url: (a && a.url) || '', title: mbTitleIn(a), _o: a };
   }
   /** The inverse: what gets written back. An untouched entry comes back byte for byte, key order included;
    *  an edited one keeps whatever else was written beside the fields this editor understands. */
   function mbEntryOut(a) {
-    var o = (a && a._o && typeof a._o === 'object' && !Array.isArray(a._o)) ? mbClone(a._o) : {};
+    var o = mbWritten(a);
     o.label = a.label;
     o.url = a.url;
-    if (a.title) o.title = a.title; else delete o.title;
+    mbTitleOut(o, a.title);
     return o;
+  }
+
+  /** ONE RENAME, AS THE EDITOR HOLDS IT. Same contract as an added entry: the fields it can change, plus
+   *  the entry exactly as the operator wrote it, so an unknown key and the key order both survive. */
+  function mbRenameIn(r) {
+    return { from: (r && r.from) || '', to: (r && r.to) || '', title: mbTitleIn(r), _o: r };
+  }
+  function mbRenameOut(r) {
+    var o = mbWritten(r);
+    o.from = r.from;
+    o.to = r.to;
+    mbTitleOut(o, r.title);
+    return o;
+  }
+
+  /** The clone an out-path writes over: the item AS WRITTEN, so unknown keys keep their values and their
+   *  positions. Absent (a row this session created) means start from nothing. */
+  function mbWritten(a) {
+    return (a && a._o && typeof a._o === 'object' && !Array.isArray(a._o)) ? mbClone(a._o) : {};
+  }
+  /**
+   * ⚠️ THE TOOLTIP IS THREE STATES AND THE EDITOR HAS TO HOLD ALL THREE: the key absent (leave the
+   * portal's own tooltip exactly as it is), the empty string (remove it), and a string (set it).
+   *
+   * It did not. The old pair collapsed on BOTH sides — in on truthiness, out on truthiness again — so the
+   * state could not represent the difference even before anything tried to edit it. On an add that only
+   * cost a round-trip: a written {"title": ""} came back with the key deleted, a diff on a menu nobody
+   * touched. On a rename the absent state is an INSTRUCTION and the difference has to survive to the DOM.
+   *
+   * An undefined value IS the absent state. One field, not a value plus a present flag — two fields
+   * encoding one fact can disagree, and this one would disagree silently.
+   */
+  function mbTitleIn(a) {
+    return (a && typeof a === 'object' && Object.prototype.hasOwnProperty.call(a, 'title'))
+      ? a.title : undefined;
+  }
+  /** ⚠️ ASSIGN, never delete-then-set. Assignment leaves the key where the operator wrote it; deleting and
+   *  re-adding moves it to the end of the object, which is a diff on a menu nobody edited. */
+  function mbTitleOut(o, title) {
+    if (title === undefined) delete o.title; else o.title = title;
+  }
+
+  /**
+   * THE HALVES OF A MENU RULE, AS ONE TABLE.
+   *
+   * Every generic function here used to fork on "half === 'hide' ? X : Y", in twelve places. That shape
+   * does not say "two cases"; it says "hide, and everything else" — so a third half takes the ADD path
+   * silently, and one of the twelve does not merely word itself wrongly, it writes the new rung into
+   * addRungs. The fork is a LOOKUP now, and an unknown half throws instead of defaulting.
+   *
+   * Field names alone would not have done it: the halves differ in shape, not in spelling. Seeding
+   * carries a union special case on one half and a raw-forms read on the other two; the drop filter, the
+   * identity matcher and the item name are a different function each. So the table holds closures and
+   * the generic code holds none of it.
+   */
+  var MB_HALVES = {
+    hide: {
+      name: 'hide',
+      // state field names — these really are just strings
+      rungs: 'hideRungs', flat: 'hide', locked: 'hideLocked',
+      count: 'hides',     // the rail's word
+      noun: 'hides',      // the read-only view's word
+      one: 'Hiding',      // "<one> the next item lands in <rule>"
+      ask: 'Which rule should hide it?',
+      lock: 'This menu’s hide list is in a shape this builder cannot round-trip, so it is not editable here'
+        + ' — it is carried through to the output exactly as it is, and shown below.',
+      // A hide is a bare label. There is nothing to encode and no partial state to drop: the two ways in
+      // (a tick, and the hide-by-name box) both refuse an empty string before it reaches a list.
+      in: function(x){ return x; },
+      out: function(x){ return x; },
+      valid: function(){ return true; },
+      same: function(x, want){ return mbSame(x, want); },
+      label: function(x){ return String(x); },
+      /**
+       * ⚠️ The apps hide list is the UNION of two settings and this editor owns only one of them. Seeding
+       * from the EFFECTIVE list would copy PORTAL_APPS_HIDE into PORTAL_MENUS — a second home for a value
+       * that already has one, and one that then drifts.
+       */
+      seed: function(mn, v){
+        var plan = v.plan[mn.name] || {};
+        var src = (mn.name === 'apps' && v.appsHide) ? v.appsHide.menus : plan.hide;
+        return (src || []).slice();
+      }
+    },
+    add: {
+      name: 'add',
+      rungs: 'addRungs', flat: 'add', locked: 'addLocked',
+      count: 'adds',
+      noun: 'entries',
+      one: 'Adding',
+      ask: 'Which rule should carry it?',
+      lock: 'This menu’s added entries are in a shape this builder cannot round-trip, so they are not editable here.'
+        + ' They are carried through exactly as they are, and shown below.',
+      in: mbEntryIn,
+      out: mbEntryOut,
+      // An entry with no label or no url is not config, so it is never emitted — which is also why the
+      // form drops a half-typed one rather than leaving a ghost in the state.
+      valid: function(a){ return !!(a && a.label && a.url); },
+      same: function(x, want){ return mbSameUrl(x, want); },
+      label: function(x){ return (x && x.label) || '?'; },
+      /**
+       * ⚠️ THE RAW FORMS, not the resolved ones. The preview resolves with no user facts, so every
+       * server-side {variable} in plan.add has already been interpolated to empty — seeding from it
+       * writes the EMPTIED url into the new rung and the result validates green.
+       */
+      seed: function(mn, v){
+        var plan = v.plan[mn.name] || {};
+        var src = (v.rawAdds && v.rawAdds[mn.name]) || plan.add || [];
+        return mbClone(src).map(mbEntryIn);
+      }
+    },
+    rename: {
+      name: 'rename',
+      rungs: 'renameRungs', flat: 'rename', locked: 'renameLocked',
+      count: 'renames',
+      noun: 'renames',
+      one: 'Renaming',
+      ask: 'Which rule should rename it?',
+      lock: 'This menu’s renames are in a shape this builder cannot round-trip, so they are not editable here.'
+        + ' They are carried through exactly as they are, and shown below.',
+      in: mbRenameIn,
+      out: mbRenameOut,
+      valid: function(r){ return !!(r && r.from && r.to); },
+      // ⚠️ IDENTITY IS THE ORIGINAL LABEL, everywhere — matching it, hiding it, drawing it, capturing it.
+      // Keying a rename on anything else is what would let one rename feed another.
+      same: function(x, want){ return mbSame(x && x.from, want && want.from); },
+      label: function(r){ return ((r && r.from) || '?') + ' → ' + ((r && r.to) || '?'); },
+      /** Raw again, and for the same reason: the "to" and the tooltip carry {variable} too. */
+      seed: function(mn, v){
+        var plan = v.plan[mn.name] || {};
+        var src = (v.rawRenames && v.rawRenames[mn.name]) || plan.rename || [];
+        return mbClone(src).map(mbRenameIn);
+      }
+    }
+  };
+  /** In reading order: hide, add, rename. The one place a caller may iterate the halves. */
+  var MB_HALF_NAMES = ['hide', 'add', 'rename'];
+  /** A plan or a provenance map with every half present and empty — the shape every read site assumes.
+   *  Written out rather than left to the guards: a table-driven read of matched[half] on a cached older
+   *  reply returns undefined, and one word each closes the class. */
+  function mbEmptyPlan() {
+    var o = {};
+    MB_HALF_NAMES.forEach(function(hn){ o[hn] = []; });
+    return o;
+  }
+  function mbZeroCounts() {
+    var o = {};
+    MB_HALF_NAMES.forEach(function(hn){ o[hn] = 0; });
+    return o;
+  }
+  /** One menu's plan or provenance, with any half a cached older reply omitted filled in empty. */
+  function mbWithEmpties(one) {
+    var o = mbEmptyPlan();
+    MB_HALF_NAMES.forEach(function(hn){ if (one && one[hn]) o[hn] = one[hn]; });
+    return o;
+  }
+
+  function mbHalfDef(half) {
+    var d = MB_HALVES[half];
+    // Loud, because the failure it replaces was silent: an unknown half used to be handled as an add.
+    if (!d) throw new Error('unknown menu half: ' + half);
+    return d;
   }
 
   // The full config: every menu, edited or not. Untouched menus are emitted from MB_BASE unchanged, and a
   // targeted menu is emitted from MB_BASE even when its sibling half was edited.
   function mbConfig() {
     var cfg = {};
-    MB_MENUS.forEach(function(mn){
+    // IN THE ORDER THE OPERATOR WROTE THEM, then any menu they had not named. Iterating the registry
+    // re-emitted {management, apps} as {apps, management} — a moved block on a config nobody touched,
+    // which is the same diff noise the axis-level and menu-level rebuilds below exist to prevent, one
+    // level further up.
+    // (The loop variable is never named with the single letter the bridge selftest reserves: that test
+    //  scans this script for that letter followed by a field name, to prove both sides of the protocol
+    //  agree, and a menu bound to it would read as a protocol field.)
+    var order = [];
+    Object.keys(MB_BASE).forEach(function(k){
+      MB_MENUS.forEach(function(mu){ if (mu.name === k && order.indexOf(mu) < 0) order.push(mu); });
+    });
+    MB_MENUS.forEach(function(mu){ if (order.indexOf(mu) < 0) order.push(mu); });
+    order.forEach(function(mn){
       var st = mbState[mn.name];
       var base = MB_BASE[mn.name] || {};
       var one = {};
@@ -2338,12 +2553,8 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       // dropping it would change who the rule applies to rather than tidying the output. The rest of the
       // object — every other axis, and the whole-object "*" — is re-emitted from the state's own clone of
       // it, so an untouched axis survives byte for byte through an edit to a sibling one.
-      function fromRungs(r, asEntries) {
-        function listOut(v) {
-          return asEntries
-            ? v.filter(function(a){ return a.label && a.url; }).map(mbEntryOut)
-            : v.slice();
-        }
+      function fromRungs(r, d) {
+        function listOut(v) { return v.filter(d.valid).map(d.out); }
         var byKey = {};
         r.axes.forEach(function(ax){
           var axis = {};
@@ -2365,28 +2576,42 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         });
         return out;
       }
-      // hide
-      if (st && st.hideRungs) {
-        one.hide = fromRungs(st.hideRungs, false);
-      } else if (st && !st.hideLocked) {
-        var hide = st.hide.slice();
-        // AN EMPTY FLAT LIST IS A KEY THE OPERATOR WROTE, and dropping it made an untouched menu emit
-        // differently from how it runs. An empty list and no hide key mean the same thing to the resolver,
-        // which is exactly why the difference is pure diff noise rather than a correction.
-        if (hide.length || Array.isArray(base.hide)) one.hide = hide;
-      } else if (base.hide !== undefined) {
-        one.hide = mbClone(base.hide);
-      }
-      // add
-      if (st && st.addRungs) {
-        one.add = fromRungs(st.addRungs, true);
-      } else if (st && !st.addLocked) {
-        var add = st.add.filter(function(a){ return a.label && a.url; }).map(mbEntryOut);
-        if (add.length || Array.isArray(base.add)) one.add = add;
-      } else if (base.add !== undefined) {
-        one.add = mbClone(base.add);
-      }
-      if (one.hide !== undefined || one.add !== undefined) cfg[mn.name] = one;
+      MB_HALF_NAMES.forEach(function(hn){
+        var d = mbHalfDef(hn);
+        if (st && st[d.rungs]) {
+          one[hn] = fromRungs(st[d.rungs], d);
+        } else if (st && !st[d.locked]) {
+          var flat = st[d.flat].filter(d.valid).map(d.out);
+          // AN EMPTY FLAT LIST IS A KEY THE OPERATOR WROTE, and dropping it made an untouched menu emit
+          // differently from how it runs. An empty list and no key at all mean the same thing to the
+          // resolver, which is exactly why the difference is pure diff noise rather than a correction.
+          if (flat.length || Array.isArray(base[hn])) one[hn] = flat;
+        } else if (base[hn] !== undefined) {
+          one[hn] = mbClone(base[hn]);
+        }
+      });
+      // ── EVERY OTHER HALF, CARRIED THROUGH WHERE IT WAS WRITTEN ────────────────────────────────────
+      // This editor models three halves. A fourth would be one it does not edit, and rebuilding a menu
+      // from only the halves it understands DELETES the rest — silently, in output an operator pastes
+      // over their running config. The whole menu went with it when the unmodelled half was the only key,
+      // which is what happened to rename before it was modelled. This block is what makes that survivable
+      // for the NEXT one, so it stays after rename joins the table.
+      //
+      // Position matters as much as presence, and collecting the leftovers is not enough to keep it:
+      // appending them after hide/add re-emits rename-then-hide as hide-then-rename, which is
+      // exactly the moved-block diff noise fromRungs' keyOrder rebuild exists to prevent one level
+      // down. Same technique, one level up.
+      var order = Object.keys(base);
+      Object.keys(one).forEach(function(k){ if (order.indexOf(k) < 0) order.push(k); });
+      var outOne = {};
+      var any = false;
+      order.forEach(function(k){
+        if (one[k] !== undefined) { outOne[k] = one[k]; any = true; }
+        else if (base[k] !== undefined) { outOne[k] = mbClone(base[k]); any = true; }
+      });
+      // ANY key, not just the two this editor edits — otherwise a rename-only menu is still dropped,
+      // with its remainder faithfully computed and then thrown away.
+      if (any) cfg[mn.name] = outOne;
     });
     return cfg;
   }
@@ -2426,10 +2651,10 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
   // A TARGETED rung this editor cannot round-trip, shown read-only. "Not editable here" on its own tells
   // you a rule exists and hides what it says, which is the worst of both — you cannot edit it AND you
   // cannot read it without going to the Config tab. Whatever the builder cannot edit, it can still show.
-  function mbShowRungs(raw, card, what) {
+  function mbShowRungs(raw, card, d) {
     var wrap = document.createElement('div');
     var head = document.createElement('p'); head.className = 'dim';
-    head.textContent = 'Targeted ' + what + ', shown as configured — edit these on the Config tab:';
+    head.textContent = 'Targeted ' + d.noun + ', shown as configured — edit these on the Config tab:';
     wrap.appendChild(head);
     Object.keys(raw).forEach(function(axis){
       var sub = raw[axis];
@@ -2440,9 +2665,10 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       rows.forEach(function(r){
         var line = document.createElement('div'); line.className = 'mbrow';
         var t = document.createElement('span');
-        var items = Array.isArray(r.v)
-          ? r.v.map(function(x){ return typeof x === 'string' ? x : (x && x.label) || '?'; })
-          : [];
+        // Named by the HALF's own rule, not by a shape guess. The generic version read
+        // "(x && x.label) || '?'" and drew every rename in this view as a bare question mark — the item
+        // has no label, and nothing about its shape says how it should read.
+        var items = Array.isArray(r.v) ? r.v.map(d.label) : [];
         // An EMPTY rung is meaningful — it is the "everyone except these" idiom — so name it rather than
         // rendering an empty line that reads as a bug.
         t.textContent = r.key + ': ' + (items.length ? items.join(', ') : '(nothing — an exemption)');
@@ -2503,6 +2729,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
   var mbAsk = null;     // the edit being HELD while the question is on screen
   var mbEditing = null; // the one added entry currently open in its form
   var mbChanges = [];   // this session's edits, in the order they were made
+  var mbMoving = -1;    // the change whose "move it to" list is open in the rail
 
   function mbForkKey(mn, half) { return mn.name + '|' + half; }
   /** A target is {axis, key}; "all" is the flat half and "*" the whole-menu default. */
@@ -2512,7 +2739,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       === String(b.key === undefined ? '' : b.key).trim().toLowerCase();
   }
   /** A persona change invalidates every answer: they were answers about ONE audience. */
-  function mbResetForks() { mbFork = {}; mbAsk = null; mbEditing = null; }
+  function mbResetForks() { mbFork = {}; mbAsk = null; mbEditing = null; mbMoving = -1; }
 
   /**
    * A rung named in the OPERATOR'S terms, never as "axis → key".
@@ -2542,7 +2769,6 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     return /^(everyone|any )/.test(n) ? n : 'the ' + n;
   }
 
-  function mbNorm(s) { return String(s === null || s === undefined ? '' : s).trim().toLowerCase(); }
   /**
    * Scope matching, punctuation-insensitive — the rule normScope in menus.ts exists for, because cores
    * emit "Office Manager", "office_manager" and "officeManager" interchangeably. A capture is stored
@@ -2564,17 +2790,11 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     }
     return null;
   }
-  function mbSame(a, b) { return mbNorm(a) === mbNorm(b); }
-  function mbSameUrl(a, b) { return !!a && !!b && mbNorm(a.url) === mbNorm(b.url) && !!mbNorm(a.url); }
 
   function mbHalf(mn, half) {
+    var d = mbHalfDef(half);
     var st = mbState[mn.name] || {};
-    return {
-      st: st,
-      rungs: half === 'hide' ? st.hideRungs : st.addRungs,
-      flat: half === 'hide' ? st.hide : st.add,
-      locked: half === 'hide' ? st.hideLocked : st.addLocked
-    };
+    return { st: st, d: d, rungs: st[d.rungs], flat: st[d.flat], locked: st[d.locked] };
   }
 
   /** The live array behind one target, or null when this editor does not own it. Never creates. */
@@ -2597,27 +2817,11 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
   /**
    * WHAT THIS PERSONA ALREADY GETS — the seed for any rung created underneath them, so that creating one
    * changes nobody's menu. Same invariant mbMakeTargeted holds for the flat case, arriving through the
-   * other door.
-   *
-   * ⚠️ The apps hide list is the UNION of two settings and this editor owns only one of them. Seeding
-   * from the EFFECTIVE list would copy PORTAL_APPS_HIDE into PORTAL_MENUS — a second home for a value
-   * that already has one, and one that then drifts.
+   * other door. Each half seeds differently in SHAPE, so the difference lives in the halves table.
    */
   function mbSeedList(mn, half, v) {
     if (!v || !v.plan) return [];
-    var plan = v.plan[mn.name] || { hide: [], add: [] };
-    if (half === 'add') {
-      // ⚠️ THE RAW FORMS, not the resolved ones. The preview resolves with no user facts, so every
-      // server-side {variable} in plan.add has already been interpolated to empty — seeding from it
-      // writes the EMPTIED url into the new rung and the result validates green. Same bug as the row
-      // identity one, one layer down, and rawAdds was already on the reply and going unused.
-      var src = (v.rawAdds && v.rawAdds[mn.name]) || plan.add || [];
-      return mbClone(src).map(function(a){
-        return { label: (a && a.label) || '', url: (a && a.url) || '', title: (a && a.title) || '' };
-      });
-    }
-    var src = (mn.name === 'apps' && v.appsHide) ? v.appsHide.menus : plan.hide;
-    return (src || []).slice();
+    return mbHalfDef(half).seed(mn, v);
   }
 
   /** The list behind a target, CREATING the rung — seeded — if it is not there yet. */
@@ -2641,7 +2845,10 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     }
     if (!h.rungs) {
       var made = mbMakeTargeted(h.flat, t.axis, t.key);
-      if (half === 'hide') mbState[mn.name].hideRungs = made; else mbState[mn.name].addRungs = made;
+      // ⚠️ THROUGH THE TABLE. Written as "hide ? hideRungs : addRungs" this was the one fork of the
+      // twelve that did not merely word itself wrongly for a third half — it wrote that half's brand new
+      // rung into addRungs, where the add half would then emit it.
+      mbState[mn.name][h.d.rungs] = made;
       mbNote('rule', mn, 'new rule — ' + mbSrcName(t), 'seeded from what that audience already gets');
       return mbListFor(mn, half, t);
     }
@@ -2710,9 +2917,25 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       }
     });
     var h = mbHalf(mn, half);
-    if (!out.length) {
-      if (!h.rungs) push({ axis: 'all' }, 'everyone', 'this menu has no rules yet, so one list is the simplest thing that works');
-      else if (h.rungs.top) push({ axis: '*', key: h.rungs.top.key }, 'everyone else', 'the whole-menu default');
+    if (!out.length && !h.rungs) {
+      push({ axis: 'all' }, 'everyone', 'this menu has no rules yet, so one list is the simplest thing that works');
+    }
+    // ⚠️ THE WHOLE-MENU DEFAULT IS ALWAYS AIMABLE ONCE THE HALF HAS RUNGS, whether or not it answered.
+    // It used to be offered only when nothing else was, so carving a scope rule made the default the one
+    // audience you could never aim back at — David, on dev: "click Change and it ONLY shows Just
+    // Reseller still." Carving created that default (mbMakeTargeted seeds both), so it exists and is
+    // unreachable, which is the worst of the two.
+    //
+    // The NOTE has to move with it. While a more specific rule names this reader, the default does not
+    // answer them, so an edit landing there changes nothing on screen — true, useful, and a trap unless
+    // it is said at the moment of deciding.
+    if (h.rungs) {
+      var named = out.map(function(c){ return mbTheName(c.t); }).join(' and ');
+      push({ axis: '*', key: (h.rungs.top && h.rungs.top.key) || '*' }, 'everyone else',
+        named
+          ? 'the whole-menu default — every reader no other rule names, which is NOT the one on screen '
+            + 'while ' + named + ' exists, so nothing here will change the picture above'
+          : 'the whole-menu default — every reader no other rule names');
     }
     if (mbPersona.domain) {
       push({ axis: 'domains', key: mbPersona.domain }, 'just ' + mbPersona.domain,
@@ -2761,9 +2984,226 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     return out;
   }
 
-  /** Record one change for the rail. Derived from the action taken, never from a diff. */
-  function mbNote(kind, mn, what, where) {
-    mbChanges.push({ kind: kind, menu: mn.label, what: what, where: where || '' });
+  /**
+   * Record one change for the rail. Derived from the action taken, never from a diff — and the undo is
+   * the same thing from the other side: the INVERSE OF THAT ACTION, built where the action happened and
+   * by whoever knows what it did. Not a diff either, and not a snapshot of the config: a snapshot
+   * restore would also undo every later edit to the same list.
+   *
+   * It is optional. A change with no inverse simply offers no control, which is the honest answer for
+   * carving a rule — later edits can land inside the new rung, so removing it takes them too. That one
+   * has its own control in the rail, where the count says what is about to go with it.
+   *
+   *   undo = { on: [{list, entry?}, …],   // what it touches; see mbCanUndo
+   *            can: function(){…},        // optional override, for an inverse whose subject is a rung
+   *            run: function(){…} }
+   */
+  function mbNote(kind, mn, what, where, undo, move) {
+    mbChanges.push({ kind: kind, menu: mn.label, what: what, where: where || '',
+                     undo: undo || null, move: move || null });
+  }
+
+  /**
+   * WHAT THIS CHANGE PUT IN A RULE, so the log can carry it to a different one.
+   *
+   *   move = { mn, half, t, items: [{list, item}, …] }
+   *
+   * Only a change that PUT something somewhere has this. A removal has nothing to carry; an edit changes
+   * an entry that may have been in the config long before this session, so moving it would move more
+   * than the operator's change; carving a rule is not an item at all.
+   */
+  function mbMoveOf(mn, half, t, list, items) {
+    if (!items.length) return null;
+    return { mn: mn, half: half, t: t,
+             items: items.map(function(x){ return { list: list, item: x }; }) };
+  }
+  /**
+   * Touched-things for a list of items, each named. A hide is a bare string and the other halves are
+   * entry objects; indexOf identifies both, so both get checked.
+   *
+   * ⚠️ NAME THE ITEM, not just its list. With only the list, an inverse whose subject had ALREADY been
+   * taken out by a later change still offered itself: hide an entry, untick it, and "hid X" kept its
+   * control — one that removes nothing and then drops the line as though it had worked. That is the same
+   * silent-success failure the reachability check exists to prevent, one level in.
+   */
+  function mbOnItems(items) {
+    return items.map(function(it){ return { list: it.list, entry: it.item }; });
+  }
+  function mbCanMove(c) {
+    if (!c || !c.move) return false;
+    if (mbHalf(c.move.mn, c.move.half).locked) return false;
+    return c.move.items.every(function(it){
+      return mbReachable(it.list) && it.list.indexOf(it.item) >= 0;
+    });
+  }
+  /** Where else this change could live — the fork question's own candidates, minus where it already is. */
+  function mbMoveTargets(c) {
+    var v = mbPreviewReply;
+    var matched = mbWithEmpties(v && v.matched && v.matched[c.move.mn.name]);
+    var d = mbHalfDef(c.move.half);
+    return mbCandidates(c.move.mn, c.move.half, matched[c.move.half])
+      .filter(function(o){ return !mbSameTarget(o.t, c.move.t); })
+      // ⚠️ AND NOT INTO A RULE THAT ALREADY SAYS THIS. An existing rung carrying the same identity — the
+      // same url, the same original name — has an entry of its own there, and arriving would either
+      // overwrite it or sit beside it as config that can never fire. That rule already covers this
+      // entry; there is nothing for the move to do and no honest way to do it.
+      .filter(function(o){
+        var there = mbListFor(c.move.mn, c.move.half, o.t);
+        if (!there) return true;
+        return !c.move.items.some(function(it){
+          return there.some(function(y){ return y !== it.item && d.same(y, it.item); });
+        });
+      });
+  }
+  /**
+   * Carry one change to another rule.
+   *
+   * ⚠️ THE DESTINATION MAY BE SEEDED WITH A COPY OF THE VERY THING BEING MOVED. Creating a rung seeds it
+   * from what the persona already gets, which includes this change — so the moved item arrives to find
+   * an equal-but-different object already sitting there. Pushing would duplicate it, and skipping would
+   * leave the change pointing at an item that is not in any list, which silently kills both its undo and
+   * its own move control. It REPLACES the match, keeping the identity the log holds.
+   */
+  function mbMoveChange(at, t2) {
+    var c = mbChanges[at];
+    if (!mbCanMove(c)) return;
+    var mn = c.move.mn, half = c.move.half, d = mbHalfDef(half);
+    var items = c.move.items.map(function(it){ return it.item; });
+    // ⚠️ TAKE IT OUT FIRST, BEFORE THE DESTINATION IS BUILT. mbEnsure can CONVERT a flat half into rungs,
+    // and it does that by copying the flat list into both the new rung and the whole-menu default
+    // (mbMakeTargeted) — so a move out of the flat list used to copy the item into both, then splice it
+    // from the flat array that conversion had just orphaned. Emitted result: "moved to the rule for
+    // Office Manager" while every reader still got it. Removing first means there is nothing to copy.
+    c.move.items.forEach(function(it){
+      var i = it.list.indexOf(it.item);
+      if (i >= 0) it.list.splice(i, 1);
+    });
+    // ⚠️ AND WHETHER THE DESTINATION ALREADY EXISTED decides what an identity clash means there. See the
+    // replace below: only a rung this call just created can be holding a SEEDED copy of what we are
+    // carrying. mbMoveTargets refuses a destination that already carries this identity, so a clash in an
+    // existing rung cannot reach here — this is the guard that keeps that true if it ever does.
+    var fresh = !mbListFor(mn, half, t2);
+    var dest = mbEnsure(mn, half, t2);
+    mbMoving = -1;
+    if (!dest) {
+      // Put them back: the move did not happen, and half a move is worse than none.
+      c.move.items.forEach(function(it){ if (it.list.indexOf(it.item) < 0) it.list.push(it.item); });
+      mbRebuild();
+      return;
+    }
+    items.forEach(function(x){
+      var hit = -1;
+      for (var i = 0; i < dest.length; i++) if (d.same(dest[i], x)) { hit = i; break; }
+      // Replacing is right ONLY for the seeded copy of this very item in a rung we just created. In a
+      // rung that already existed, an equal identity is somebody else's entry and overwriting it destroys
+      // config nobody asked to change.
+      if (hit >= 0 && fresh) dest[hit] = x; else if (hit < 0) dest.push(x);
+    });
+    c.move.t = t2;
+    c.move.items = items.map(function(x){ return { list: dest, item: x }; });
+    c.where = mbSrcName(t2);
+    // The inverse follows the thing it undoes, or it would splice at the address this change has left.
+    c.undo = { on: mbOnItems(c.move.items), run: function(){
+      items.forEach(function(x){ var i = dest.indexOf(x); if (i >= 0) dest.splice(i, 1); });
+    } };
+    mbRebuild();
+  }
+
+  /**
+   * ⚠️ AN UNDO HOLDS A LIVE ARRAY, AND AN ARRAY CAN STOP BEING PART OF THE CONFIG.
+   *
+   * Carving a flat half into rungs COPIES the flat list (mbMakeTargeted), so the array a hide was pushed
+   * into a moment earlier belongs to nobody afterwards; deleting a rung orphans every list inside it.
+   * Splicing an orphan changes nothing at all — and the log entry would vanish exactly as if it had
+   * worked, which is the one failure an undo control must not have. So the control is offered only while
+   * everything the change touched is still reachable from the state that gets emitted.
+   */
+  function mbReachable(list) {
+    var found = false;
+    MB_MENUS.forEach(function(mn){
+      var st = mbState[mn.name];
+      if (!st) return;
+      MB_HALF_NAMES.forEach(function(hn){
+        var d = mbHalfDef(hn);
+        if (st[d.locked]) return;
+        // ⚠️ THE QUESTION IS WHAT mbConfig EMITS, NOT WHAT mbState HOLDS. Carving leaves the flat array
+        // sitting in state — mbEnsure sets the rungs and never clears it, deliberately, so nothing has
+        // to be rebuilt if the rungs go away. But the emit path takes the rungs when they exist, so that
+        // flat array is no longer part of the config, and an inverse acting on it would change nothing
+        // while looking like it worked. "Still in the state" was the wrong predicate.
+        var r = st[d.rungs];
+        if (!r) { if (st[d.flat] === list) found = true; return; }
+        if (r.top && r.top.list === list) found = true;
+        r.axes.forEach(function(ax){
+          ax.order.forEach(function(k){ if (ax.map[k] === list) found = true; });
+        });
+      });
+    });
+    return found;
+  }
+  /** Every list it touched is still in the config, and every entry it touched is still in its list. */
+  function mbCanUndo(c) {
+    if (!c || !c.undo) return false;
+    if (c.undo.can && !c.undo.can()) return false;
+    return (c.undo.on || []).every(function(o){
+      if (!mbReachable(o.list)) return false;
+      return !o.entry || o.list.indexOf(o.entry) >= 0;
+    });
+  }
+  function mbUndo(i) {
+    var c = mbChanges[i];
+    if (!mbCanUndo(c)) return;
+    c.undo.run();
+    mbMoving = -1;
+    // The log records what the config CARRIES, so an undone change is not a change that was made and
+    // then reversed — it is not there. Leaving it, struck through, would make the list stop matching the
+    // output beside it, which is the one thing the whole panel is for.
+    mbChanges.splice(i, 1);
+    mbRebuild();
+  }
+  /** Put removed items back where they were. Ascending, and clamped: the list can have shrunk since. */
+  function mbPutBack(back) {
+    back.slice().reverse().forEach(function(b){
+      b.list.splice(Math.min(b.at, b.list.length), 0, b.v);
+    });
+  }
+  /** The editable fields of each entry as they are RIGHT NOW — captured when a form opens, so closing it
+   *  has something to be the inverse of. The as-written original is excluded: it never changes. */
+  function mbSnap(refs) {
+    return refs.map(function(r){
+      var v = {};
+      Object.keys(r.entry).forEach(function(k){ if (k !== '_o') v[k] = r.entry[k]; });
+      return { list: r.list, entry: r.entry, v: v };
+    });
+  }
+  function mbRestore(snap) {
+    snap.forEach(function(s){ Object.keys(s.v).forEach(function(k){ s.entry[k] = s.v[k]; }); });
+  }
+  /**
+   * The inverse of closing a form. Two shapes, and they are genuinely different changes: creating an
+   * entry is undone by taking it back out, editing one by putting its fields back as they were when the
+   * form opened — which is why the snapshot is taken at OPEN and not here, where sync() has already
+   * written every keystroke into the entry.
+   */
+  /** A form's move descriptor, and only for an entry this session CREATED — see mbMoveOf. Built when
+   *  the form opens, because that is where the target it was created against is still known. */
+  function mbFormMove(mn, ed) {
+    if (!ed.isNew || !ed.t || !ed.list) return null;
+    return mbMoveOf(mn, ed.half, ed.t, ed.list, ed.refs.map(function(r){ return r.entry; }));
+  }
+  function mbFormUndo(isNew, refs, was) {
+    if (isNew) {
+      var mine = refs.slice();
+      return { on: mbOn(mine.map(function(r){ return { list: r.list, entry: r.entry }; })),
+               run: function(){ mbDropEntry(mine); } };
+    }
+    if (!was || !was.length) return null;
+    return { on: mbOn(was.map(function(w){ return { list: w.list, entry: w.entry }; })),
+             run: function(){ mbRestore(was); } };
+  }
+  /** The touched-things list for an inverse acting on whole lists, or on named entries inside them. */
+  function mbOn(items) {
+    return items.map(function(x){ return x.entry ? { list: x.list, entry: x.entry } : { list: x.list }; });
   }
 
   /** Run an edit, asking first if this half has no answer yet. The callback gets the list and the target. */
@@ -2774,10 +3214,36 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     mbRebuild();
   }
   function mbApply(mn, half, t, run, describe) {
-    var list = mbEnsure(mn, half, t);
+    var h0 = mbHalf(mn, half);
+    var list = h0.locked ? null : mbEnsure(mn, half, t);
+    // ⚠️ NULL WAS SILENT SUCCESS, and that is how a whole half went dead. mbEnsure refuses a target that
+    // no longer fits the half's shape — and the shape can change UNDER a stuck answer: answer "everyone"
+    // while the half is one flat list, then let anything convert it to rungs, and the flat target stops
+    // resolving. Every later tick then did nothing at all, with the line under the menu still naming the
+    // rule it was going to. An answer that has stopped meaning something is thrown away and asked again.
+    if (!list) {
+      delete mbFork[mbForkKey(mn, half)];
+      if (!h0.locked) mbAsk = { menu: mn.name, half: half, run: run, describe: describe };
+      mbRebuild();
+      return;
+    }
     if (list) {
+      // ONE INVERSE FOR EVERY EDIT THAT COMES THROUGH HERE, derived rather than written per caller: an
+      // edit on this path appends, so taking back exactly what it appended is exact whatever it was. It
+      // also gets the no-op right for free — a tick on a label the target rule ALREADY hides appends
+      // nothing, and a control offering to undo nothing is worse than no control.
+      var n0 = list.length;
       run(list, t);
-      if (describe) mbNote(describe.kind, mn, describe.what, mbSrcName(t));
+      var added = list.slice(n0);
+      if (describe) {
+        var onAdded = mbOnItems(added.map(function(v){ return { list: list, item: v }; }));
+        mbNote(describe.kind, mn, describe.what, mbSrcName(t), added.length ? {
+          on: onAdded,
+          run: function(){
+            added.forEach(function(v){ var i = list.indexOf(v); if (i >= 0) list.splice(i, 1); });
+          }
+        } : null, mbMoveOf(mn, half, t, list, added));
+      }
     }
     mbRebuild();
   }
@@ -2785,7 +3251,11 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     mbFork[mbForkKey(mn, half)] = t;
     var p = mbAsk;
     mbAsk = null;
-    if (p && p.menu === mn.name && p.half === half) mbApply(mn, half, t, p.run, p.describe);
+    // A HELD EDIT, or no edit at all. The question is asked from two doors: an edit that is waiting on
+    // it, and the "change" link, which asks it about nothing. Without a run to hold, that second door
+    // takes the first door's path: mbApply calls the callback (null, so it throws) after mbEnsure has
+    // already CREATED the rung — a rule carved by a click that only meant to re-aim the next edit.
+    if (p && p.menu === mn.name && p.half === half && p.run) mbApply(mn, half, t, p.run, p.describe);
     else mbRebuild();
   }
 
@@ -2796,18 +3266,85 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
    */
   function mbUnhide(mn, sources, label) {
     var owners = mbOwners(mn, 'hide', sources, function(x){ return mbSame(x, label); });
+    var back = [];
     owners.forEach(function(o){
-      for (var i = o.list.length - 1; i >= 0; i--) if (mbSame(o.list[i], label)) o.list.splice(i, 1);
+      for (var i = o.list.length - 1; i >= 0; i--) if (mbSame(o.list[i], label)) {
+        back.push({ list: o.list, at: i, v: o.list[i] });
+        o.list.splice(i, 1);
+      }
     });
     mbNote('hide', mn, 'stopped hiding ' + label,
-      owners.map(function(o){ return mbSrcName(o.src); }).join(', '));
+      owners.map(function(o){ return mbSrcName(o.src); }).join(', '),
+      back.length ? { on: mbOn(back), run: function(){ mbPutBack(back); } } : null);
     mbRebuild();
   }
+  /** Take these entries out, and say what came out of where — which is all an inverse needs. */
   function mbDropEntry(refs) {
+    var out = [];
     (refs || []).forEach(function(r){
       var i = r.list.indexOf(r.entry);
-      if (i >= 0) r.list.splice(i, 1);
+      if (i >= 0) { out.push({ list: r.list, at: i, v: r.entry }); r.list.splice(i, 1); }
     });
+    return out;
+  }
+  /**
+   * Reverting follows the same principle as unhiding: removal acts WHERE THE THING IS. "Stop renaming
+   * this" has exactly one honest reading — take it out of every rule renaming it for this reader — and
+   * the rail says so when that is more than one rule.
+   */
+  function mbUnrename(mn, sources, label) {
+    var d = mbHalfDef('rename');
+    var want = { from: label };
+    var owners = mbOwners(mn, 'rename', sources, function(x){ return d.same(x, want); });
+    var refs = [];
+    owners.forEach(function(o){
+      for (var i = o.list.length - 1; i >= 0; i--) if (d.same(o.list[i], want)) refs.push({ list: o.list, entry: o.list[i] });
+    });
+    var back = mbDropEntry(refs);
+    mbNote('rm', mn, 'stopped renaming ' + label,
+      owners.map(function(o){ return mbSrcName(o.src); }).join(', '),
+      back.length ? { on: mbOn(back), run: function(){ mbPutBack(back); } } : null);
+    mbRebuild();
+  }
+  /**
+   * Open the form for one rename. Two doors, deliberately: an EXISTING rename is edited where it is
+   * written — in every rule carrying it for this reader — and a NEW one goes through the fork question
+   * like every other structural edit, so it cannot quietly widen to an audience nobody is looking at.
+   */
+  function mbOpenRename(mn, label, owners) {
+    var d = mbHalfDef('rename');
+    var want = { from: label };
+    if (owners && owners.length) {
+      var refs = [];
+      owners.forEach(function(o){
+        for (var i = 0; i < o.list.length; i++) if (d.same(o.list[i], want)) refs.push({ list: o.list, entry: o.list[i] });
+      });
+      mbEditing = { kind: 'rename', menu: mn.name, from: label, refs: refs, isNew: false,
+                    was: mbSnap(refs),
+                    where: owners.map(function(o){ return mbSrcName(o.src); }).join(', ') };
+      mbRebuild();
+      return;
+    }
+    mbEdit(mn, 'rename', function(list, t){
+      // The rung this lands in may already rename the entry without the resolved plan showing it — a more
+      // specific rung answered instead. mergeRenames is first-wins on the original name, so a second
+      // entry here would be config that can never fire: edit the one that is already there.
+      for (var k = 0; k < list.length; k++) {
+        if (d.same(list[k], want)) {
+          var here = [{ list: list, entry: list[k] }];
+          mbEditing = { kind: 'rename', menu: mn.name, from: label, isNew: false,
+                        refs: here, was: mbSnap(here), where: mbSrcName(t) };
+          return;
+        }
+      }
+      // Seeded with an EMPTY new name rather than the original: Done drops a rename that has none, so
+      // opening the form and closing it again leaves the config exactly as it was.
+      var e = { from: label, to: '', title: undefined, _o: null };
+      list.push(e);
+      mbEditing = { kind: 'rename', menu: mn.name, from: label, isNew: true,
+                    refs: [{ list: list, entry: e }], half: 'rename', t: t, list: list,
+                    where: mbSrcName(t) };
+    }, null);
   }
   function mbRemoveAdd(mn, sources, item) {
     var owners = mbOwners(mn, 'add', sources, function(x){ return mbSameUrl(x, item); });
@@ -2815,9 +3352,10 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     owners.forEach(function(o){
       for (var i = o.list.length - 1; i >= 0; i--) if (mbSameUrl(o.list[i], item)) refs.push({ list: o.list, entry: o.list[i] });
     });
-    mbDropEntry(refs);
+    var back = mbDropEntry(refs);
     mbNote('rm', mn, 'removed ' + (item.label || item.url),
-      owners.map(function(o){ return mbSrcName(o.src); }).join(', '));
+      owners.map(function(o){ return mbSrcName(o.src); }).join(', '),
+      back.length ? { on: mbOn(back), run: function(){ mbPutBack(back); } } : null);
     mbRebuild();
   }
 
@@ -2863,48 +3401,81 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     var ttl = inp('mbin-title', 'Tooltip (optional)', e.title, 16);
     function sync() {
       refs.forEach(function(r){
-        r.entry.label = lab.value.trim(); r.entry.url = url.value.trim(); r.entry.title = ttl.value.trim();
+        r.entry.label = lab.value.trim(); r.entry.url = url.value.trim();
+        // ⚠️ EMPTY MEANS ABSENT HERE, and this is the one place the two forms differ on purpose. An add
+        // creates its own anchor, so no tooltip and an empty tooltip are the same instruction — while a
+        // rename inherits the portal's, where they are opposite instructions, which is why that form has
+        // a picker. Writing '' would emit a key that says nothing, on an entry the operator only edited
+        // the label of.
+        r.entry.title = ttl.value.trim() || undefined;
       });
       // mbRender, NOT mbRebuild: replacing the DOM under someone mid-keystroke is the "the UI changed too
       // much" complaint in its purest form. The output and the validator keep up; the picture waits.
       mbRender();
     }
-    // WHICH FIELD a variable lands in. All three accept them, so the chips insert into whichever was last
-    // focused rather than always the url — a tooltip reading "Support for {name}" is the ordinary case,
-    // and a chip that always wrote into the url would make it the awkward one.
-    var lastField = url;
-    [lab, url, ttl].forEach(function(i){
-      i.addEventListener('input', sync);
-      i.addEventListener('focus', function(){ lastField = i; });
-      wrap.appendChild(i);
-    });
+    [lab, url, ttl].forEach(function(i){ i.addEventListener('input', sync); wrap.appendChild(i); });
+    var was = mbEditing.was;
+    var mine = refs.slice();
+    var made = mbFormMove(mn, mbEditing);
     mbBtn('Done', function(){
       var cur = refs[0] ? refs[0].entry : null;
+      var isNew = mbEditing.isNew, where = mbEditing.where || '';
       // An entry with no label or no url is not config — mbConfig drops it — so do not leave a ghost of
       // one in the state where it would come back as an empty row on the next structural edit.
-      if (!cur || !cur.label || !cur.url) mbDropEntry(refs);
-      else mbNote(mbEditing.isNew ? 'add' : 'edit', mn, cur.label, mbEditing.where || '');
+      if (!cur || !cur.label || !cur.url) {
+        // ⚠️ AND SAY SO WHEN IT WAS REAL CONFIG. Blanking a required field on an EXISTING entry deleted
+        // it and logged nothing, so the rail read "Nothing yet. Untouched menus are emitted exactly as
+        // they run now." beside a config that had just lost an entry. Abandoning something this session
+        // created is the only case with nothing to report.
+        var goneA = mbDropEntry(refs);
+        if (!isNew && goneA.length) {
+          mbNote('rm', mn, 'removed ' + ((was && was[0] && was[0].v.label) || 'the entry'), where,
+            { on: mbOn(goneA), run: function(){ mbPutBack(goneA); mbRestore(was || []); } });
+        }
+      }
+      else mbNote(isNew ? 'add' : 'edit', mn, cur.label, where, mbFormUndo(isNew, mine, was), made);
       mbEditing = null;
       mbRebuild();
     }, wrap, 'act');
     mbBtn('Remove', function(){
-      mbDropEntry(refs);
+      var cur = refs[0] ? refs[0].entry : null;
+      var isNew = mbEditing.isNew, where = mbEditing.where || '';
+      var back = mbDropEntry(refs);
+      // ⚠️ A REMOVAL IS A CHANGE AND WENT UNRECORDED. Only abandoning something this session created is
+      // not: there is nothing for the log to say about an entry that never reached the config.
+      if (!isNew && back.length) {
+        mbNote('rm', mn, 'removed ' + ((cur && cur.label) || 'the entry'), where,
+          { on: mbOn(back), run: function(){ mbPutBack(back); } });
+      }
       mbEditing = null;
       mbRebuild();
     }, wrap, 'act rm');
     host.appendChild(wrap);
+    mbVarChips(host, [lab, url, ttl], url, sync);
+    mbAlsoIn(host, refs, 'This entry');
+  }
 
-    // ── the placeholders, at the point of use ─────────────────────────────────────────────────────────
-    // They were documented in the reference and nowhere near the box you type a url into, so the feature
-    // existed for whoever had already read about it. Each chip names what it fills and inserts AT THE
-    // CARET, because appending to the end is wrong for every url that has a query string after it.
+  /**
+   * ── the placeholders, at the point of use ─────────────────────────────────────────────────────────
+   * They were documented in the reference and nowhere near the box you type a url into, so the feature
+   * existed for whoever had already read about it. Each chip names what it fills and inserts AT THE
+   * CARET, because appending to the end is wrong for every url that has a query string after it.
+   *
+   * WHICH FIELD a variable lands in is whichever was last focused, not a fixed one — a tooltip reading
+   * "Support for {name}" is the ordinary case, and a chip that always wrote into the url would make it
+   * the awkward one. Both forms get the same chips, because the resolver interpolates every field
+   * either of them writes.
+   */
+  function mbVarChips(host, fields, dflt, sync) {
+    var lastField = dflt;
+    fields.forEach(function(f){ f.addEventListener('focus', function(){ lastField = f; }); });
     var vars = document.createElement('div'); vars.className = 'fmvars';
     var vh = document.createElement('span'); vh.className = 'dim'; vh.textContent = 'Insert:';
     vars.appendChild(vh);
     MB_VARS.forEach(function(mv){
       var tok = '{' + mv.v + '}';
       var b = mbBtn(tok, function(){
-        var f = lastField || url;
+        var f = lastField || dflt;
         var val = f.value || '';
         var at = typeof f.selectionStart === 'number' ? f.selectionStart : val.length;
         var to = typeof f.selectionEnd === 'number' ? f.selectionEnd : at;
@@ -2913,19 +3484,115 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         f.focus();
         if (f.setSelectionRange) f.setSelectionRange(at + tok.length, at + tok.length);
       }, vars, 'varchip');
-      b.title = tok + ' \u2014 ' + mv.h;
+      b.title = tok + ' — ' + mv.h;
     });
     host.appendChild(vars);
     var vn = document.createElement('div'); vn.className = 'fmfoot';
     vn.textContent = 'Filled per signed-in user, from their own record. Hover one to see what it fills; '
       + 'PORTAL_MENUS on the Config tab has the full rules.';
     host.appendChild(vn);
+  }
 
-    if (refs.length > 1) {
-      var n = document.createElement('div'); n.className = 'fmfoot';
-      n.textContent = 'This entry is written in ' + refs.length + ' rules and all of them change together.';
-      host.appendChild(n);
+  /** One entry can be written in several rules for one reader, and editing it changes all of them. Said
+   *  at the form rather than discovered from the output. */
+  function mbAlsoIn(host, refs, what) {
+    if (refs.length < 2) return;
+    var n = document.createElement('div'); n.className = 'fmfoot';
+    n.textContent = what + ' is written in ' + refs.length + ' rules and all of them change together.';
+    host.appendChild(n);
+  }
+
+  /**
+   * The form for one rename, opened under the row it renames.
+   *
+   * ⚠️ THE ORIGINAL NAME IS NOT AN INPUT. It is the row, pinned. That is the whole enforcement of "there
+   * is no chained rename": offering the control only on stock rows enforces nothing if the form then
+   * lets someone type an original equal to another rule's new name. Only the new name and the tooltip
+   * are editable, and there is deliberately no rename-by-name box the way there is for hides.
+   */
+  function mbRenameForm(mn, host) {
+    var refs = mbEditing.refs;
+    var e = refs[0] ? refs[0].entry : { from: mbEditing.from, to: '', title: undefined };
+    var wrap = document.createElement('div'); wrap.className = 'fmform';
+    var pin = document.createElement('span'); pin.className = 'fmpin';
+    pin.textContent = mbEditing.from + ' →';
+    wrap.appendChild(pin);
+    var to = document.createElement('input');
+    to.className = 'mbin mbin-to'; to.placeholder = 'New name'; to.value = e.to || ''; to.size = 18;
+    wrap.appendChild(to);
+
+    // ⚠️ THE TOOLTIP IS THREE STATES AND A TEXT BOX OFFERS TWO. Leaving the portal's own tooltip alone is
+    // not "empty" — it is a different instruction from removing it, and it is the one an operator wants
+    // by default, because a renamed entry usually still does what its tooltip already says. So the STATE
+    // is a picker and the box is only its value; an empty box under "set to" removes the tooltip, which
+    // is what "remove" says too and reads honestly either way.
+    var mode = document.createElement('select'); mode.className = 'mbin mbin-tmode';
+    [['keep', 'Tooltip: leave as it is'], ['set', 'Tooltip: set to'], ['clear', 'Tooltip: remove']]
+      .forEach(function(o){
+        var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1];
+        mode.appendChild(op);
+      });
+    mode.value = e.title === undefined ? 'keep' : (e.title === '' ? 'clear' : 'set');
+    wrap.appendChild(mode);
+    var ttl = document.createElement('input');
+    ttl.className = 'mbin mbin-title'; ttl.placeholder = 'Tooltip text';
+    ttl.value = e.title === undefined ? '' : e.title; ttl.size = 16;
+    ttl.hidden = mode.value !== 'set';
+    wrap.appendChild(ttl);
+
+    function sync() {
+      ttl.hidden = mode.value !== 'set';
+      refs.forEach(function(r){
+        r.entry.to = to.value.trim();
+        // The picker IS the presence, so the three states cannot desync from what is in the box.
+        r.entry.title = mode.value === 'keep' ? undefined
+          : (mode.value === 'clear' ? '' : ttl.value.trim());
+      });
+      // mbRender, NOT mbRebuild: replacing the DOM under someone mid-keystroke is the "the UI changed too
+      // much" complaint in its purest form. The output and the validator keep up; the picture waits.
+      mbRender();
     }
+    to.addEventListener('input', sync);
+    ttl.addEventListener('input', sync);
+    mode.addEventListener('change', sync);
+
+    var was = mbEditing.was;
+    var mine = refs.slice();
+    var made = mbFormMove(mn, mbEditing);
+    mbBtn('Done', function(){
+      var cur = refs[0] ? refs[0].entry : null;
+      var isNew = mbEditing.isNew, where = mbEditing.where || '';
+      // A rename with no new name is not config — mbConfig drops it — so do not leave a ghost of one in
+      // the state, where it would come back as an empty row on the next structural edit.
+      if (!cur || !mbHalfDef('rename').valid(cur)) {
+        var goneR = mbDropEntry(refs);
+        if (!isNew && goneR.length) {
+          mbNote('rm', mn, 'stopped renaming ' + ((was && was[0] && was[0].v.from) || 'the entry'), where,
+            { on: mbOn(goneR), run: function(){ mbPutBack(goneR); mbRestore(was || []); } });
+        }
+      }
+      else mbNote(isNew ? 'ren' : 'edit', mn, cur.from + ' → ' + cur.to, where, mbFormUndo(isNew, mine, was), made);
+      mbEditing = null;
+      mbRebuild();
+    }, wrap, 'act');
+    mbBtn('Remove', function(){
+      var cur = refs[0] ? refs[0].entry : null;
+      var isNew = mbEditing.isNew, where = mbEditing.where || '';
+      var back = mbDropEntry(refs);
+      if (!isNew && back.length) {
+        mbNote('rm', mn, 'stopped renaming ' + ((cur && cur.from) || 'the entry'), where,
+          { on: mbOn(back), run: function(){ mbPutBack(back); } });
+      }
+      mbEditing = null;
+      mbRebuild();
+    }, wrap, 'act rm');
+    host.appendChild(wrap);
+    mbVarChips(host, [to, ttl], to, sync);
+    var note = document.createElement('div'); note.className = 'fmfoot';
+    note.textContent = 'Only the label and the tooltip change. Where the entry goes, and what every other '
+      + 'rule calls it, stay as the portal ships them.';
+    host.appendChild(note);
+    mbAlsoIn(host, refs, 'This rename');
   }
 
   /**
@@ -2950,14 +3617,13 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       card.appendChild(w);
       return;
     }
-    var plan = v.plan[mn.name] || { hide: [], add: [] };
-    var matched = (v.matched && v.matched[mn.name]) || { hide: [], add: [] };
+    var plan = mbWithEmpties(v.plan[mn.name]);
+    var matched = mbWithEmpties(v.matched && v.matched[mn.name]);
     var stock = mbStockFor(mn);
     var live = stock.live;
 
     var chips = document.createElement('div'); chips.className = 'card-head';
-    chips.appendChild(mbChip(matched.hide, 'hides'));
-    chips.appendChild(mbChip(matched.add, 'adds'));
+    MB_HALF_NAMES.forEach(function(hn){ chips.appendChild(mbChip(matched[hn], mbHalfDef(hn).count)); });
     card.appendChild(chips);
 
     // TWO EMPTIES ARE DIFFERENT FACTS. An empty list WITH a source is an exemption — someone deliberately
@@ -3018,13 +3684,56 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     for (var i = 0; i < entries.length; i++) if (/^log\\s*out\\b/i.test(entries[i])) { soIdx = i; break; }
     var insertAt = (mn.name !== 'management' && soIdx >= 0) ? soIdx : entries.length;
 
+    // WHAT THIS ROW IS CALLED FOR THIS AUDIENCE, if a rule renames it. Keyed on the stock label, which is
+    // what live.entries and every stored capture hold -- they are strings, and after the identity rule they
+    // are originals. So the new name cannot come from the DOM read; it comes from the resolved plan, which
+    // is already relayed whole. Growing captures into per-entry objects would orphan every one already in
+    // an operator's browser.
+    var renamed = {};
+    // ...and the other direction: the names a rename PRODUCES. Only used to withhold the control from a
+    // row that is already somebody's output — see the capture note where it is read.
+    var renameTos = {};
+    var renDef = mbHalfDef('rename');
+    var renLocked = !!mbHalf(mn, 'rename').locked;
+    var hideLocked = !!mbHalf(mn, 'hide').locked;
+    var addLocked = !!mbHalf(mn, 'add').locked;
+    var onPage = {};
+    entries.forEach(function(e){ onPage[mbNorm(e)] = 1; });
+    plan.rename.forEach(function(r){
+      if (!r || !r.from) return;
+      renamed[mbNorm(r.from)] = r;
+      // ⚠️ ONLY WHEN THE ORIGINAL IS NOT HERE. A row whose label is some rule's output is suspicious only
+      // if the entry that rule renames is absent from this page — that is the signature of a capture
+      // taken before the identity rule, which stored the OUTPUT in the row's place. If both are here, the
+      // second row is a genuine stock entry that merely shares the name, and refusing to rename it was
+      // wrong: it told the operator to recapture, which would change nothing at all.
+      if (r.to && !onPage[mbNorm(r.from)]) renameTos[mbNorm(r.to)] = r;
+    });
+
     function stockRow(label) {
       var lc = mbNorm(label);
       var isHidden = !!hidden[lc], isLegacy = !!legacy[lc];
+      var ren = renamed[lc];
+      var renOwners = ren
+        ? mbOwners(mn, 'rename', matched.rename, function(x){ return renDef.same(x, { from: label }); })
+        : [];
+      // ⚠️ A CAPTURE TAKEN BEFORE THE IDENTITY RULE SHIPPED HOLDS THE RENAMED NAME. menuLabels reports
+      // the original now, so a fresh capture is stock — but one already sitting in an operator's browser
+      // is not, and a row whose label is some rule's OUTPUT is the one place a chained rename could get
+      // written. Say what it is and withhold the control, rather than call it stock and offer one.
+      var chained = !ren && !!renameTos[lc];
       var row = document.createElement('div'); row.className = 'fm' + (isHidden ? ' hid' : '');
       var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isHidden;
       var owners = isHidden ? mbOwners(mn, 'hide', matched.hide, function(x){ return mbSame(x, label); }) : [];
-      if (isHidden && !owners.length) {
+      // ⚠️ A LOCKED HALF HAS NO WORKING CONTROL, and the tick box did not know. mbEnsure refuses a
+      // locked half, mbApply took that as done, and the operator got a box that moved, a rule question
+      // that claimed "this menu has no rules yet", and no output — twice, because the answered fork then
+      // stopped asking. The rename half has had this guard since it shipped; the other two had not.
+      if (hideLocked) {
+        cb.disabled = true;
+        cb.title = 'This menu’s hide list is in a shape this builder cannot round-trip. It is carried '
+          + 'through exactly as written and shown below — change it on the Config tab.';
+      } else if (isHidden && !owners.length) {
         // Ticked and not ours to untick. Disabled with a reason beats a control that silently does
         // nothing — this is the PORTAL_APPS_HIDE case, and the carried-through-rung case.
         cb.disabled = true;
@@ -3043,14 +3752,51 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
           }
         });
       }
-      var l = document.createElement('span'); l.className = 'lbl'; l.textContent = label;
+      var l = document.createElement('span'); l.className = 'lbl';
+      // The row reads as the person sees it -- that is what this panel is for. The stock name becomes
+      // provenance in the tag, beside the rule, because it is what every other surface still calls this
+      // entry: the hide box below, a config you write, a capture you take.
+      l.textContent = ren ? ren.to : label;
       var t = document.createElement('span'); t.className = 'tag';
-      t.textContent = !isHidden ? 'stock'
-        : isLegacy && owners.length ? 'hidden · PORTAL_APPS_HIDE + your rule'
+      // BOTH FACTS, when both are true. A row can be hidden by one rule and renamed by another -- on this
+      // deployment that is the ordinary case, not a corner -- and reporting only the hide left the row
+      // showing a name the portal has never used with nothing saying where it came from. The label is the
+      // rename's doing; the tag has to admit it.
+      var was = ren ? 'was ' + label : '';
+      var why = isLegacy && owners.length ? 'hidden · PORTAL_APPS_HIDE + your rule'
         : isLegacy ? 'hidden · PORTAL_APPS_HIDE'
         : owners.length ? 'hidden · ' + owners.map(function(o){ return mbSrcName(o.src); }).join(' + ')
         : 'hidden';
+      // TWO RULES, TWO LINES. Concatenated they ran the tag out to the full width of the card and wrapped
+      // the label beside it — David, on his own Simple User menu. The break is a child element rather
+      // than a wrap, so each fact still reads as one unbroken phrase.
+      t.textContent = !isHidden ? (ren ? 'renamed · ' + was : (chained ? 'from a rename' : 'stock')) : why;
+      if (isHidden && was) {
+        var wl = document.createElement('span'); wl.className = 'wasline'; wl.textContent = was;
+        t.appendChild(wl);
+      }
       row.appendChild(cb); row.appendChild(l); row.appendChild(t);
+
+      // ── THE RENAME CONTROL ────────────────────────────────────────────────────────────────────────
+      // On a STOCK row and nowhere else, keyed on the label the portal ships, and with that label pinned
+      // rather than typed. Those three facts together are what makes "there is no chained rename" a
+      // property of the editor rather than a rule in the docs.
+      if (!renLocked) {
+        if (chained) {
+          var cn = document.createElement('span'); cn.className = 'tag';
+          cn.textContent = '· recapture this role to rename it';
+          row.appendChild(cn);
+        } else if (!ren) {
+          mbBtn('rename', function(){ mbOpenRename(mn, label,[]); }, row, 'act');
+        } else if (renOwners.length) {
+          mbBtn('edit name', function(){ mbOpenRename(mn, label,renOwners); }, row, 'act');
+          mbBtn('revert', function(){ mbUnrename(mn, matched.rename, label); }, row, 'act rm');
+        } else {
+          var rl = document.createElement('span'); rl.className = 'tag';
+          rl.textContent = '· rename not editable here';
+          row.appendChild(rl);
+        }
+      }
       return row;
     }
 
@@ -3081,7 +3827,8 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         owners.forEach(function(o){
           for (var i2 = 0; i2 < o.list.length; i2++) if (mbSameUrl(o.list[i2], ident)) refs.push({ list: o.list, entry: o.list[i2] });
         });
-        mbEditing = { menu: mn.name, refs: refs, isNew: false, hideUrls: [mbNorm(ident.url)],
+        mbEditing = { kind: 'add', menu: mn.name, refs: refs, isNew: false, hideUrls: [mbNorm(ident.url)],
+                      was: mbSnap(refs),
                       where: owners.map(function(o){ return mbSrcName(o.src); }).join(', ') };
         mbRebuild();
       }, row, 'act');
@@ -3090,8 +3837,18 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     }
 
     var editingHere = mbEditing && mbEditing.menu === mn.name;
-    var skip = (editingHere && mbEditing.hideUrls) || [];
-    for (var a1 = 0; a1 < insertAt; a1++) menu.appendChild(stockRow(entries[a1]));
+    var addingHere = editingHere && mbEditing.kind === 'add';
+    var skip = (addingHere && mbEditing.hideUrls) || [];
+    // A rename's form opens UNDER THE ROW IT RENAMES, because the row is the one part of it that is not
+    // editable — the original name is pinned there, not typed into the form. Both draw loops go through
+    // this, so the form cannot appear above the divider on one path and below it on the other.
+    function pushStock(label) {
+      menu.appendChild(stockRow(label));
+      if (editingHere && mbEditing.kind === 'rename' && mbSame(mbEditing.from, label)) {
+        mbRenameForm(mn, menu);
+      }
+    }
+    for (var a1 = 0; a1 < insertAt; a1++) pushStock(entries[a1]);
     // rawAdds is index-aligned with plan.add by construction on the server, so pair them BEFORE any
     // filtering — filter first and the indexes no longer mean the same thing.
     var rawAdds = (v.rawAdds && v.rawAdds[mn.name]) || [];
@@ -3102,7 +3859,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       if (insertAt > 0) { var d1 = document.createElement('div'); d1.className = 'fmdiv'; menu.appendChild(d1); }
       drawnAdds.forEach(function(p){ menu.appendChild(addRow(p.it, p.key)); });
     }
-    if (editingHere) {
+    if (addingHere) {
       var d3 = document.createElement('div'); d3.className = 'fmdiv'; menu.appendChild(d3);
       mbEntryForm(mn, menu);
     }
@@ -3125,7 +3882,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     }
     if (insertAt < entries.length) {
       var d2 = document.createElement('div'); d2.className = 'fmdiv'; menu.appendChild(d2);
-      for (var a2 = insertAt; a2 < entries.length; a2++) menu.appendChild(stockRow(entries[a2]));
+      for (var a2 = insertAt; a2 < entries.length; a2++) pushStock(entries[a2]);
     }
     if (!entries.length && !drawnAdds.length && !editingHere) {
       var em = document.createElement('div'); em.className = 'fmfoot';
@@ -3154,6 +3911,17 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       wf.textContent = 'Not drawn for this scope, though your own session has it: ' + withheld.join(', ') + '.';
       menu.appendChild(wf);
     }
+    // THE ONE THING A RENAMED PICTURE DOES NOT SHOW. Every row above reads as the person sees it, which
+    // is the point — and it makes the identity rule invisible at exactly the moment it matters, because
+    // the tick box beside a renamed row is keyed on a name that is no longer on the row. Said once per
+    // menu, only where a rename is actually in play.
+    if (plan.rename.length) {
+      var rf = document.createElement('div'); rf.className = 'fmfoot';
+      rf.textContent = (plan.rename.length === 1 ? 'One entry is renamed' : plan.rename.length + ' entries are renamed')
+        + ' here. A rename changes the label and the tooltip and nothing else: the hide box beside it, '
+        + 'a capture you take, and every rule you write all still name the entry as the portal ships it.';
+      menu.appendChild(rf);
+    }
     // The way in for an entry that is not on this page, and the way in for a new one. Both go through the
     // same fork question, so neither can quietly widen a rule.
     // ⚠️ TWO CONTROLS FOR TWO DIFFERENT HALVES, on two rows. They sat side by side with ONE button
@@ -3162,18 +3930,29 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     // add? It's a little confusing between adding a custom Hide entry and adding a new item entry."
     // Each half now owns its own row and its own button, and neither is reachable by a control that
     // belongs to the other.
-    if (!editingHere) {
+    if (!editingHere && (addLocked || hideLocked)) {
+      var lk = document.createElement('div'); lk.className = 'fmfoot';
+      lk.textContent = 'Editing is off for '
+        + (addLocked && hideLocked ? 'this menu’s added entries and its hide list'
+          : addLocked ? 'this menu’s added entries' : 'this menu’s hide list')
+        + ' — that half is in a shape this builder cannot round-trip, so it is carried through '
+        + 'unchanged and shown below.';
+      menu.appendChild(lk);
+    }
+    if (!editingHere && !addLocked) {
       var foot = document.createElement('div'); foot.className = 'fmfoot';
       mbBtn('Add an entry…', function(){
         mbEdit(mn, 'add', function(list, t){
           var e2 = { label: '', url: '', title: '' };
           list.push(e2);
-          mbEditing = { menu: mn.name, refs: [{ list: list, entry: e2 }], isNew: true, hideUrls: [],
-                        where: mbSrcName(t) };
+          mbEditing = { kind: 'add', menu: mn.name, refs: [{ list: list, entry: e2 }], isNew: true, hideUrls: [],
+                        half: 'add', t: t, list: list, where: mbSrcName(t) };
         }, null);
       }, foot, 'btn');
       menu.appendChild(foot);
 
+    }
+    if (!editingHere && !hideLocked) {
       // Hiding by name is for the entry that is NOT on this page — the menu relabels itself by context,
       // and another injection may add rows this page load did not show.
       var hfoot = document.createElement('div'); hfoot.className = 'fmfoot';
@@ -3200,9 +3979,10 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     }
     card.appendChild(menu);
 
-    // Where the next edit lands, per half, and the question that decides it.
-    mbWhere(mn, 'hide', card);
-    mbWhere(mn, 'add', card);
+    // Where the next edit lands, per half, and the question that decides it. A half missing from this
+    // list makes a STUCK answer invisible, and that line is the only thing keeping a sticky broad choice
+    // honest.
+    MB_HALF_NAMES.forEach(function(hn){ mbWhere(mn, hn, card); });
     if (mbAsk && mbAsk.menu === mn.name) mbForkPrompt(mn, mbAsk.half, matched, card);
   }
 
@@ -3513,23 +4293,43 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     if (!t) return;
     var p = document.createElement('p'); p.className = 'mbwhere';
     var a = document.createElement('span');
-    a.textContent = (half === 'hide' ? 'Hiding' : 'Adding') + ' lands in ';
+    // ⚠️ "THE NEXT ITEM", not the present tense. "Renaming lands in everyone else" is a statement about
+    // the config, and it was false the moment an operator re-aimed after making a rename: the rename
+    // they had just made was in the rule for Reseller, the chip above the menu said so, the rail said
+    // so, and this line said otherwise — David, on dev, reading exactly that contradiction and naming
+    // the assumption behind it: "I just selected a choice to complete my rename, so I naturally think
+    // clicking change and selecting the opposite is undoing the choice I just made." Re-aiming has
+    // never moved work already done, and the line has to be about what it actually governs.
+    a.textContent = mbHalfDef(half).one + ' the next item lands in ';
     var b = document.createElement('span'); b.className = 'tgt'; b.textContent = mbTheName(t);
     p.appendChild(a); p.appendChild(b);
-    mbBtn('change', function(){ delete mbFork[mbForkKey(mn, half)]; mbRebuild(); }, p, 'act');
+    // ⚠️ CHANGE IT NOW, not on the next edit. Clearing the answer and stopping there did the right
+    // thing invisibly: the line vanished, the picture was identical, and the effect only showed up
+    // whenever the operator next ticked something — David, on dev: "clicking it makes it go away, but
+    // nothing visually changes." A button called "change" has to open the thing it changes.
+    mbBtn('change', function(){
+      delete mbFork[mbForkKey(mn, half)];
+      mbAsk = { menu: mn.name, half: half, run: null, describe: null };
+      mbRebuild();
+    }, p, 'act');
     card.appendChild(p);
   }
 
   function mbForkPrompt(mn, half, matched, card) {
+    var d = mbHalfDef(half);
+    var held = !!(mbAsk && mbAsk.run);
     var box = document.createElement('div'); box.className = 'mbfork';
     var q = document.createElement('strong');
-    q.textContent = half === 'hide' ? 'Which rule should hide it?' : 'Which rule should carry it?';
+    q.textContent = d.ask;
     box.appendChild(q);
     var lead = document.createElement('p'); lead.className = 'dim';
-    lead.textContent = 'Asked once. The answer sticks until you change who you are previewing as, and the '
-      + 'line under the menu says where edits are going while it does.';
+    lead.textContent = held
+      ? 'Asked once. The answer sticks until you change who you are previewing as, and the '
+        + 'line under the menu says where edits are going while it does.'
+      : 'Nothing is waiting on this — you are re-aiming where the next one lands. Picking a rule here '
+        + 'creates nothing on its own.';
     box.appendChild(lead);
-    mbCandidates(mn, half, half === 'hide' ? matched.hide : matched.add).forEach(function(c){
+    mbCandidates(mn, half, matched[d.name]).forEach(function(c){
       mbBtn(c.label, function(){ mbAnswer(mn, half, c.t); }, box, 'copy-btn opt');
       var n = document.createElement('span'); n.className = 'optnote';
       // The consequence AT THE MOMENT OF DECIDING, not in a note afterwards. A rung wins outright rather
@@ -3564,22 +4364,17 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
 
     // Not editable NEVER means not readable. A half whose shape this editor cannot round-trip is carried
     // through byte for byte and shown here, rather than being named and hidden.
-    if (st.hideLocked && base.hide !== undefined) {
-      var hn = document.createElement('p'); hn.className = 'mnote';
-      // ONE LINE, on purpose: a phrase wrapped across a concatenation is invisible to the phrase grep
-      // that asserts it, which is a trap this repo has already paid for once.
-      hn.textContent = 'This menu’s hide list is in a shape this builder cannot round-trip, so it is not editable here'
-        + ' — it is carried through to the output exactly as it is, and shown below.';
-      card.appendChild(hn);
-      mbShowRungs(base.hide, card, 'hides');
-    }
-    if (st.addLocked && base.add !== undefined) {
-      var an = document.createElement('p'); an.className = 'mnote';
-      an.textContent = 'This menu’s added entries are in a shape this builder cannot round-trip, so they are not editable here.'
-        + ' They are carried through exactly as they are, and shown below.';
-      card.appendChild(an);
-      mbShowRungs(base.add, card, 'entries');
-    }
+    // ONE LINE PER HALF, on purpose: a phrase wrapped across a concatenation is invisible to the phrase
+    // grep that asserts it, which is a trap this repo has already paid for once. The sentences live in
+    // the halves table so a new half cannot arrive without one.
+    MB_HALF_NAMES.forEach(function(hname){
+      var d = mbHalfDef(hname);
+      if (!st[d.locked] || base[hname] === undefined) return;
+      var note = document.createElement('p'); note.className = 'mnote';
+      note.textContent = d.lock;
+      card.appendChild(note);
+      mbShowRungs(base[hname], card, d);
+    });
     return card;
   }
 
@@ -3659,7 +4454,8 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         none.textContent = 'Nothing yet. Untouched menus are emitted exactly as they run now.';
         chg.appendChild(none);
       }
-      mbChanges.slice().reverse().forEach(function(c){
+      mbChanges.slice().reverse().forEach(function(c, ri){
+        var at = mbChanges.length - 1 - ri;
         var row = document.createElement('div'); row.className = 'chgrow';
         var k = document.createElement('span'); k.className = 'kind k-' + c.kind; k.textContent = c.kind;
         var w = document.createElement('span'); w.className = 'what';
@@ -3667,11 +4463,53 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         w.appendChild(strong);
         if (c.where) {
           var sub = document.createElement('span'); sub.className = 'dim';
-          sub.textContent = ' — ' + c.where;
+          sub.appendChild(document.createTextNode(' — '));
+          // ⚠️ THE RULE NAME IS THE CONTROL. An operator who has just chosen where a change lands reads
+          // this line as the record of that choice, so the choice is where they reach to change it —
+          // David: "making it a link would invite clicks, clicks would make the change clear, undoing
+          // would be another click." What it opens is a LIST rather than a toggle, and that is not
+          // ceremony: there are four ways to name this reader, not two, and picking one can CARVE a rung
+          // that takes over an audience another rule was answering. A toggle would do that silently.
+          if (mbCanMove(c)) {
+            var mv = mbBtn(c.where, function(){ mbMoving = (mbMoving === at ? -1 : at); mbRebuild(); },
+              sub, 'act tgt');
+            mv.title = 'Move this change to another rule';
+          } else {
+            sub.appendChild(document.createTextNode(c.where));
+          }
           w.appendChild(sub);
         }
         row.appendChild(k); row.appendChild(w);
+        // ONE CHANGE AT A TIME. Reset is the only way back today, and it discards everything —
+        // David: "it feels like I need to do a full reset to start fresh but that may not always be
+        // needed." Offered only where the inverse is exact and still applies; a rule this session
+        // CARVED has none, because later edits can be living inside it, and the rail's own
+        // "remove this rule" is the control for that, beside the count of what would go with it.
+        if (mbCanUndo(c)) {
+          var u = mbBtn('\u00d7', function(){ mbUndo(at); }, row, 'act rm undo');
+          u.title = 'Undo this change';
+        }
         chg.appendChild(row);
+        if (mbMoving !== at || !mbCanMove(c)) return;
+        var pick = document.createElement('div'); pick.className = 'chgpick';
+        var opts = mbMoveTargets(c);
+        var ph = document.createElement('div'); ph.className = 'dim';
+        ph.textContent = opts.length ? 'Move it to:' : 'There is nowhere else this reader can be named.';
+        pick.appendChild(ph);
+        opts.forEach(function(o){
+          var ob = mbBtn(o.label, function(){ mbMoveChange(at, o.t); }, pick, 'act');
+          ob.title = o.note;
+          // THE CONSEQUENCE INLINE, not in a tooltip. Choosing here can carve a rung that takes over
+          // every reader another rule was answering, which is the same warning the fork question shows
+          // at the same moment — and a warning only a hover reveals is one that does not exist.
+          var over = mbListFor(c.move.mn, c.move.half, o.t) ? [] : mbShadowed(c.move.mn, c.move.half, o.t);
+          if (over.length) {
+            var wn = document.createElement('div'); wn.className = 'warn';
+            wn.textContent = '⚠ would OVERRIDE ' + over.join(', ') + ' for that audience';
+            pick.appendChild(wn);
+          }
+        });
+        chg.appendChild(pick);
       });
     }
     if (!rules) return;
@@ -3693,7 +4531,11 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         meta.textContent = (r.live ? ' · applies now' : '') + (r.inert ? ' · kept, not available here' : '');
         row.appendChild(meta);
         var counts = document.createElement('div'); counts.className = 'dim';
-        counts.textContent = 'hides ' + r.hides + ' · adds ' + r.adds;
+        // Every half, including the zeroes: a rung with an empty list is the "everyone except these"
+        // exemption, and a line that only showed non-zero counts would hide exactly that.
+        counts.textContent = MB_HALF_NAMES.map(function(hn){
+          return mbHalfDef(hn).count + ' ' + r.counts[hn];
+        }).join(' · ');
         row.appendChild(counts);
         if (r.targets.length) {
           mbBtn('remove this rule', function(){
@@ -3711,15 +4553,19 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     }
   }
 
-  /** Every rung on one menu, both halves folded into one row per audience — which is how it is read. */
+  /** Every rung on one menu, every half folded into one row per audience — which is how it is read. */
   function mbRulesOf(mn, v) {
-    var matched = (v && v.matched && v.matched[mn.name]) || { hide: [], add: [] };
+    var matched = (v && v.matched && v.matched[mn.name]) || mbEmptyPlan();
     var order = [], byKey = {};
     function slot(t) {
       var k = t.axis + '|' + mbNorm(t.key);
       if (!byKey[k]) {
-        byKey[k] = { name: mbSrcName(t), hides: 0, adds: 0, targets: [],
-          live: (matched.hide || []).concat(matched.add || []).some(function(s){ return mbSameTarget(s, t); }),
+        // EVERY half's sources, not two of them. A rename-only rule read as not-live would have lost the
+        // one mark that says a rule is doing something for the reader on screen.
+        var all = [];
+        MB_HALF_NAMES.forEach(function(hn){ all = all.concat(matched[hn] || []); });
+        byKey[k] = { name: mbSrcName(t), counts: mbZeroCounts(), targets: [],
+          live: all.some(function(s){ return mbSameTarget(s, t); }),
           // Config for an app this deployment cannot run is kept byte-identically and reported here —
           // that is a fact about the config, not a control, so it belongs in the rail and nowhere else.
           inert: t.axis === 'app' && mbNorm(t.key) !== 'none' && MB_AVAIL.indexOf(mbNorm(t.key)) < 0 };
@@ -3727,7 +4573,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       }
       return byKey[k];
     }
-    ['hide', 'add'].forEach(function(half){
+    MB_HALF_NAMES.forEach(function(half){
       var h = mbHalf(mn, half);
       if (h.locked) {
         var s0 = slot({ axis: 'locked', key: half });
@@ -3736,21 +4582,21 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         return;
       }
       if (!h.rungs) {
-        if (h.flat.length) { var s1 = slot({ axis: 'all' }); s1[half === 'hide' ? 'hides' : 'adds'] = h.flat.length; }
+        if (h.flat.length) { var s1 = slot({ axis: 'all' }); s1.counts[half] = h.flat.length; }
         return;
       }
       h.rungs.axes.forEach(function(ax){
         ax.order.forEach(function(k){
           var t = { axis: ax.name, key: k };
           var s = slot(t);
-          s[half === 'hide' ? 'hides' : 'adds'] = (ax.map[k] || []).length;
+          s.counts[half] = (ax.map[k] || []).length;
           s.targets.push({ half: half, t: t });
         });
       });
       if (h.rungs.top) {
         var td = { axis: '*', key: h.rungs.top.key };
         var s2 = slot(td);
-        s2[half === 'hide' ? 'hides' : 'adds'] = h.rungs.top.list.length;
+        s2.counts[half] = h.rungs.top.list.length;
         s2.targets.push({ half: half, t: td });
       }
     });
@@ -3761,18 +4607,48 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
   function mbDeleteRung(mn, half, t) {
     var h = mbHalf(mn, half);
     if (h.locked || !h.rungs) return;
-    if (t.axis === '*') { h.rungs.top = null; }
-    else {
-      for (var i = 0; i < h.rungs.axes.length; i++) {
-        var ax = h.rungs.axes[i];
+    var rungs = h.rungs;
+    var back = null;
+    if (t.axis === '*') {
+      if (!rungs.top) return;
+      var top = rungs.top;
+      back = function(){ rungs.top = top; };
+      rungs.top = null;
+    } else {
+      var saved = [];
+      for (var i = 0; i < rungs.axes.length; i++) {
+        var ax = rungs.axes[i];
         if (ax.name !== t.axis) continue;
         for (var j = ax.order.length - 1; j >= 0; j--) {
-          if (mbSame(ax.order[j], t.key)) { delete ax.map[ax.order[j]]; ax.order.splice(j, 1); }
+          if (mbSame(ax.order[j], t.key)) {
+            saved.push({ ax: ax, at: j, key: ax.order[j], list: ax.map[ax.order[j]] });
+            delete ax.map[ax.order[j]];
+            ax.order.splice(j, 1);
+          }
         }
       }
+      if (!saved.length) return;
+      back = function(){
+        saved.slice().reverse().forEach(function(sv){
+          sv.ax.map[sv.key] = sv.list;
+          sv.ax.order.splice(Math.min(sv.at, sv.ax.order.length), 0, sv.key);
+        });
+      };
     }
     if (mbSameTarget(mbFork[mbForkKey(mn, half)], t)) delete mbFork[mbForkKey(mn, half)];
-    mbNote('rm', mn, 'removed the rule ' + mbSrcName(t), half === 'hide' ? 'hides' : 'adds');
+    // ⚠️ REACHABILITY IS ABOUT THE CONTAINER HERE, not about a list. The rung's own lists are gone by
+    // definition, so the generic check would refuse this inverse forever — and this is the change with
+    // the largest blast radius and, once it is done, no other route back: the rail cannot offer a rung
+    // that is not there.
+    //
+    // Nothing in this editor replaces a rungs object mid-session, so this check cannot currently fail —
+    // it is stated because the inverse holds captured axis objects, and the day something does replace
+    // one, silently restoring a rung into an orphan is the failure it would produce.
+    mbNote('rm', mn, 'removed the rule ' + mbSrcName(t), h.d.count, {
+      on: [],
+      can: function(){ return mbHalf(mn, half).rungs === rungs; },
+      run: back
+    });
   }
 
   // A structural edit re-renders every card, because a rung change can move anything. What it must NOT do
@@ -3841,10 +4717,8 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       // A targeted half is one of three things now: rungs we can edit (its scopes axis is a map of flat
       // lists), or still locked, or not targeted at all. Locked is what it was before, minus the case
       // this pass took over.
-      function rungsOf(raw, asEntries) {
-        function asList(v) {
-          return asEntries ? mbClone(v).map(mbEntryIn) : v.slice();
-        }
+      function rungsOf(raw, d) {
+        function asList(v) { return mbClone(v).map(d.in); }
         // Every axis this half carries that is a map of flat lists. An axis that is not — a nested shape,
         // or a value that is not an object — is left out, which puts it in the carried-through remainder
         // and keeps it visible read-only rather than half-understood.
@@ -3871,17 +4745,15 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         if (!axes.length && !top) return null;
         return { axes: axes, top: top, rest: mbRest(raw, handled), keyOrder: Object.keys(raw) };
       }
-      var hideRungs = mbIsTargeted(base.hide) ? rungsOf(base.hide, false) : null;
-      var addRungs = mbIsTargeted(base.add) ? rungsOf(base.add, true) : null;
-      mbState[mn.name] = {
-        present: !!live.present,
-        hideLocked: mbIsTargeted(base.hide) && !hideRungs,
-        addLocked: mbIsTargeted(base.add) && !addRungs,
-        hideRungs: hideRungs,
-        addRungs: addRungs,
-        hide: Array.isArray(base.hide) ? base.hide.slice() : [],
-        add: Array.isArray(base.add) ? mbClone(base.add).map(mbEntryIn) : []
-      };
+      var st = { present: !!live.present };
+      MB_HALF_NAMES.forEach(function(hn){
+        var d = mbHalfDef(hn);
+        var rungs = mbIsTargeted(base[hn]) ? rungsOf(base[hn], d) : null;
+        st[d.rungs] = rungs;
+        st[d.locked] = mbIsTargeted(base[hn]) && !rungs;
+        st[d.flat] = Array.isArray(base[hn]) ? mbClone(base[hn]).map(d.in) : [];
+      });
+      mbState[mn.name] = st;
     });
   }
 

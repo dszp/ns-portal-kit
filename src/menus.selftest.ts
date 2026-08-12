@@ -737,5 +737,129 @@ function selectOneReference(raw: unknown, ctx: { domain: string; app: string; sc
     '[avail] the detector stays deployment-independent, missing rather than inventing a warning');
 }
 
+
+// ══ THE RENAME HALF ══════════════════════════════════════════════════════════════════════════════════
+// A third operation beside hide and add: relabel a stock entry in place, same destination, same row.
+{
+  const R = (o: unknown) => ({ PORTAL_MENUS: JSON.stringify(o) });
+  const plan = (o: unknown, ctx: Partial<TargetCtx> = {}) =>
+    resolveMenus(R(o), { domain: ACME, app: 'none', ...ctx } as TargetCtx).apps.rename;
+
+  // ── the key has to be admitted before anything else can be reached ──────────────────────────────
+  ok(menuConfigError(R({ apps: { rename: [{ from: 'A', to: 'B' }] } })) === null,
+    'rename is a valid menu key');
+  ok(/unknown key/.test(menuConfigError(R({ apps: { renmae: [] } })) ?? ''),
+    'and a typo of it still fails loudly, naming all three');
+
+  // ── the same targeting as every other half, for free ────────────────────────────────────────────
+  const targeted = { apps: { rename: { scopes: { Reseller: [] }, '*': [{ from: 'X', to: 'Y' }] } } };
+  ok(plan(targeted, { scope: 'Office Manager' }).length === 1, 'a rename targets like any other half');
+  ok(plan(targeted, { scope: 'Reseller' }).length === 0, 'and an empty rung is still the exemption idiom');
+
+  // ── ⚠️ TITLE IS THREE STATES, and menuItemAt collapses them at four points, so this parser is
+  // written longhand rather than modelled on it. Absent is an INSTRUCTION: leave the portal's alone.
+  const three = plan({ apps: { rename: [
+    { from: 'A', to: 'A2' },
+    { from: 'B', to: 'B2', title: 'tip' },
+    { from: 'C', to: 'C2', title: '' },
+  ] } });
+  ok(!('title' in three[0]!), 'an omitted title stays omitted — the leave-it-alone state survives the resolver');
+  ok(three[1]!.title === 'tip', 'a string is carried');
+  ok(three[2]!.title === '', 'and an empty string SURVIVES as an empty string — the clear-it state');
+  // The wire is where a three-state value usually dies. It does not here, and that is worth pinning.
+  const wire = JSON.parse(JSON.stringify(three)) as { title?: string }[];
+  ok(!('title' in wire[0]!) && wire[2]!.title === '',
+    'and both states survive JSON, which is how the plan reaches the browser');
+  ok(plan({ apps: { rename: [{ from: 'A', to: 'B', title: '   ' }] } })[0]!.title === '',
+    'whitespace-only clears, decided here rather than left to wherever a trim happens to sit');
+
+  // null is refused rather than guessed at — both readings are defensible and one silently deletes a
+  // tooltip the operator meant to keep.
+  const nullErr = menuConfigError(R({ apps: { rename: [{ from: 'A', to: 'B', title: null }] } })) ?? '';
+  ok(/title must be a string/.test(nullErr), `a null title is refused (${nullErr})`);
+  ok(/Omit it/.test(nullErr) && /to clear it/.test(nullErr),
+    'and the refusal names both alternatives, because the operator cannot see this table');
+
+  // ── what a rename must have ──────────────────────────────────────────────────────────────────────
+  ok(/needs a "from"/.test(menuConfigError(R({ apps: { rename: [{ to: 'B' }] } })) ?? ''), 'from is required');
+  ok(/needs a "to"/.test(menuConfigError(R({ apps: { rename: [{ from: 'A' }] } })) ?? ''), 'to is required');
+  ok(/unknown key "url"/.test(menuConfigError(R({ apps: { rename: [{ from: 'A', to: 'B', url: 'x' }] } })) ?? ''),
+    'and a key from the WRONG half is caught rather than ignored');
+
+  // ── variables, on the same non-encoding path labels use ──────────────────────────────────────────
+  ok(resolveMenus(R({ apps: { rename: [{ from: 'A', to: 'Hi {fname}' }] } }),
+    { domain: ACME, app: 'none', vars: { fname: "Ann O'Hara" } } as TargetCtx).apps.rename[0]!.to === "Hi Ann O'Hara",
+    'a variable in `to` interpolates unencoded — a label is read, not fetched');
+  ok(/unknown variable/.test(menuConfigError(R({ apps: { rename: [{ from: 'A', to: '{nope}' }] } })) ?? ''),
+    'and an unknown one fails at startup like everywhere else');
+
+  // ── dedupe across app rungs, THROUGH resolveMenus ────────────────────────────────────────────────
+  // Through the real path on purpose: the union tests elsewhere in this file pass a test-local merge
+  // into resolveTargeted, so production could lose its dedupe and stay green.
+  {
+    const dup = { apps: { rename: { app: {
+      ringotel: [{ from: 'Support', to: 'Help' }],
+      documo: [{ from: 'support', to: 'Fax help' }],
+    } } } };
+    const src = {} as Record<string, { hide: MenuSource[]; add: MenuSource[]; rename: MenuSource[] }>;
+    const raw = {} as Record<string, unknown[]>;
+    // ⚠️ FIFTH ARGUMENT, not the fourth — the fourth is rawAdds. Passing it in the wrong slot made this
+    // assertion read an empty adds list and fail, which is the sink doing its job on its own test.
+    const got = resolveMenus(R(dup), { domain: ACME, app: ['ringotel', 'documo'] } as TargetCtx,
+      src as never, undefined, raw as never).apps.rename;
+    ok(got.length === 1 && got[0]!.to === 'Help',
+      `one entry renamed by two rungs resolves once, first winning (${JSON.stringify(got)})`);
+    ok(src.apps!.rename.length === 2,
+      'and both rules are still reported — the operator wrote two, even though one applies');
+    ok(raw.apps!.length === got.length, 'the raw sink stays index-aligned through the dedupe');
+  }
+
+  // ── the raw sink exists because `to` is interpolated and the config's `to` is not ─────────────────
+  {
+    const raw = {} as Record<string, { to: string }[]>;
+    const got = resolveMenus(R({ apps: { rename: [{ from: 'A', to: 'Hi {fname}' }] } }),
+      { domain: ACME, app: 'none' } as TargetCtx, undefined, undefined, raw as never).apps.rename;
+    ok(got[0]!.to === 'Hi ' && raw.apps![0]!.to === 'Hi {fname}',
+      `the resolved label is emptied of placeholders while the written one keeps them (${got[0]!.to} / ${raw.apps![0]!.to})`);
+  }
+
+  // ── the reaches-nobody warning covers the newest half too ────────────────────────────────────────
+  {
+    const closed = { apps: { rename: {
+      app: { ringotel: [{ from: 'A', to: 'B' }], documo: [], none: [] },
+      '*': [{ from: 'C', to: 'D' }],
+    } } };
+    ok(unreachableDefaults(R(closed)).some((w) => /\.rename names every app state/.test(w)),
+      `a rename default that can never apply is reported (${unreachableDefaults(R(closed)).join(' | ')})`);
+  }
+
+  // ── every menu carries the half, unset or not ────────────────────────────────────────────────────
+  const empty = resolveMenus({}, { domain: ACME, app: 'none' } as TargetCtx);
+  ok(MENU_NAMES.every((n) => Array.isArray(empty[n].rename) && empty[n].rename.length === 0),
+    'an unset config still gives every menu an empty rename list, so no applier has to guard for absence');
+}
+
+// ── ⚠️ THE TWO TARGETED FORMS DO NOT MIX, AND MIXING THEM WAS SILENT ─────────────────────────────────
+// A reserved key selects the nested form, after which nothing reads a bare top-level domain key — so a
+// live per-customer rule beside a scopes axis resolved as if it had never been written, and the
+// deployment's own validator called the config Valid. Reachable without hand-writing it: the console
+// carries a bare domain map through as remainder, and carving any axis on that half emits the mixture.
+{
+  const mixed = JSON.stringify({ apps: { hide: {
+    'acme.example': ['User Portal'],
+    '*': [],
+    scopes: { 'Office Manager': ['Meeting'] },
+  } } });
+  const err = menuConfigError({ PORTAL_MENUS: mixed });
+  ok(err !== null, `[mixed] a half naming an axis AND bare domain keys is refused at startup (${err})`);
+  ok(!!err && /acme\.example/.test(err) && /domains/.test(err),
+    `[mixed] naming the keys that would never have matched, and where to move them (${err})`);
+  // Each form ALONE is still fine — this refuses the mixture, not either shape.
+  ok(menuConfigError({ PORTAL_MENUS: JSON.stringify({ apps: { hide: { 'acme.example': ['X'], '*': [] } } }) }) === null,
+    '[mixed] the bare domain map on its own still resolves');
+  ok(menuConfigError({ PORTAL_MENUS: JSON.stringify({ apps: { hide: { domains: { 'acme.example': ['X'] }, '*': [] } } }) }) === null,
+    '[mixed] and so does the named-axis form, which is where those keys belong');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

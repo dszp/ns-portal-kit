@@ -43,11 +43,14 @@ A demo site you can review prior to deployment is in the works.
 
 ### Custom Menus
 
-- **Menu customization** — add and hide entries in the Apps menu, the user's own account dropdown, and the
-  Management dropdown, targeted by domain, by NetSapiens **role**, by account, and by whether a white-labeled 
-  app is actually active for that domain — so a support link can reach office managers and their users without
-  cluttering an administrator's menu. Added links can interpolate the signed-in user's own details plus the
-  page they are on, which makes a "get help" link arrive already identified.
+- **Menu customization** — add, hide and rename entries in the Apps menu, the user's own account dropdown,
+  and the Management dropdown, targeted by domain, by NetSapiens **role**, by account, and by whether a
+  white-labeled app is actually active for that domain — so a support link can reach office managers and their
+  users without cluttering an administrator's menu. Added links can interpolate the signed-in user's own
+  details plus the page they are on, which makes a "get help" link arrive already identified.
+- **Rename a stock entry in place** — same destination, same position in the menu, same icon and the portal's
+  own link. For anyone selling this portal as their own product, whose documentation calls the entry
+  something else. Hiding it and adding a replacement is not the same thing.
   See [CONFIG.md](./CONFIG.md#group-menus).
 
 ### Visual Diagrams of Call Flow

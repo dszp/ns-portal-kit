@@ -66,21 +66,37 @@ const ok = (c: boolean, m: string) => { c ? pass++ : fail++; console.log(`${c ? 
       bodies.push({ file, from: j, text: src[file]!.slice(j, end) });
     }
   }
-  if (bodies.length < 5) throw new Error(`found only ${bodies.length} emitted bodies — the guard is broken, not the code`);
+  // ⚠️ AND THE STYLESHEET, which is a template literal too and was NOT covered. A backtick in a CSS
+  // comment ends the literal exactly the way one in a JS comment does, and this guard watched only the
+  // script bodies — so the case that actually bit (three times in one session, twice in `/* … */`) was
+  // the one case it could not see. Prose about code lives in comments, and comments live in both.
+  {
+    const j = src['statusPage.ts']!.indexOf(`const STYLE = ${BT}`);
+    if (j < 0) throw new Error('could not find the emitted stylesheet — the guard is broken, not the code');
+    const end = src['statusPage.ts']!.indexOf(`${BT};`, j + 10);
+    if (end < 0) throw new Error('unterminated stylesheet template — the guard is broken, not the code');
+    bodies.push({ file: 'statusPage.ts', from: j, text: src['statusPage.ts']!.slice(j, end) });
+  }
+  if (bodies.length < 6) throw new Error(`found only ${bodies.length} emitted bodies — the guard is broken, not the code`);
 
   const offenders: string[] = [];
   for (const b of bodies) {
     const startLine = src[b.file]!.slice(0, b.from).split('\n').length;
     b.text.split('\n').forEach((line, i) => {
       const t = line.trim();
-      // Comment lines are the whole risk: real code needs its backticks and gets them right; prose does
-      // not know it is code.
-      if (!(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))) return;
-      if (t.includes(BT)) offenders.push(`${b.file}:${startLine + i}  ${t.slice(0, 70)}`);
+      // ⚠️ EVERY LINE, not just whole-line comments. The first version of this guard tested
+      // `t.startsWith('//')`, on the reasoning that real code needs its backticks and gets them right —
+      // and then missed three in one session: one in a TRAILING comment after code, and two inside a CSS
+      // /* … */ block, which starts with neither marker on its continuation lines. The rule these bodies
+      // actually live under is simpler and worth enforcing as written: a plain template literal cannot
+      // contain a backtick at all, anywhere, in code or prose. If emitted code ever genuinely needs one
+      // it has to be an escape, and an escape does not match this.
+      // Line 0 is the body's own opening delimiter — it IS the backtick that starts the literal.
+      if (i > 0 && t.includes(BT)) offenders.push(`${b.file}:${startLine + i}  ${t.slice(0, 70)}`);
     });
   }
   ok(offenders.length === 0,
-    `no backtick in a comment inside an emitted template — it ends the literal, and the compiler then blames a line far below it${offenders.length ? `\n      ${offenders.join('\n      ')}` : ''}`);
+    `no backtick ANYWHERE inside an emitted template — it ends the literal, and the compiler then blames a line far below it${offenders.length ? `\n      ${offenders.join('\n      ')}` : ''}`);
 
   // ── AND THE SIBLING TRAP: A LONE BACKSLASH IN A PLAIN TEMPLATE ────────────────────────────────────
   //

@@ -444,7 +444,27 @@ var bad=c.querySelectorAll?c.querySelectorAll('.badge,.label,.count,.counter,sup
 for(var i=0;i<bad.length;i++){if(bad[i].parentNode)bad[i].parentNode.removeChild(bad[i])}
 }catch(e){c=el}
 return ((c&&c.textContent)||'').replace(/\s+/g,' ').trim()}
+// A ROW WE RENAMED REPORTS ITS ORIGINAL NAME, AND ONLY THAT. This is the whole identity rule for the
+// rename half, and it lives here because this is the one function that decides what a row is called --
+// menuHide matches with it, menuRename matches with it, and spkMenus reports labels[0] to the console and
+// into every stored capture. One definition, three consumers, no way for them to disagree.
+//
+// ⚠️ REPLACE, NOT PREPEND, and the difference is not cosmetic. menuHide tests EVERY label a row reports
+// and its break is per-row -- the row loop keeps going -- so leaving the new name matchable means:
+//   * a hide naming a stock entry also hits a different row we renamed TO that name, and
+//   * two renames chain by DOM order (A->B then B->C lands C on the row that was A), which is exactly
+//     the order-dependence keying on the original is supposed to remove.
+// Nothing reads this for DISPLAY -- the console draws the new name from the resolved plan -- so replacing
+// costs nothing and closes both.
+//
+// The attribute holds the row's full COLLAPSED label -- the identity every consumer here needs, not the
+// raw value of one text node. A label split across nodes ("Call " + "History") matches as one string and
+// has to keep reporting as one; storing a fragment made every later match miss. menuReset therefore
+// restores the collapsed form rather than the exact nodes, which is all it could ever have done for a
+// split label anyway, since blankOtherText has emptied the others.
 function menuLabels(li){
+var o=li.getAttribute&&li.getAttribute('data-svxr');
+if(o!=null){var os=String(o).replace(/\s+/g,' ').trim();if(os)return [os]}
 var out=[],a=li.querySelector&&li.querySelector('a');
 if(a){var at=labelText(a);if(at)out.push(at)}
 var lt=labelText(li);
@@ -500,7 +520,14 @@ if(!ul)return;
 var kids=[].slice.call(ul.children);
 for(var i=0;i<kids.length;i++){var li=kids[i];
 if(/_svxadd/.test(li.className||'')){if(li.parentNode)li.parentNode.removeChild(li);continue}
-if(li.hasAttribute&&li.hasAttribute('data-svxh')){li.style.display=li.getAttribute('data-svxh')||'';li.removeAttribute('data-svxh')}}}
+if(li.hasAttribute&&li.hasAttribute('data-svxh')){li.style.display=li.getAttribute('data-svxh')||'';li.removeAttribute('data-svxh')}
+// The label we changed, put back EXACTLY -- the attribute holds the raw node value for this reason.
+// The original TOOLTIP is not restored: nothing calls this yet (it was built for a live-page preview
+// that is still unwired), so no reader can observe the difference, and a second marker for a fact
+// nobody reads is two carriers that can desync. Whoever wires the preview owes that half.
+if(li.hasAttribute&&li.hasAttribute('data-svxr')){
+var a=li.querySelector&&li.querySelector('a');var h=(a&&firstTextNode(a))?a:li;var n=firstTextNode(h);
+if(n)n.nodeValue=li.getAttribute('data-svxr')||'';li.removeAttribute('data-svxr')}}}
 function menuApply(ul,plan,before){
 menuHide(ul,plan);
 var add=(plan&&plan.add)||[];if(!add.length)return;
@@ -516,6 +543,105 @@ var li=document.createElement('li');li.className='_svxadd';li.setAttribute('data
 var a=document.createElement('a');a.textContent=fillRaw(m.label);a.href=fill(m.url);a.target='_blank';a.rel='noopener noreferrer';
 if(m.title)a.title=fillRaw(m.title);li.appendChild(a);
 if(before&&before.parentNode===ul)ul.insertBefore(li,before);else ul.appendChild(li)})}
+/**
+ * RELABEL STOCK ROWS IN PLACE. Same destination, same position, same anchor -- which is the whole reason
+ * this is not just a hide plus an add: that pair needs the url, moves the row, and throws away the
+ * portal's own element with its icon, its classes and whatever a vendor add-on bound to it.
+ *
+ * Runs in the idempotent pass beside menuHide, so a row a vendor appends at 12s still gets renamed. That
+ * only works because menuLabels reports the ORIGINAL for a row we already touched: the match keeps
+ * succeeding, and there is no chained rename to worry about.
+ */
+function menuRename(ul,plan){
+var list=(plan&&plan.rename)||[];if(!list.length)return;
+// {page} is the applier's to fill -- the server cannot know it. Raw form: a label is read by a human.
+var pgRaw=location.pathname;
+function fillRaw(s){return String(s==null?'':s).split('{page}').join(pgRaw)}
+// The merge in resolveMenus only fires when the app tier produced two or more rungs, so a single rung
+// listing the same from twice arrives here intact. Without this the LAST entry would win in the DOM
+// while the FIRST wins across rungs -- and the console, which draws the plan, would disagree with the
+// portal it is describing. menuApply keeps the same guard on url, for the same reason.
+var seen=[];
+list.forEach(function(r){
+if(!r||!r.from||!r.to)return;
+var want=String(r.from).replace(/\s+/g,' ').trim().toLowerCase();
+if(!want||seen.indexOf(want)>=0)return;
+seen.push(want);
+var to=fillRaw(r.to);
+for(var i=0;i<ul.children.length;i++){var li=ul.children[i];
+// OUR OWN ROWS ARE NEVER RENAMED -- a rename names a STOCK entry, and an entry this config added is
+// changed where it was written. Same rule, same marker test, as the hide half.
+if(/_svx/.test(li.className||''))continue;
+// Which element carries the label decides which element we write into. A vendor Management menu whose
+// rows are plain <li> with NO anchor is a real capture (see labelText above), and targeting the anchor
+// unconditionally would match those rows and then silently change nothing.
+// ⚠️ MATCH THROUGH menuLabels, NEVER labelText DIRECTLY. menuLabels is where the original-name rule
+// lives; reading the element's current text here reintroduces the chained rename it exists to prevent
+// (A->B then B->C landing C on the row that was A). Caught by the test, not by review.
+var ls=menuLabels(li),matched=null;
+for(var j=0;j<ls.length;j++)if(ls[j].toLowerCase()===want){matched=ls[j];break}
+if(matched==null)continue;
+var a=li.querySelector&&li.querySelector('a');
+// WHICH element carries the label decides where we write. A vendor Management menu whose rows are plain
+// <li> with NO anchor is a real capture (see labelText above); targeting the anchor unconditionally would
+// match those rows and then silently change nothing. On a row we already renamed the anchor's current
+// text cannot identify it, so follow the text node instead -- the same one menuReset restores.
+var host=(li.hasAttribute&&li.hasAttribute('data-svxr'))
+?((a&&firstTextNode(a))?a:li)
+:((a&&labelText(a).toLowerCase()===want)?a:li);
+var node=firstTextNode(host);
+// No text to change -- an icon-only anchor. Change nothing AND leave no marker: a row wearing the
+// marker claims a rename the reader cannot see, and the console would tag it as renamed.
+if(!node)continue;
+// COMPARE BEFORE WRITING. This runs on every pass, and a write that changes nothing is still work done
+// on every reader's page for 25 seconds. It is NOT what stops a feedback loop -- every observer driving
+// these passes is childList-only, so the characterData and attribute writes below are invisible to them
+// -- and saying otherwise would leave the next person believing this guard is load-bearing for something
+// it is not. If an observer ever gains characterData, this guard becomes the only thing standing there.
+var had=li.getAttribute('data-svxr');
+// {page} is filled HERE for the tooltip too, not only for the label. The server passes it through
+// untouched (it is a CLIENT_VAR) precisely so the applier can fill it, menuApply does exactly that for
+// an added entry's title -- and this wrote r.title raw, so "Support for {page}" reached the tooltip as
+// the literal token, on every reader's page, having validated and previewed green.
+var wantTitle=r.title===undefined?undefined:fillRaw(r.title);
+// ⚠️ NO ANCHOR MEANS NO TOOLTIP TO COMPARE. curTitle is '' forever on the plain-<li> rows this function
+// deliberately supports, so comparing a wanted title against it never matched and the guard fell through
+// on every pass -- for a write that then could not happen either, because the write is gated on the
+// anchor as well. Both halves have to agree about whether a title is in play at all.
+var curTitle=a?(a.getAttribute('title')||''):'';
+var titleOk=wantTitle===undefined||!a||curTitle===wantTitle;
+if(node.nodeValue===to&&titleOk&&had!=null)continue;
+// ⚠️ THE IDENTITY, not the node. menuLabels matched on the row's FULL label -- labelText collapses a
+// subtree, so "Call " + "History" matches as "Call History" -- while this stored only the first text
+// node and blankOtherText then destroyed the rest. Every later consumer read a truncated original: a
+// hide keyed on the real label stopped matching, and a split "Log Out" would take acctUl's own anchor
+// with it. Exact node-level restore was ALREADY impossible for a split label (the other nodes are
+// blanked), so storing the identity costs nothing real and closes all three.
+if(had==null)li.setAttribute('data-svxr',matched);
+node.nodeValue=to;
+blankOtherText(host,node);
+// THREE STATES, and undefined is not ''. Absent leaves the portal's tooltip alone; '' removes it.
+if(a&&wantTitle!==undefined){if(wantTitle==='')a.removeAttribute('title');else a.title=wantTitle}
+}})}
+/** First non-empty text node under el, skipping the badge/counter subtrees labelText strips. */
+function firstTextNode(el){
+if(!el)return null;
+var kids=el.childNodes||[];
+for(var i=0;i<kids.length;i++){var n=kids[i];
+if(n.nodeType===3){if(String(n.nodeValue||'').trim())return n;continue}
+if(n.nodeType!==1)continue;
+if(n.matches&&n.matches('.badge,.label,.count,.counter,sup,[class*="badge"],[class*="count"]'))continue;
+var d=firstTextNode(n);if(d)return d}
+return null}
+/** Blank every OTHER text node in el, so a label split across two nodes does not print twice. */
+function blankOtherText(el,keep){
+if(!el)return;
+var kids=el.childNodes||[];
+for(var i=0;i<kids.length;i++){var n=kids[i];
+if(n.nodeType===3){if(n!==keep&&String(n.nodeValue||'').trim())n.nodeValue='';continue}
+if(n.nodeType!==1)continue;
+if(n.matches&&n.matches('.badge,.label,.count,.counter,sup,[class*="badge"],[class*="count"]'))continue;
+blankOtherText(n,keep)}}
 function aaDownloads(target,asButtons){(_KC.dl||[]).forEach(function(d){
 if(asButtons){var col=document.createElement('div');col.style.cssText='display:flex;flex-direction:column;align-items:center;gap:2px';
 var a=document.createElement('a');a.className='btn btn-small';a.textContent=d.label;a.href=d.url;a.target='_blank';a.rel='noopener noreferrer';if(d.title)a.title=d.title;col.appendChild(a);
@@ -556,8 +682,15 @@ document.body.appendChild(o);
 // concatenates children with no separator ("Some Entry"+"Log Out" -> "Some EntryLog Out"), which makes
 // any word-boundary test fail and matched nothing at all. Anchoring on the item also stops a label like
 // "Log Outbound Calls" from counting.
+// ⚠️ THROUGH menuLabels, NOT textContent. This menu is IDENTIFIED by having a sign-out entry, and
+// nothing stops an operator renaming Log Out -- a rebrander is exactly who would. Reading the raw text
+// would make acctUl stop finding its own menu the moment that rename landed, taking account hides,
+// renames and capture with it. menuLabels reports the original for a renamed row, which is why it works.
+function isSignOut(li){var ls=menuLabels(li);
+for(var j=0;j<ls.length;j++)if(/^log\s*out\b/i.test(ls[j]))return true;
+return false}
 function hasSignOut(ul){var ch=ul.children;
-for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim()))return true}
+for(var i=0;i<ch.length;i++){if(isSignOut(ch[i]))return true}
 return false}
 function acctUl(){
 var scopes=[document.querySelector('ul.user-toolbar'),document];
@@ -1173,16 +1306,20 @@ _aaP.then(function(r){_aaR=r;cb(r)},function(){})}
 // standalone hide list (PORTAL_APPS_HIDE) exactly as appsMenu does, so the two cannot resolve differently.
 function menuPlan(which){if(!_aaR)return null;
 var m=_aaR.menus&&_aaR.menus[which];if(m)return m;
-return which==='apps'?{hide:(_aaR.hide||[]),add:[]}:null}
+return which==='apps'?{hide:(_aaR.hide||[]),add:[],rename:[]}:null}
 // HIDES RE-RUN ON EVERY PASS; adds stay one-shot (item 37). The dataset guards below make the ADD pass
 // happen once per <ul> -- repeating it would duplicate entries -- and this runs beside them for the half
 // that is idempotent. Without it, an entry that any source appends after our single pass is never hidden:
 // load-order dependent, so it works whenever you test it and fails intermittently in production.
 // Gates match the add pass exactly, per menu, so hiding can never reach a menu adding could not.
+// The idempotent half of menu handling: hides AND renames. Both are safe to run any number of times and
+// both have to keep running, because a menu fills from several async sources and an entry the operator
+// named can arrive after the pass that would have acted on it. Adds stay one-shot -- repeating one
+// duplicates an entry.
 function menuHides(){
-if(_AF.menuConfig){var a=acctUl();if(a)menuHide(a,menuPlan('account'));
-var g=mgmtUl();if(g)menuHide(g,menuPlan('management'))}
-if(_AF.appAccess||_AF.menuConfig){var p=appsUl();if(p)menuHide(p,menuPlan('apps'))}}
+if(_AF.menuConfig){var a=acctUl();if(a){var ap=menuPlan('account');menuHide(a,ap);menuRename(a,ap)}
+var g=mgmtUl();if(g){var gp=menuPlan('management');menuHide(g,gp);menuRename(g,gp)}}
+if(_AF.appAccess||_AF.menuConfig){var p=appsUl();if(p){var pp=menuPlan('apps');menuHide(p,pp);menuRename(p,pp)}}}
 function row(k,v,hint,copy){
 var li=document.createElement('li');li.className='_svxrow';
 li.style.cssText='display:grid;grid-template-columns:62px 1fr 20px;gap:8px;align-items:baseline;padding:2px 14px 2px 16px;font-size:12.5px';
@@ -1204,14 +1341,14 @@ if(!_AF.menuConfig)return;
 var ul=acctUl();if(!ul||ul.dataset.svxacct)return;
 aaFetch(function(r){
 var plan=r&&r.menus&&r.menus.account;if(!plan)return;
-if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
+if(!(plan.hide||[]).length&&!(plan.add||[]).length&&!(plan.rename||[]).length)return;
 var u=acctUl();if(!u||u.dataset.svxacct)return;u.dataset.svxacct='1';
 // This guard makes the ADD pass one-shot, which is what it is for -- repeating an add duplicates the
 // entry. The hides are not gated by it: menuHides re-runs them on every pass and on the late timers,
 // which is what covers an entry that arrives after this one (item 37, fixed 2026-08-09).
 // Insert into the FIRST group — above the divider that precedes Log Out — rather than after it.
 var lo=null,ch=u.children;
-for(var i=0;i<ch.length;i++){if(/^log\s*out\b/i.test((ch[i].textContent||'').trim())){lo=ch[i];break}}
+for(var i=0;i<ch.length;i++){if(isSignOut(ch[i])){lo=ch[i];break}}
 var before=lo;
 if(before&&before.previousElementSibling&&/divider/.test(before.previousElementSibling.className||''))before=before.previousElementSibling;
 menuApply(u,plan,before)})}
@@ -1220,7 +1357,7 @@ if(!_AF.menuConfig)return;
 var ul=mgmtUl();if(!ul||ul.dataset.svxmgmt)return;
 aaFetch(function(r){
 var plan=r&&r.menus&&r.menus.management;if(!plan)return;
-if(!(plan.hide||[]).length&&!(plan.add||[]).length)return;
+if(!(plan.hide||[]).length&&!(plan.add||[]).length&&!(plan.rename||[]).length)return;
 var u=mgmtUl();if(!u||u.dataset.svxmgmt)return;u.dataset.svxmgmt='1';
 // Appended at the END: this menu has no trailing sign-out to sit above, and an added tool belongs
 // after the portal's own entries rather than jumping ahead of them.
@@ -1240,7 +1377,7 @@ if(!ul||ul.dataset.svx)return;ul.dataset.svx='1';
 ul.addEventListener('click',function(e){if(!e.target.closest('a[href]'))e.stopPropagation()});
 // Menu customization is independent of whether the domain runs the app — a domain served by another
 // app, or none, still gets its curated menu. The server resolved which entries apply to THIS user.
-var plan=(r.menus&&r.menus.apps)||{hide:(r.hide||[]),add:[]};
+var plan=(r.menus&&r.menus.apps)||{hide:(r.hide||[]),add:[],rename:[]};
 // Divider before any appended group, so added entries read as ours rather than stock ones.
 if((plan.add||[]).length)ul.appendChild(sep());
 menuApply(ul,plan,null);
@@ -1843,7 +1980,10 @@ var aa=q.apps||[];for(var ai=0;ai<aa.length;ai++)qs+='&app='+encodeURIComponent(
 jget('/kit/menus/resolve?'+qs)
 // ok:false is a config the operator is mid-typing, not a broken preview -- pass the reason through and
 // let the page say which of the two it is. UNAVAILABLE is only for "we could not ask".
-.then(function(r){if(r&&r.ok)rr({plan:r.plan,matched:r.matched,rawAdds:r.rawAdds,appsHide:r.appsHide});
+// EVERY field the page needs, named. This whitelist has dropped one before -- warnings, three lines
+// up -- and the failure is silent on both ends: the route computes it, the page has the wording, and
+// the wire carries a subset. rawRenames is the rename half's equivalent.
+.then(function(r){if(r&&r.ok)rr({plan:r.plan,matched:r.matched,rawAdds:r.rawAdds,rawRenames:r.rawRenames,appsHide:r.appsHide});
 else rr({invalid:(r&&r.error)||'This config cannot be resolved.'})})
 .catch(function(){rr({unavailable:'Could not reach this deployment to build the preview. Nothing here is a report about your config.'})});
 return}

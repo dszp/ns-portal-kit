@@ -28,10 +28,35 @@ export interface MenuItem {
   title?: string;
 }
 
+/**
+ * RELABEL A STOCK ENTRY IN PLACE — same destination, same row, same anchor.
+ *
+ * A reseller brands this portal as their own product and writes their own documentation; the entry
+ * has to be callable by the name in that documentation. Hide-plus-add approximates it and is worse in
+ * three ways: it needs the target url, it moves the row, and it discards the portal's own `<a>` —
+ * icon markup, classes, `data-` attributes, and any handler a vendor add-on bound to it.
+ *
+ * `from` names the entry as the PORTAL ships it, always. Hides, captures and the console keep using
+ * that name too, which is what stops a rename from becoming the identity everything downstream then
+ * has to agree about. There is no chained rename.
+ */
+export interface MenuRename {
+  from: string;
+  to: string;
+  /**
+   * THREE STATES, and the absent one is not the empty one. Absent (this key missing) leaves the
+   * portal's own tooltip untouched; `''` removes it; a string sets it. `null` is refused at startup
+   * rather than mapped onto either — both readings are defensible and the wrong guess silently
+   * deletes a tooltip the operator meant to keep.
+   */
+  title?: string;
+}
+
 /** The resolved outcome for one menu, for one user. */
 export interface MenuPlan {
   hide: string[];
   add: MenuItem[];
+  rename: MenuRename[];
 }
 
 /**
@@ -394,6 +419,55 @@ const menuItemPairAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuItemP
   return { it, raw: { label, url, ...(rawTitle ? { title: rawTitle } : {}) } };
 };
 
+/**
+ * One rename entry, validated and interpolated.
+ *
+ * ⚠️ DO NOT MODEL THIS ON `menuItemAt`'s title handling. That line reads
+ * `typeof v.title === 'string' && v.title.trim() ? … : undefined` and then spreads on truthiness,
+ * which collapses THREE states into two at three separate points — and maps a `null`, a number or an
+ * object to "absent" without a sound. For an add that is harmless (a title is decoration on an entry
+ * we are creating). Here the absent state is an instruction — *leave the portal's tooltip alone* —
+ * and it has to be distinguishable from `''`, which is *remove it*, all the way to the DOM write.
+ */
+const menuRenameAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuRename => {
+  if (!isObj(v)) throw new MenuConfigError(`${path} must be an object`);
+  for (const k of Object.keys(v)) {
+    if (k !== 'from' && k !== 'to' && k !== 'title') {
+      throw new MenuConfigError(`${path} has an unknown key "${k}" (known: from, to, title)`);
+    }
+  }
+  const from = typeof v.from === 'string' ? v.from.trim() : '';
+  const rawTo = typeof v.to === 'string' ? v.to.trim() : '';
+  if (!from) throw new MenuConfigError(`${path} needs a "from" — the entry's label as the portal ships it`);
+  if (!rawTo) throw new MenuConfigError(`${path} needs a "to" — the label to show instead`);
+  // The three-state read, spelled out rather than inferred from truthiness. Whitespace-only trims to
+  // '' and therefore CLEARS: decided here, so it cannot depend on where a .trim() happens to sit.
+  const has = Object.prototype.hasOwnProperty.call(v, 'title');
+  if (has && typeof v.title !== 'string') {
+    throw new MenuConfigError(`${path}.title must be a string. Omit it to leave the tooltip alone, or use "" to clear it`);
+  }
+  const title = has ? interpolate(String(v.title).trim(), ctx.vars, `${path}.title`, false) : undefined;
+  return { from, to: interpolate(rawTo, ctx.vars, `${path}.to`, false), ...(has ? { title } : {}) };
+};
+
+/** The same rename twice — resolved, and as written — for the same reason as {@link MenuItemPair}. */
+interface MenuRenamePair { it: MenuRename; raw: MenuRename }
+const menuRenamePairAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuRenamePair => {
+  const it = menuRenameAt(ctx)(v, path);
+  const o = v as Record<string, unknown>;
+  const has = Object.prototype.hasOwnProperty.call(o, 'title');
+  return {
+    it,
+    raw: {
+      from: String(o.from ?? '').trim(),
+      to: String(o.to ?? '').trim(),
+      // Same three states on the raw half. Coercing '' away here would strip a deliberate "clear the
+      // tooltip" out of the config the builder round-trips — the preservation failure one layer early.
+      ...(has ? { title: String(o.title ?? '').trim() } : {}),
+    },
+  };
+};
+
 /** Coerce one rung's value into a validated list. A rung must be an array — `{"acme": "x"}` is a mistake. */
 function rung<T>(v: unknown, path: string, item: (v: unknown, p: string) => T): T[] {
   if (!Array.isArray(v)) throw new MenuConfigError(`${path} must be an array`);
@@ -466,6 +540,27 @@ export function resolveTargeted<T>(
   const usersKey = keyOf('users');
 
   if (appKey !== undefined || domainsKey !== undefined || scopesKey !== undefined || usersKey !== undefined) {
+    /**
+     * ⚠️ THE TWO OBJECT FORMS DO NOT MIX, and until now mixing them was SILENT.
+     *
+     * A reserved key selects the nested form, after which nothing below reads a bare top-level key — so
+     * `{"acme.example": ["X"], "*": [], "scopes": {…}}` resolved as if the acme rung were not written.
+     * A live per-customer rule, gone, with the deployment's own validator calling the config Valid.
+     *
+     * It is reachable without anybody hand-writing that shape: the console models a bare domain map as
+     * carried-through remainder, and carving any axis on that half emits exactly this mixture. Refusing
+     * it turns a silent death into a startup error and a red verdict beside the builder's output. No
+     * working config can be relying on the old behaviour, because under it the stray keys did nothing.
+     */
+    const reserved = new Set([appKey, domainsKey, scopesKey, usersKey].filter((k) => k !== undefined));
+    const stray = Object.keys(raw).filter((k) => !reserved.has(k) && norm(k) !== '*');
+    if (stray.length) {
+      throw new MenuConfigError(
+        `${path} mixes the two targeted forms: it names an axis (${[...reserved].join(', ')}) `
+        + `AND bare domain keys (${stray.join(', ')}). Only one form can answer, so the bare keys would `
+        + `never match anyone. Move them under a "domains" key.`,
+      );
+    }
     let chosen: T[] | undefined;
     // The source of whichever of the three the join below takes. Recorded WHERE the choice is made, not
     // re-derived after it: a second reading of "which rung won" is the drift this whole sink exists to
@@ -589,14 +684,17 @@ export function resolveTargeted<T>(
   return [];
 }
 
+/** One menu's raw config, before any half is resolved. Three halves; each optional. */
+type MenuCfg = { hide?: unknown; add?: unknown; rename?: unknown };
+
 /** Parse PORTAL_MENUS into raw per-menu config, validating menu names. Unset ⇒ `{}`. */
-function rawMenus(env: MenuEnv): Record<string, { hide?: unknown; add?: unknown }> {
+function rawMenus(env: MenuEnv): Record<string, MenuCfg> {
   const src = (env.PORTAL_MENUS ?? '').trim();
   if (!src) return {};
   let parsed: unknown;
   try { parsed = JSON.parse(src); } catch { throw new MenuConfigError('PORTAL_MENUS is not valid JSON'); }
   if (!isObj(parsed)) throw new MenuConfigError('PORTAL_MENUS must be a JSON object keyed by menu name');
-  const out: Record<string, { hide?: unknown; add?: unknown }> = {};
+  const out: Record<string, MenuCfg> = {};
   for (const [name, v] of Object.entries(parsed)) {
     const n = norm(name);
     if (!(MENU_NAMES as readonly string[]).includes(n)) {
@@ -604,9 +702,9 @@ function rawMenus(env: MenuEnv): Record<string, { hide?: unknown; add?: unknown 
     }
     if (!isObj(v)) throw new MenuConfigError(`PORTAL_MENUS["${name}"] must be an object`);
     for (const k of Object.keys(v)) {
-      if (k !== 'hide' && k !== 'add') throw new MenuConfigError(`PORTAL_MENUS["${name}"] has an unknown key "${k}" (known: hide, add)`);
+      if (k !== 'hide' && k !== 'add' && k !== 'rename') throw new MenuConfigError(`PORTAL_MENUS["${name}"] has an unknown key "${k}" (known: hide, add, rename)`);
     }
-    out[n] = v as { hide?: unknown; add?: unknown };
+    out[n] = v as MenuCfg;
   }
   return out;
 }
@@ -699,6 +797,33 @@ const mergeHides = (lists: string[][]): string[] => unionLabels(...lists);
  * First spelling wins, like `unionLabels`. Provenance still reports BOTH rungs — the operator asked for
  * the entry twice and both rules are real, even though one entry is drawn.
  */
+/**
+ * Renames merge like adds — registry order, FIRST WINS on the `from` label.
+ *
+ * ⚠️ THIS COVERS TWO RUNGS, NOT TWO ENTRIES IN ONE RUNG. `resolveTargeted` only calls a merge when the
+ * app tier produced more than one hit, so a rung listing the same `from` twice arrives here as a single
+ * list and passes straight through. The client keeps its own guard for that (see `menuRename` in
+ * `kit.ts`), exactly as `menuApply` does for a repeated url — otherwise the last entry would win in the
+ * DOM while the first wins across rungs, and the preview, which renders the plan, would disagree with
+ * the portal.
+ *
+ * Keyed on `from`, which is never interpolated, so the resolved and raw halves of a pair share one
+ * identity and cannot fall out of step through the dedupe.
+ */
+const mergeRenames = (lists: MenuRenamePair[][]): MenuRenamePair[] => {
+  const seen = new Set<string>();
+  const out: MenuRenamePair[] = [];
+  for (const list of lists) {
+    for (const p of list) {
+      const k = norm(p.it.from);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(p);
+    }
+  }
+  return out;
+};
+
 const mergeAdds = (lists: MenuItemPair[][]): MenuItemPair[] => {
   const seen = new Set<string>();
   const out: MenuItemPair[] = [];
@@ -735,7 +860,7 @@ export function resolveMenus(
    * can both hold, at which point a half's list legitimately comes from more than one app rung. Plural
    * now is free; plural later is a breaking change to a shape the editor already consumes.
    */
-  sources?: Record<MenuName, { hide: MenuSource[]; add: MenuSource[] }>,
+  sources?: Record<MenuName, { hide: MenuSource[]; add: MenuSource[]; rename: MenuSource[] }>,
   /**
    * Optional sink for the added entries AS WRITTEN — same list, same order, `{variable}` placeholders
    * intact. Only the console asks for it, and only because a resolved url is not a config url: it is the
@@ -743,6 +868,8 @@ export function resolveMenus(
    * `plan.add` by construction (see {@link MenuItemPair}), never by a second resolve.
    */
   rawAdds?: Record<MenuName, MenuItem[]>,
+  /** The same, for renames — `to` and `title` carry `{variable}` and are interpolated in the plan. */
+  rawRenames?: Record<MenuName, MenuRename[]>,
 ): Record<MenuName, MenuPlan> {
   const menus = rawMenus(env);
 
@@ -758,9 +885,12 @@ export function resolveMenus(
       ? appsHideSources(env, ctx, hs).effective
       : resolveTargeted<string>(cfg.hide, ctx, `PORTAL_MENUS["${name}"].hide`, asStringItem, hs, mergeHides);
     const pairs = resolveTargeted<MenuItemPair>(cfg.add, ctx, `PORTAL_MENUS["${name}"].add`, menuItemPairAt(ctx), as, mergeAdds);
-    out[name] = { hide, add: pairs.map((p) => p.it) };
-    if (sources) sources[name] = { hide: hs.sources, add: as.sources };
+    const rs: SourceOut = { sources: [] };
+    const rpairs = resolveTargeted<MenuRenamePair>(cfg.rename, ctx, `PORTAL_MENUS["${name}"].rename`, menuRenamePairAt(ctx), rs, mergeRenames);
+    out[name] = { hide, add: pairs.map((p) => p.it), rename: rpairs.map((p) => p.it) };
+    if (sources) sources[name] = { hide: hs.sources, add: as.sources, rename: rs.sources };
     if (rawAdds) rawAdds[name] = pairs.map((p) => p.raw);
+    if (rawRenames) rawRenames[name] = rpairs.map((p) => p.raw);
   }
   return out;
 }
@@ -809,14 +939,14 @@ function legacyHide(env: MenuEnv, ctx: TargetCtx): string[] {
  */
 export function unreachableDefaults(env: MenuEnv): string[] {
   const out: string[] = [];
-  let menus: Record<string, { hide?: unknown; add?: unknown }>;
+  let menus: Record<string, MenuCfg>;
   try { menus = rawMenus(env); } catch { return out; } // invalid config is menuConfigError's to report
   const closed: Record<string, string[]> = {
     app: [...APP_NAMES, 'none'],
     scopes: KNOWN_SCOPES.map((x) => normScope(x)),
   };
   for (const [name, cfg] of Object.entries(menus)) {
-    for (const half of ['hide', 'add'] as const) {
+    for (const half of ['hide', 'add', 'rename'] as const) {
       const raw = cfg[half];
       if (!isObj(raw)) continue;
       const keys = Object.keys(raw);

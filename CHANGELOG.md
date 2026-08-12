@@ -20,6 +20,87 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [0.6.0] — 2026-08-12
+
+### Added
+
+- **Rename a stock menu entry.** A third key beside `hide` and `add`:
+  `{"apps": {"rename": [{"from": "SNAPAnalytics", "to": "Analytics Dashboard"}]}}`, targeted by user,
+  domain, scope or app state like everything else. It relabels the entry **in place** — same
+  destination, same position in the menu, same icon and same link the portal shipped. Hiding an entry
+  and adding a replacement was never equivalent: it needs the target URL, moves the row to the end, and
+  throws away the portal's own element. This is for operators who sell the portal as their own product
+  and whose documentation calls the entry something else.
+  - `from` names the entry **as the portal ships it, always** — a hide keyed on that name still works, a
+    captured role still records it, and the builder still offers it under it. A rename never matches a
+    row that a rename produced, so renames cannot chain and cannot depend on the order rows sit in. A
+    stock entry the portal genuinely ships under that name is still matched, because it is still stock.
+  - `title` has three states: omit it to leave the portal's tooltip alone, `""` to remove it, a string
+    to set one. `null` is refused at startup rather than guessed at.
+  - **The builder creates and edits them, from the picture.** A stock row offers *rename*; a renamed one
+    offers *edit name* and *revert*. The original name is pinned to the row rather than typed, which is
+    what makes "no chained rename" a property of the editor and not just a rule in this document — there
+    is deliberately no rename-by-name box the way there is for hides. The tooltip's three states are a
+    picker (*leave as it is* / *set to* / *remove*) because a text box can only offer two, and leaving
+    the portal's own tooltip alone is the default. Reverting takes the rename out of every rule renaming
+    that entry for the reader you are previewing, and out of nothing else. A row that is both hidden and
+    renamed reports both, since on a real config that is the first combination you hit.
+  - A row whose label came from a role you captured **before** you wrote the rename is not offered the
+    control — that capture stored the renamed name and not the original, so a rule written against it
+    would name something the portal never ships. Recapture the role and the control comes back.
+
+- **Move one change to a different rule, from the change log.** The rule name beside each entry is a
+  control: click it and the entry offers the other rules that could carry that change, with the same
+  override warning the original question gave. It is a list rather than a two-way toggle because there
+  are four ways to name a reader, not two, and choosing one can carve a rule that takes over an audience
+  another rule was answering — which a toggle would do silently. Only changes that *put* something in a
+  rule offer it; a removal has nothing to carry.
+- **Take back one change from the change log.** Each entry in *Changed this session* now carries an
+  `×` that reverses exactly that change and drops it from the list — the rest stay. Reset was previously
+  the only way back and it discards everything. The control appears only where the inverse is exact and
+  still applies: carving a new rule has none, because later edits can be living inside the new rung and
+  removing it would take them too (the rail's *remove this rule* is the control for that, beside the
+  count of what would go with it), and an entry whose rule has since been restructured stops offering one
+  rather than silently doing nothing.
+
+- **Renaming *Log Out* is safe.** The account dropdown is identified by having a sign-out entry, and
+  the kit inserts your added entries above the divider that precedes it. Both now recognise that row by
+  the name the portal ships, so renaming it does not cost you the account menu.
+
+### Fixed
+
+- **A rule that names an axis AND bare domain keys is now refused at startup.** `PORTAL_MENUS` accepts
+  two targeted shapes — `{"acme.example": [...]}` and `{"domains": {"acme.example": [...]}}` — and mixing
+  them in one half was previously accepted and then half-ignored: once any axis key was present, the bare
+  domain keys resolved as though they had not been written. A live per-customer rule could go silent with
+  the deployment's own validator reporting the config as valid. It is a startup error now, naming the keys
+  and where they belong. Nothing working can be affected: under the old behaviour those keys did nothing.
+- **The whole-menu default stays reachable after you carve a rule.** *Which rule should carry it?* offered
+  the default only when nothing else applied — so the moment a scope rule existed, the default was the one
+  audience you could never aim an edit back at, even though carving is what created it.
+- **The "change" link beside *… the next item lands in* now opens the picker.** It cleared the answer and
+  stopped, so the line vanished, nothing else moved, and the effect only surfaced on your next edit.
+- **That line says *the next item* now.** It read "Renaming lands in everyone else", which is a statement
+  about the config — and a false one the moment you re-aimed after making a rename, since re-aiming has
+  never moved work already done. Use the rule name in the change log to move a change you have made.
+- **A menu half the builder cannot round-trip no longer offers controls that do nothing.** Its tick
+  boxes are disabled with a reason and its two "add"/"hide by name" controls are replaced by a line
+  saying which half is carried through unchanged — previously they were live, silently emitted nothing,
+  and left the targeting question answered so the second attempt did not even ask.
+- **Clearing a required field and pressing Done is recorded as a removal.** It deletes the entry, which
+  is correct, but the change log said "Nothing yet" beside a config that had just lost one. It now logs
+  the removal and offers to put it back.
+- **Menus are emitted in the order you wrote them.** A config written `management` before `apps` came
+  back the other way round — a moved block on a menu nobody had touched.
+- **An added entry written with `"title": ""` now survives the builder untouched.** The empty tooltip was
+  dropped from the emitted config, which changed nothing about what the config *does* and was therefore
+  pure noise in the diff you run before pasting — on a menu you never opened.
+
+- **The builder no longer deletes parts of your config it does not know how to edit.** It emits your
+  complete config every time, rebuilt from the pieces it models — so any key it did not model was
+  dropped from the output you paste back, and a menu whose only key was one of those disappeared
+  entirely. Everything is now carried through in the position you wrote it.
+
 ## [0.5.0] — 2026-08-11
 
 ### Added
@@ -1906,6 +1987,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.6.0]: https://github.com/dszp/ns-portal-kit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dszp/ns-portal-kit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dszp/ns-portal-kit/compare/v0.3.0...v0.4.0
 [0.2.17]: https://github.com/dszp/ns-portal-kit/compare/v0.2.16...v0.2.17

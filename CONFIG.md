@@ -323,10 +323,15 @@ Base URL for a deep link to the app dashboard, shown on the gated feature surfac
 
 ## Portal menus
 
-Adding and hiding entries in the portal's stock menus. Gated by `me.menuConfig` (default `all`).
+Adding, hiding and renaming entries in the portal's stock menus. Gated by `me.menuConfig` (default `all`).
 
 > Hiding a menu entry is **cosmetic, not a security control.** It removes a link, not access to whatever
 > the link pointed at. Never use it to "lock" a feature — that is what the gates are for.
+>
+> Renaming is cosmetic in the same way, and adds one thing worth knowing: a renamed entry can say
+> something other than where it goes. That is not new power — anyone who can set this key could already
+> hide an entry and add their own with any label and any URL, which is strictly more — and a rename never
+> touches the destination. But it does mean the label is yours to get right.
 
 **Use the builder, not this syntax.** The console's **Menus** tab reads the menus off the portal page you
 opened it from, so you tick real entries instead of typing labels and hoping they match. It emits both the
@@ -338,14 +343,14 @@ worth typing.
 
 ### `PORTAL_MENUS` · `vars`
 
-JSON adding and hiding entries in the **Apps**, **account** and **Management** menus, optionally targeted
-by user, domain, NetSapiens scope, or whether your app is active for that domain.
+JSON adding, hiding and renaming entries in the **Apps**, **account** and **Management** menus, optionally
+targeted by user, domain, NetSapiens scope, or whether your app is active for that domain.
 
 - **Example**
   `{"apps": {"hide": {"app": {"ringotel": ["SNAPmobile Web"], "none": []}}, "add": [{"label": "Support", "url": "https://support.example.com"}]}}`
 - **Unset** No customization from this setting. `PORTAL_APPS_HIDE`, if set, still applies independently.
-- **Needs no other integration.** With no app API key set the app state is `none`, so static add and hide
-  work on any deployment.
+- **Needs no other integration.** With no app API key set the app state is `none`, so static add, hide and
+  rename work on any deployment.
 - **Full targeting model, variables and URL rules:** [Menu targeting](#menu-targeting).
 
 **Which menus you can target.** Menus are referenced by name — you never supply a CSS selector, which
@@ -393,6 +398,57 @@ hiding it removes a modal launcher rather than a link to somewhere. `My Account`
 **Hides are applied before adds.** A hide names a *stock* entry, so it acts on the menu as the portal
 shipped it, before any of your own entries exist. That keeps the two lists independent: a hide can never
 remove something you added, and neither list's meaning depends on the other.
+
+**`rename` — relabel a stock entry without moving it.** The third key beside `hide` and `add`, targeted
+the same way:
+
+```json
+{"apps": {"rename": [{"from": "SNAPAnalytics", "to": "Analytics Dashboard"}]}}
+```
+
+Reach for it when you sell this portal as your own product and your documentation calls the entry
+something else. Hiding it and adding a replacement is not the same thing: that needs the target URL, it
+moves the row to the end of the menu, and it discards the portal's own link along with its icon and
+anything the portal attached to it. A rename changes the label in place, and nothing else.
+
+- **`from` is the entry as the portal ships it, and it stays that name everywhere else.** A hide naming
+  it still works; a capture still records it; the builder still offers it under that name.
+- **A rename never matches a row that a rename produced.** Rename `A` to `B` and a second rule with
+  `"from": "B"` will not touch that row — otherwise the result would depend on which order the rows
+  happen to sit in. It *will* still match a stock entry the portal genuinely ships as `B`, which is the
+  right answer: that row is stock, and nothing about your first rule changes what it is called.
+- **`title` has three states.** Omit it to leave the portal's own tooltip alone; `""` removes the
+  tooltip; a string sets it. `null` is refused at startup rather than guessed at, since both readings
+  are defensible and the wrong one silently deletes a tooltip you meant to keep.
+- **A rename changes the label and the tooltip. It does not change where the entry goes.** If you want
+  it to go somewhere else, hide it and add your own.
+- **`to` and `title` take the same [`{variable}` placeholders](#menu-targeting) an added entry's label
+  does** — `{name}`, `{ext}`, `{domain}`, `{page}` and the rest, filled per signed-in user. An unknown
+  one is a startup error, the same as anywhere else. `from` never interpolates: it has to stay the one
+  name every other rule agrees on.
+- A `from` that matches nothing changes nothing, exactly like a hide that matches nothing.
+- A rename never touches an entry *you* added — change those where you wrote them.
+- **It desynchronizes the entry from your vendor's documentation and support language.** That is the
+  point when you are branding your own product, and a trap when you are not: whoever hits the confusion
+  will not be whoever wrote the config.
+
+**Writing one in the builder.** The Menus tab draws every menu the way the reader sees it, so a stock row
+offers *rename* and a renamed one offers *edit name* and *revert*. Two things about that form are
+deliberate:
+
+- **The original name is pinned to the row, not typed.** It is the row you clicked. That is what makes
+  "there is no renaming a renamed entry" a property of the editor rather than only a rule here — offering
+  the control on stock rows alone would enforce nothing if the form then let you type a `from`.
+- **The tooltip is a picker, not a text box.** *Leave as it is* / *set to* / *remove*, because a box can
+  express two of those three states and the missing one is the default. Reverting removes the rename from
+  every rule renaming that entry for the reader you are previewing — and from no rule that was not.
+
+One case where the control is withheld: a captured role stores the labels a page was showing, so a
+capture taken **before** you wrote a rename holds that entry under its *renamed* name — and the original
+is missing from the capture entirely. Offering to rename that row would write a rule against a name the
+portal never uses. Those rows say so; recapture the role and the control comes back. A row that merely
+*shares* a name another rule renames to is not this: it is a stock entry in its own right and keeps the
+control.
 
 <a id="DOCUMO_DOMAINS"></a>
 

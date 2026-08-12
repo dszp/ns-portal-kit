@@ -1321,6 +1321,283 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
       '[domain] domList is scoped to the domains list, not every portal page');
   }
 
+
+  // ══ RENAMING A STOCK ENTRY ═══════════════════════════════════════════════════════════════════════
+  // Behavioural, against the REAL emitted code, because every claim here is about what the DOM ends up
+  // looking like and a source grep can see none of it. The stub carries real text nodes and a real deep
+  // clone, since labelText's badge-stripping is what decides whether a rename matches at all.
+  {
+    const b = buildSelfBundle(['me.menuConfig', 'portal.self'], {} as any);
+    const src = b.slice(b.indexOf('function labelText('), b.indexOf('function aaDownloads('));
+    if (!src || src.length > 9000) throw new Error('could not slice the menu appliers — the guard is broken, not the code');
+    const api = runInNewContext(`${src}; ({menuRename:menuRename, menuHide:menuHide, menuReset:menuReset, menuLabels:menuLabels})`,
+      { location: { pathname: '/portal/home' } }) as {
+        menuRename: (ul: unknown, plan: unknown) => void;
+        menuHide: (ul: unknown, plan: unknown) => void;
+        menuReset: (ul: unknown) => void;
+        menuLabels: (li: unknown) => string[];
+      };
+
+    type N = Record<string, unknown>;
+    const BADGE = /(^|\s)(badge|label|count|counter)(\s|$)|badge|count/i;
+    const txt = (v: string): N => ({ nodeType: 3, nodeValue: v });
+    const kidText = (kids: N[]): string =>
+      kids.map((k) => (k.nodeType === 3 ? String(k.nodeValue ?? '') : kidText((k.childNodes as N[]) ?? []))).join('');
+    const el = (tag: string, cls: string, kids: N[], attrs: Record<string, string> = {}): N => {
+      const a: Record<string, string> = { ...attrs };
+      const node: N = {
+        nodeType: 1, tagName: tag.toUpperCase(), className: cls, childNodes: kids, style: { display: '' },
+        setAttribute: (k: string, v: string) => { a[k] = String(v); },
+        getAttribute: (k: string) => (k in a ? a[k]! : null),
+        hasAttribute: (k: string) => k in a,
+        removeAttribute: (k: string) => { delete a[k]; },
+        matches: (sel: string) => (tag === 'sup' && sel.includes('sup')) || (!!cls && BADGE.test(cls)),
+        querySelector: (sel: string) => (sel === 'a' ? deepFind(node, 'A') : null),
+        querySelectorAll: (_sel: string) => deepBadges(node),
+        cloneNode: () => clone(node),
+      };
+      Object.defineProperty(node, 'textContent', { get: () => kidText(node.childNodes as N[]) });
+      Object.defineProperty(node, 'title', { get: () => a.title ?? '', set: (v: string) => { a.title = v; } });
+      return node;
+    };
+    const deepFind = (n: N, tag: string): N | null => {
+      for (const k of ((n.childNodes as N[]) ?? [])) {
+        if (k.nodeType !== 1) continue;
+        if (k.tagName === tag) return k;
+        const d = deepFind(k, tag); if (d) return d;
+      }
+      return null;
+    };
+    const deepBadges = (n: N): N[] => {
+      const out: N[] = [];
+      for (const k of ((n.childNodes as N[]) ?? [])) {
+        if (k.nodeType !== 1) continue;
+        if ((k.matches as (s: string) => boolean)('.badge')) out.push(k); else out.push(...deepBadges(k));
+      }
+      return out;
+    };
+    const clone = (n: N): N => {
+      if (n.nodeType === 3) return txt(String(n.nodeValue ?? ''));
+      const c = el(String(n.tagName ?? 'DIV').toLowerCase(), String(n.className ?? ''),
+        ((n.childNodes as N[]) ?? []).map(clone));
+      // The badge strip walks parentNode.removeChild, so the clone's children must know their parent.
+      for (const k of (c.childNodes as N[])) k.parentNode = { removeChild: (x: N) => {
+        const kids = c.childNodes as N[]; const i = kids.indexOf(x); if (i >= 0) kids.splice(i, 1);
+      } };
+      return c;
+    };
+    /** A menu row: <li><a>[icon]label[badge]</a></li>, or an anchorless <li>label</li>. */
+    const row = (label: string, opts: { anchor?: boolean; icon?: boolean; badge?: string; cls?: string; title?: string } = {}): N => {
+      const inner: N[] = [];
+      if (opts.icon) inner.push(el('i', 'fa fa-chart', []));
+      inner.push(txt(label));
+      if (opts.badge) inner.push(el('span', 'badge', [txt(opts.badge)]));
+      return opts.anchor === false
+        ? el('li', opts.cls ?? '', [txt(label)])
+        : el('li', opts.cls ?? '', [el('a', '', inner, opts.title ? { title: opts.title } : {})]);
+    };
+    const anchorOf = (li: N) => (li.querySelector as (s: string) => N | null)('a')!;
+    const shown = (li: N) => kidText((anchorOf(li) ? (anchorOf(li)!.childNodes as N[]) : (li.childNodes as N[])));
+
+    // ── the write preserves what textContent would have destroyed ─────────────────────────────────────
+    {
+      const li = row('SNAPAnalytics', { icon: true, badge: '3' });
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: 'SNAPAnalytics', to: 'Analytics Dashboard' }] });
+      const a = anchorOf(li)!;
+      ok(shown(li).includes('Analytics Dashboard'), `[rename] the label is replaced (${shown(li)})`);
+      ok((a.childNodes as N[]).some((k) => k.nodeType === 1 && k.className === 'fa fa-chart'),
+        '[rename] the icon element survives — textContent would have deleted it');
+      ok((a.childNodes as N[]).some((k) => k.nodeType === 1 && k.className === 'badge'),
+        '[rename] and so does the live counter, which is the reason this writes a text node');
+    }
+
+    // ── the anchorless vendor row, which the naive "first text node of the <a>" rule would no-op ──────
+    {
+      const li = row('Add-on Report', { anchor: false, cls: 'admin-menu-list-item' });
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: 'Add-on Report', to: 'Usage' }] });
+      ok(String((li.childNodes as N[])[0]!.nodeValue) === 'Usage',
+        `[rename] a row with no <a> is renamed by its own text (${kidText(li.childNodes as N[])})`);
+      ok((li.getAttribute as (k: string) => string | null)('data-svxr') === 'Add-on Report',
+        '[rename] and records its original');
+    }
+
+    // ── an icon-only row: nothing to rename, and NO marker claiming otherwise ─────────────────────────
+    {
+      const li = el('li', '', [el('a', '', [el('i', 'fa fa-cog', [])])]);
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: '', to: 'X' }, { from: 'anything', to: 'X' }] });
+      ok((li.getAttribute as (k: string) => string | null)('data-svxr') === null,
+        '[rename] a row with no label to change is left unmarked — a marker would make the console claim a rename nobody can see');
+    }
+
+    // ── ⚠️ THE INVARIANT: a renamed row answers to its ORIGINAL name, and ONLY that ───────────────────
+    {
+      const analytics = row('SNAPAnalytics');
+      const reports = row('Reports');
+      const ul = { children: [analytics, reports] };
+      api.menuRename(ul, { rename: [{ from: 'SNAPAnalytics', to: 'Reports' }] });
+      ok(api.menuLabels(analytics).join('|') === 'SNAPAnalytics',
+        `[rename] the renamed row still reports its stock name (${api.menuLabels(analytics).join('|')})`);
+      // The failure this prevents: menuHide tests EVERY label a row reports and keeps scanning rows, so a
+      // hide aimed at the stock "Reports" would have taken the renamed row with it.
+      api.menuHide(ul, { hide: ['Reports'], add: [] });
+      ok((reports.style as { display: string }).display === 'none',
+        '[rename] a hide naming a stock entry hides that entry');
+      ok((analytics.style as { display: string }).display === '',
+        '[rename] and NOT the unrelated row we happened to rename to the same name');
+      // ...while a hide naming the ORIGINAL still works, which is what makes the two operations independent.
+      api.menuHide(ul, { hide: ['SNAPAnalytics'], add: [] });
+      ok((analytics.style as { display: string }).display === 'none',
+        '[rename] a hide keyed on the original still reaches a renamed row');
+    }
+
+    // ── ⚠️ A LABEL SPLIT ACROSS TEXT NODES ────────────────────────────────────────────────────────────
+    // labelText collapses a subtree, so "Call " + "History" MATCHES as "Call History" -- but the marker
+    // stored only the first node's value and blankOtherText then destroyed the rest, so the row went on
+    // reporting a truncated "Call". Every later consumer read that: a hide keyed on the real label
+    // stopped matching, and a split "Log Out" would have taken acctUl's own detection with it.
+    {
+      const li = el('li', '', [el('a', '', [txt('Call '), txt('History')])]);
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: 'Call History', to: 'Reports' }] });
+      ok(shown(li) === 'Reports', `[split] a label split across nodes is renamed (${JSON.stringify(shown(li))})`);
+      ok(api.menuLabels(li).join('|') === 'Call History',
+        `[split] and still reports its FULL original, not the first fragment (${api.menuLabels(li).join('|')})`);
+      api.menuHide(ul, { hide: ['Call History'], add: [] });
+      ok((li.style as { display: string }).display === 'none',
+        '[split] so a hide keyed on the real original still reaches it');
+    }
+
+    // ── {page} is filled in the TOOLTIP too, not only the label ───────────────────────────────────────
+    // The server passes {page} through untouched because the applier is the only thing that knows it,
+    // and menuApply fills it for an added entry's title. This wrote r.title raw, so a rename tooltip
+    // reading "Support for {page}" reached every reader as the literal token -- having validated and
+    // previewed green, because the preview never renders a tooltip.
+    {
+      const li = row('Support', { title: 'old' });
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: 'Support', to: 'Help on {page}', title: 'You are on {page}' }] });
+      ok(!/\{page\}/.test(shown(li)), `[page] the label has no literal token (${shown(li)})`);
+      const t = (anchorOf(li)!.getAttribute as (k: string) => string | null)('title') ?? '';
+      ok(!/\{page\}/.test(t) && /You are on /.test(t),
+        `[page] and neither does the tooltip (${JSON.stringify(t)})`);
+    }
+
+    // ── an anchorless row carrying a title: the guard has to agree with the write ──────────────────────
+    // curTitle is '' forever with no <a> to read, and the title write needs one -- so a wanted title made
+    // the idempotency test permanently false for a write that could not happen anyway, and every pass
+    // rewrote the identical text node. Not a loop here (every observer is childList-only), which is
+    // exactly why it would have gone unnoticed until one of them gained characterData.
+    {
+      const li = row('Counts', { anchor: false });
+      const ul = { children: [li] };
+      const plan = { rename: [{ from: 'Counts', to: 'Totals', title: 'tip' }] };
+      api.menuRename(ul, plan);
+      const first = li.getAttribute('data-svxr');
+      let writes = 0;
+      const node = (li.childNodes as N[])[0]!;
+      Object.defineProperty(node, 'nodeValue', {
+        get() { return 'Totals'; }, set() { writes++; }, configurable: true,
+      });
+      api.menuRename(ul, plan);
+      api.menuRename(ul, plan);
+      ok(writes === 0, `[idem] a settled anchorless row is not rewritten on every pass (${writes} writes)`);
+      ok(li.getAttribute('data-svxr') === first, '[idem] and keeps the original it recorded');
+    }
+
+    // ── no chained renames, whatever the DOM order ────────────────────────────────────────────────────
+    {
+      const a1 = row('A'), b1 = row('B');
+      const ul = { children: [a1, b1] };
+      api.menuRename(ul, { rename: [{ from: 'A', to: 'B' }, { from: 'B', to: 'C' }] });
+      ok(shown(a1) === 'B', `[rename] A became B and stopped there (${shown(a1)})`);
+      ok(shown(b1) === 'C', `[rename] and the real B became C (${shown(b1)})`);
+    }
+
+    // ── duplicate `from` inside ONE rung: first wins, matching the cross-rung merge ────────────────────
+    // resolveMenus only merges when the app tier produced two or more rungs, so this pair arrives intact.
+    // Without the guard the LAST would win here while the FIRST wins in the resolver, and the console —
+    // which draws the plan — would describe a menu the portal does not have.
+    {
+      const li = row('Messages');
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: 'Messages', to: 'Inbox' }, { from: 'messages', to: 'Mail' }] });
+      ok(shown(li) === 'Inbox', `[rename] the first spelling wins inside a rung too (${shown(li)})`);
+    }
+
+    // ── our own rows are never renamed ────────────────────────────────────────────────────────────────
+    {
+      const ours = row('Support', { cls: '_svxadd' });
+      const ul = { children: [ours] };
+      api.menuRename(ul, { rename: [{ from: 'Support', to: 'Help' }] });
+      ok(shown(ours) === 'Support', '[rename] an entry this kit added is not renamed — change it where it was written');
+    }
+
+    // ── idempotency, and the reason it is compare-before-write ────────────────────────────────────────
+    {
+      const li = row('Voicemail');
+      const ul = { children: [li] };
+      const plan = { rename: [{ from: 'Voicemail', to: 'Messages' }] };
+      api.menuRename(ul, plan);
+      const node = (anchorOf(li)!.childNodes as N[]).find((k) => k.nodeType === 3)!;
+      let writes = 0;
+      const real = node.nodeValue;
+      Object.defineProperty(node, 'nodeValue', {
+        get: () => real, set: () => { writes++; },
+      });
+      api.menuRename(ul, plan);
+      api.menuRename(ul, plan);
+      ok(writes === 0,
+        `[rename] a settled row is not written again — an unconditional write inside a mutation pass retriggers itself (${writes} writes)`);
+    }
+
+    // ── {page}, which only the client can fill ────────────────────────────────────────────────────────
+    {
+      const li = row('Help');
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: 'Help', to: 'Help for {page}' }] });
+      ok(shown(li) === 'Help for /portal/home', `[rename] {page} is filled by the applier (${shown(li)})`);
+    }
+
+    // ── the tooltip's three states, which is where a truthy test would collapse two of them ───────────
+    {
+      const keep = row('A', { title: 'original' });
+      const set = row('B', { title: 'original' });
+      const clear = row('C', { title: 'original' });
+      const ul = { children: [keep, set, clear] };
+      api.menuRename(ul, { rename: [
+        { from: 'A', to: 'A2' },
+        { from: 'B', to: 'B2', title: 'new tip' },
+        { from: 'C', to: 'C2', title: '' },
+      ] });
+      ok((anchorOf(keep)!.getAttribute as (k: string) => string | null)('title') === 'original',
+        '[rename] an absent title leaves the portal tooltip alone');
+      ok((anchorOf(set)!.getAttribute as (k: string) => string | null)('title') === 'new tip',
+        '[rename] a string sets it');
+      ok((anchorOf(clear)!.getAttribute as (k: string) => string | null)('title') === null,
+        '[rename] and "" removes it — the state a truthy test would read as "leave alone"');
+    }
+
+    // ── the marker holds the row's IDENTITY, which is what every consumer of it needs ─────────────────
+    // It used to hold the raw value of the first text node, and this block asserted that byte for byte.
+    // That was asserting the implementation, not a requirement: the only reader of the restore value is
+    // menuReset, which nothing calls yet — while the marker's OTHER job, being the name menuLabels
+    // reports, has three live consumers. Where the two disagree, identity wins.
+    {
+      const li = row('  Voicemail  ');
+      const ul = { children: [li] };
+      api.menuRename(ul, { rename: [{ from: 'Voicemail', to: 'Messages' }] });
+      ok(shown(li) === 'Messages', '[rename] renamed');
+      api.menuReset(ul);
+      ok(shown(li).trim() === 'Voicemail',
+        `[rename] and reset puts the original label back (${JSON.stringify(shown(li))})`);
+      ok((li.getAttribute as (k: string) => string | null)('data-svxr') === null,
+        '[rename] with the marker cleared, so a second reset is not a second restore');
+    }
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

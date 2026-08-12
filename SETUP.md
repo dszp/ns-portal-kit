@@ -101,12 +101,15 @@ shown credentials that would not work.
 
 ### Menu customization
 
-Add and hide entries in the portal's Apps menu, the user's own account dropdown, and the Management
-dropdown — targeted by domain, by NetSapiens scope, by account, or by whether your app is actually active
-for that user. Added links can carry the signed-in user's own extension and domain into the URL.
+Add, hide and rename entries in the portal's Apps menu, the user's own account dropdown, and the
+Management dropdown — targeted by domain, by NetSapiens scope, by account, or by whether your app is
+actually active for that user. Added links can carry the signed-in user's own extension and domain into
+the URL.
 
 **Why?** So a support link can reach office managers and their users without cluttering an administrator's
-menu, and so a stock entry for a product you do not sell stops generating tickets. The
+menu, and so a stock entry for a product you do not sell stops generating tickets. Renaming is for selling
+this portal as your own product: a stock entry can carry the name your documentation gives it, in place,
+without losing the link or the icon behind it. The
 [builder in the console](#first-five-minutes) composes the configuration against your portal's real
 entries, which is much easier than typing labels and hoping they match.
 
@@ -251,7 +254,7 @@ its own minimum is met.
 | **App status** (banner, user column, domain column) | [`RINGOTEL_API_KEY`](./CONFIG.md#RINGOTEL_API_KEY) | That single key is the gate for everything app-related. Absent, the routes 404 and the kit behaves as if the integration did not exist. |
 | **App activation / reset / pre-population** (writes) | `RINGOTEL_API_KEY` **+** [`RINGOTEL_WRITE_DOMAINS`](./CONFIG.md#RINGOTEL_WRITE_DOMAINS) | The write rail is **fail-closed**: empty refuses every write. Set it to the domains you mean, or `*`. |
 | **Sign-in instructions** | `RINGOTEL_API_KEY`, then any of [`RINGOTEL_SSO_SERVICE`](./CONFIG.md#RINGOTEL_SSO_SERVICE), [`SSO_AUTO_ACTIVATE`](./CONFIG.md#SSO_AUTO_ACTIVATE), [`PORTAL_APP_DOWNLOADS`](./CONFIG.md#PORTAL_APP_DOWNLOADS) | All three fail closed. Unset means no SSO is claimed and no links are shown — never a wrong instruction. |
-| **Menu customization** | [`PORTAL_MENUS`](./CONFIG.md#PORTAL_MENUS) alone | No other integration required. With no app configured, static add and hide still work. |
+| **Menu customization** | [`PORTAL_MENUS`](./CONFIG.md#PORTAL_MENUS) alone | No other integration required. With no app configured, static add, hide and rename still work. |
 | **Status banner** | [`STATUS_BANNER_WEBHOOK`](./CONFIG.md#STATUS_BANNER_WEBHOOK) — an `https` endpoint **you host** | ⚠️ It receives the signed-in user's live `ns_t` on every page load. Name only something you control. |
 | **Change events** | [`NS_EVENTS_BASE_URL`](./CONFIG.md#NS_EVENTS_BASE_URL) + [`NS_EVENTS_DOMAINS`](./CONFIG.md#NS_EVENTS_DOMAINS) + [`NS_EVENTS_PATH_SECRET`](./CONFIG.md#NS_EVENTS_PATH_SECRET) + [`NS_API_KEY`](./CONFIG.md#NS_API_KEY) (or admin credentials) + a cron trigger | Also needs a NetSapiens release with the flat `/subscriptions` endpoints. Read [the depth notes](./CONFIG.md#events-reference) before enabling — retiring it has an order. |
 | **Your own gated scripts** | [`PORTAL_SECONDARIES`](./CONFIG.md#PORTAL_SECONDARIES), plus the [`ASSETS`](./CONFIG.md#ASSETS) R2 binding for `r2:` entries | The advanced path. Most deployments start with the built-in bundles and add these later. |

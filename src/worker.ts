@@ -164,9 +164,12 @@ interface Env {
   SSO_AUTO_ACTIVATE?: string;
   /** Stock app-menu labels to hide, fleet-wide (CSV) or per-domain (JSON `{"<domain>":[...],"*":[...]}`). */
   PORTAL_APPS_HIDE?: string;
-  /** JSON `{ "<menu>": { hide?: [...], add?: [...] } }` for the apps/account/management menus, targetable
-   *  by domain/scope/app state (see src/menus.ts). Setting both this AND PORTAL_APPS_HIDE for the apps
-   *  menu's hide list is a config error, not a precedence rule — PORTAL_MENUS supersedes when unambiguous. */
+  /** JSON `{ "<menu>": { hide?: [...], add?: [...], rename?: [...] } }` for the apps/account/management
+   *  menus, targetable by user/domain/scope/app state (see src/menus.ts). A `rename` relabels a stock
+   *  entry in place, keyed on the label the portal ships. Setting both this AND PORTAL_APPS_HIDE for the
+   *  apps menu's hide list is fine: the two hide lists MERGE (see appsHideSources) and the console
+   *  attributes each entry to the setting it came from. It used to be a config error; that was undone
+   *  deliberately, and this comment went on saying otherwise. */
   PORTAL_MENUS?: string;
   /** Domains to treat as Documo-active for menu targeting, until that integration ships and can answer
    *  for itself. A stand-in for a live signal, not a feature flag — see `documoEnabled` in menus.ts. */
@@ -1726,16 +1729,19 @@ export default {
             // WHICH RUNG ANSWERED, per half, reported by the code that chose it. Without this the console
             // would have to re-derive precedence to draw a provenance chip — precedence in a second place,
             // which is the whole reason this endpoint exists. Arrays for the same reason `app` is a list.
-            const matched = {} as Record<string, { hide: unknown[]; add: unknown[] }>;
+            const matched = {} as Record<string, { hide: unknown[]; add: unknown[]; rename: unknown[] }>;
             // AS WRITTEN, beside as resolved. `menuItemAt` interpolates {variable} placeholders and this
             // preview resolves with no user facts, so a plan url is not a config url — an editor matching
             // a drawn row back to its config entry by url fails on exactly the entries that use the
             // feature. Index-aligned with plan.add by construction; see MenuItemPair.
             const rawAdds = {} as Record<string, unknown[]>;
-            const plan = resolveMenus(menuEnv, ctx, matched as never, rawAdds as never);
+            // Same for renames: `to` and `title` carry {variable} too, so the resolved label is not the
+            // configured one, and the console has to be able to show what the operator wrote.
+            const rawRenames = {} as Record<string, unknown[]>;
+            const plan = resolveMenus(menuEnv, ctx, matched as never, rawAdds as never, rawRenames as never);
             // The apps provenance split rides along: the editor renders a legacy-hidden entry as ticked,
             // disabled and attributed, and it cannot work that out from the effective list alone.
-            return json({ ok: true, plan, matched, rawAdds, appsHide: appsHideSources(menuEnv, ctx) }, 200, { ...cors, 'Cache-Control': 'no-store' });
+            return json({ ok: true, plan, matched, rawAdds, rawRenames, appsHide: appsHideSources(menuEnv, ctx) }, 200, { ...cors, 'Cache-Control': 'no-store' });
           } catch (e) {
             // A candidate that does not parse is the normal case while typing one, not a server fault —
             // same 200-with-a-verdict shape the check route uses, so the editor has one thing to read.

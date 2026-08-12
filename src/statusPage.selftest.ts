@@ -1361,16 +1361,20 @@ const DOC = () => buildStatus(
   ok(script.includes('Email Support') && script.includes('Meeting'),
     '[full] carrying what is actually configured, both menus');
   // Emitted per menu from MB_BASE when untouched — the property that makes the output non-destructive.
-  ok(/one\.hide = mbClone\(base\.hide\)/.test(script) && /one\.add = mbClone\(base\.add\)/.test(script),
+  // ⚠️ PER HALF, THROUGH THE TABLE. These read `one.hide` / `one.add` by name until 0.5.1, which is the
+  // spelling that made a third half take the add path: a grep anchored on two names cannot notice a half
+  // that was never wired at all. Anchor on the loop instead, and assert the table it loops over.
+  ok(/MB_HALF_NAMES\.forEach\(function\(hn\)\{?/.test(script) && /one\[hn\] = mbClone\(base\[hn\]\)/.test(script),
     '[full] an untouched menu is emitted from the running config, not omitted');
+  ok(/var MB_HALF_NAMES = \['hide', 'add', 'rename'\]/.test(script),
+    '[full] and every half a menu can carry is in the table that loop reads');
   // A targeted menu is edited RUNG BY RUNG since item 47 — never flattened, which would narrow the rule
   // to a single audience. What stays locked is a shape this cannot round-trip, and it is still SHOWN.
-  ok(/hideLocked: mbIsTargeted\(base\.hide\) && !hideRungs/.test(script)
-    && /addLocked: mbIsTargeted\(base\.add\) && !addRungs/.test(script),
+  ok(/st\[d\.locked\] = mbIsTargeted\(base\[hn\]\) && !rungs/.test(script),
     '[full] a targeted menu is locked only where it cannot be round-tripped');
   ok(/cannot round-trip, so it is not editable here/.test(script),
     '[full] and says so where the operator is looking');
-  ok(/mbShowRungs\(base\.hide, card/.test(script) && /mbShowRungs\(base\.add, card/.test(script),
+  ok(/mbShowRungs\(base\[hname\], card, d\)/.test(script),
     '[full] and shows it anyway — not editable must never mean not readable');
   // Not editable is only half an answer. Saying a rule exists while hiding what it says is the worst of
   // both — you can neither change it nor read it without leaving the tab. Whatever the builder cannot edit,
@@ -1418,8 +1422,13 @@ const DOC = () => buildStatus(
       return script.slice(a, b);
     };
     const src = [
-      slice('function mbIsTargeted', 'function mbRender'),
-      slice('function mbSeed', 'function mbStart'),
+      // ⚠️ THE MARKER CARRIES ITS OPEN PAREN. "function mbSeed" is a PREFIX of "function mbSeedList",
+      // which sits a thousand lines earlier — so this slice silently ran from there instead, and stayed
+      // green only because the oversized region happened to contain mbSeed too. The day a function whose
+      // name starts with "mbStart" landed between them, the slice cut before mbSeed and the harness died
+      // on a name it had been slicing by accident for months.
+      slice('function mbIsTargeted(', 'function mbRender('),
+      slice('function mbSeed(', 'function mbStart('),
       'MB_MENUS=M;MB_BASE=B;MB_SCOPES=S;MB_APPS=A;mbState=ST;mbLive=null;'
         + '({ mbConfig: mbConfig, mbSeed: mbSeed, mbAxisOf: mbAxisOf })',
     ].join('\n');
@@ -1500,7 +1509,7 @@ const DOC = () => buildStatus(
       const flat = build({ apps: { add: [{ label: 'Support', url: 'https://s.example' }] } });
       const st = flat.state.apps;
       ok(!st.addRungs && !st.addLocked, '[targetable] a plain list starts untargeted, as it should');
-      const mk = runInNewContext(`${slice('function mbMakeTargeted', '// \u2500\u2500 WHERE AN EDIT LANDS')}; mbMakeTargeted`, {}) as
+      const mk = runInNewContext(`${slice('function mbMakeTargeted(', '// \u2500\u2500 WHERE AN EDIT LANDS')}; mbMakeTargeted`, {}) as
         (existing: unknown[], axis: string, key: string) => any;
       st.addRungs = mk(st.add, 'app', 'ringotel');
       const after = flat.api.mbConfig() as any;
@@ -1697,6 +1706,8 @@ function builderSource(script: string, exports: string): string {
           // facts, so the plan's url is NOT this url — which is what made every entry using the feature
           // report itself as "not editable here".
           add: { app: { ringotel: [{ label: 'App Admin', url: 'https://admin.example/?ext={ext}' }] }, '*': [] },
+          // A half this editor does not edit, drawn read-only in the picture.
+          rename: [{ from: 'User Portal', to: 'My Dashboard' }],
         },
         account: { hide: { scopes: { Reseller: [] }, '*': ['My Account'] } },
       }) },
@@ -1806,6 +1817,20 @@ function builderSource(script: string, exports: string): string {
     `[dom] a hidden stock entry is a struck-through row in the menu (${rowText.join(' | ')})`);
   ok(rows.some((r) => r.className.includes('add') && r.textContent.includes('App Admin')),
     '[dom] and an added entry is a marked row in the same menu, not a second section');
+
+  // ── A RENAMED ROW READS AS THE READER SEES IT, and says what it used to be ────────────────────────
+  // The panel's job is the menu as that person gets it, so the row is the new name. The stock name is
+  // what every OTHER surface still uses — the hide box on this very row, a config you write, a capture
+  // you take — so it goes in the tag beside the rule rather than being dropped.
+  {
+    const ren = rows.find((r) => r.textContent.includes('My Dashboard'));
+    ok(!!ren, `[rename] the picture draws the new name (${rows.map((r) => r.textContent).join(' | ')})`);
+    ok(!!ren && ren.textContent.includes('was User Portal'),
+      `[rename] and names the stock entry it came from (${ren?.textContent})`);
+    ok(!rows.some((r) => r.className.includes('hid') && r.textContent.includes('My Dashboard')),
+      '[rename] a rename is not drawn as a hide');
+
+  }
 
   // ⚠️ THE IDENTITY OF A DRAWN ROW IS THE ENTRY AS WRITTEN, not as resolved. This entry's url carries a
   // {variable}; the preview resolves with no user facts, so the plan's url is the template with the
@@ -2050,10 +2075,15 @@ function builderSource(script: string, exports: string): string {
   // One line PER HALF that has an answer — this menu now has an add target too, carved by the seeding
   // block above, and each half's line must name its own target rather than the count being pinned.
   const whereLines = host.children[0]!.all('.mbwhere').map((w) => w.textContent);
-  ok(whereLines.some((w) => w.startsWith('Hiding lands in') && w.includes('ringotel')),
-    `[dom] and a persistent line says where hides are landing while the answer is stuck (${whereLines.join(' | ')})`);
-  ok(whereLines.every((w) => /^(Hiding|Adding) lands in \S/.test(w)),
+  ok(whereLines.some((w) => w.startsWith('Hiding the next item lands in') && w.includes('ringotel')),
+    `[dom] and a persistent line says where the next hide will land while the answer is stuck (${whereLines.join(' | ')})`);
+  ok(whereLines.every((w) => /^(Hiding|Adding|Renaming) the next item lands in \S/.test(w)),
     '[dom] each line names its own half and a target, rather than being a bare marker');
+  // ⚠️ THE NEXT ONE. Re-aiming has never moved work already done, so the present tense was a false
+  // statement about the config the moment an operator re-aimed after an edit — the chip above the menu
+  // and the rail both named the rule the edit actually went into, and this line named a different one.
+  ok(!whereLines.some((w) => /^(Hiding|Adding|Renaming) lands in/.test(w)),
+    '[dom] and says THE NEXT ITEM, because this line governs the next edit and not the ones already made');
 
   const box2 = host.children[0]!.all('.fm').find((r) => r.textContent.includes('User Portal'))!.all('input')[0]!;
   box2.checked = true;
@@ -2063,6 +2093,15 @@ function builderSource(script: string, exports: string): string {
     { apps: { hide: { app: { ringotel: string[] } } } };
   ok(cfg2.apps.hide.app.ringotel.includes('User Portal'),
     '[dom] it goes straight to the stuck target');
+  // ⚠️ AND IT WROTE THE STOCK NAME. That row is drawn as "My Dashboard" — a rename rule renames it — so
+  // this is the identity rule at the one place an operator meets it: you tick what you see, and the
+  // config records what the portal calls it. A hide keyed on the drawn name would match nothing.
+  ok(!JSON.stringify(cfg2.apps.hide).includes('My Dashboard'),
+    `[rename] ticking a renamed row hides it by its ORIGINAL name, not the one on screen (${JSON.stringify(cfg2.apps.hide)})`);
+  // ⚠️ AND THE ROW NOW CARRIES BOTH FACTS. Hidden by one rule and renamed by another is the ordinary
+  // case on a real deployment, not a corner — dev hides an entry for one scope while renaming it for
+  // everyone. Reporting only the hide left a row showing a name the portal has never used with nothing
+  // on it saying where that name came from. Found by looking at the live console, not by a test.
 
   // THE RAIL, and the one property that decides whether it helps or repeats the failure it replaces: each
   // rule is filed under the menu it belongs to. A Reseller answer sitting beside the Management panel
@@ -2391,15 +2430,31 @@ function builderSource(script: string, exports: string): string {
 {
   const written = {
     apps: {
+      // ⚠️ A HALF THIS EDITOR DOES NOT MODEL, written FIRST so position is asserted too. Rebuilding a
+      // menu from only the halves it understands deletes the rest — and appending the leftovers after
+      // hide/add would reorder the block, which reads as a change on a menu nobody touched.
+      rename: [{ from: 'SNAPAnalytics', to: 'Analytics Dashboard' }],
       // A key that means "nothing", written down. Dropping it is not tidying — it is a diff on an
       // untouched menu.
       hide: [],
       // Key order as the operator typed it, and a key this editor has no idea about.
-      add: [{ url: 'https://a.example/x', label: 'Alpha', note: 'why this is here' }],
+      add: [
+        { url: 'https://a.example/x', label: 'Alpha', note: 'why this is here' },
+        // ⚠️ A DELIBERATE EMPTY TOOLTIP on an entry nobody edited. mbEntryIn flattened absent and "" to
+        // "" on the way in, and mbEntryOut deleted a falsy title on the way out, so this key vanished
+        // from the emitted config. Inert to the resolver — which is exactly why it is pure diff noise on
+        // an untouched menu, the one thing the _o round-trip exists to prevent.
+        { label: 'Gamma', url: 'https://a.example/z', title: '' },
+      ],
     },
     account: {
       hide: { scopes: { Reseller: [] }, '*': ['My Account'] },
       add: { '*': [{ label: 'Beta', title: 'tip', url: 'https://b.example/y', note: 'keep me' }] },
+    },
+    // A menu whose ONLY key is the unmodelled half. The emit gate used to ask whether hide or add was
+    // defined, so this menu vanished entirely — its remainder faithfully computed and then discarded.
+    management: {
+      rename: [{ from: 'Add-on Report', to: 'Usage', title: '' }],
     },
   };
   const raw = JSON.stringify(written);
@@ -2425,6 +2480,822 @@ function builderSource(script: string, exports: string): string {
   // And the wrangler line is the same value, escaped — the thing actually pasted into the config file.
   ok(dom.byId['spkmb-wr']!.textContent === `"PORTAL_MENUS": ${JSON.stringify(raw)}`,
     '[roundtrip] and the wrangler line escapes that same value, not a re-serialised one');
+}
+
+
+// ── A ROW THAT IS BOTH HIDDEN AND RENAMED SAYS BOTH ──────────────────────────────────────────────────
+// Not a corner case: dev hides an entry for one scope while renaming it for everyone, so this is the
+// first thing a real config produces. Reporting only the hide left the row showing a name the portal has
+// never used, with nothing on it saying where that name came from — found by looking at the live console
+// rather than by any test here, which is why it gets one now.
+{
+  const BOTH = JSON.stringify({ apps: {
+    hide: ['User Portal'],
+    rename: [{ from: 'User Portal', to: 'My Dashboard' }],
+  } });
+  const d = DOC();
+  d.menus.raw = BOTH;
+  const html = statusHtml(d);
+  const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+  const dom = makeDom(['spkmb-status', 'spkmb-menus', 'spkmb-out', 'spkmb-json', 'spkmb-wr', 'spkmb-verdict',
+    'spkmb-reset', 'spkmb-scope', 'spkmb-apps', 'spkmb-domain', 'spkmb-appswrap', 'spkmb-changed',
+    'spkmb-caveat', 'spkmb-capture', 'spkmb-domclear', 'spkmb-domnote', 'spkmb-rules']);
+  const api = runInNewContext(
+    builderSource(script, '{ mbStart: mbStart, mbRebuild: mbRebuild, mbOnResolve: mbOnResolve, mbPersona: mbPersona }'),
+    dom.ctx,
+  ) as {
+    mbStart: (live: unknown) => void;
+    mbRebuild: () => void;
+    mbOnResolve: (rv: unknown, rid?: unknown) => void;
+    mbPersona: { scope: string; apps: string[]; domain: string };
+  };
+  api.mbStart({ apps: { present: true, entries: ['User Portal', 'Attendant Console'] },
+    account: { present: false, entries: [] }, management: { present: false, entries: [] } });
+  dom.flush();
+  const ctx = { domain: api.mbPersona.domain, app: api.mbPersona.apps, scope: api.mbPersona.scope };
+  const matched = {} as never;
+  const ids = dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.resolveRequest).map((m) => m[SPK_BRIDGE.idKey]);
+  api.mbOnResolve({
+    plan: resolveMenus({ PORTAL_MENUS: BOTH } as never, ctx as never, matched),
+    matched,
+    appsHide: appsHideSources({ PORTAL_MENUS: BOTH } as never, ctx as never),
+  }, ids[ids.length - 1]);
+
+  const row = dom.byId['spkmb-menus']!.children[0]!.all('.fm').find((r) => r.textContent.includes('My Dashboard'));
+  ok(!!row, `[both] the renamed row is drawn under its new name (${dom.byId['spkmb-menus']!.children[0]!.all('.fm').map((r) => r.textContent).join(' | ')})`);
+  ok(!!row && row.className.includes('hid') && /hidden/.test(row.textContent),
+    `[both] and says it is hidden (${row?.textContent})`);
+  ok(!!row && row.textContent.includes('was User Portal'),
+    `[both] and STILL says where its name came from — the label is the rename's doing, so the tag admits it (${row?.textContent})`);
+  // ON ITS OWN LINE. Both facts concatenated ran the tag to the full width of the card and wrapped the
+  // label beside it, which is how a row with two rules on it became the least readable one on the page.
+  ok(!!row && row.all('.wasline').length === 1 && row.all('.wasline')[0]!.textContent === 'was User Portal',
+    '[both] on its own line, rather than concatenated into one tag as wide as the card');
+  // THE IDENTITY RULE, said where it stops being visible. Every row reads as the person sees it, which
+  // makes it invisible that the tick box beside a renamed row is keyed on a name no longer on the row.
+  const foot = dom.byId['spkmb-menus']!.children[0]!.all('.fmfoot').map((f) => f.textContent).join(' | ');
+  ok(/renamed/i.test(foot) && /as the portal ships it/.test(foot),
+    `[both] and the menu says every other rule still names the entry as the portal ships it (${foot})`);
+}
+
+// ── CREATING AND EDITING A RENAME IN THE PICTURE ─────────────────────────────────────────────────────
+// The half shipped config-only, so the builder could draw a rename and not produce one. This is the
+// editing surface, driven end to end: the harness answers every preview request with the REAL resolver
+// run over the CANDIDATE config the console actually asked about, so the picture follows the edits
+// rather than a canned reply that cannot disagree with them.
+{
+  const IDS = ['spkmb-status', 'spkmb-menus', 'spkmb-out', 'spkmb-json', 'spkmb-wr', 'spkmb-verdict',
+    'spkmb-reset', 'spkmb-scope', 'spkmb-apps', 'spkmb-domain', 'spkmb-appswrap', 'spkmb-changed',
+    'spkmb-caveat', 'spkmb-capture', 'spkmb-domclear', 'spkmb-domnote', 'spkmb-rules'];
+
+  type Api = {
+    mbStart: (live: unknown) => void;
+    mbRebuild: () => void;
+    mbOnResolve: (rv: unknown, rid?: unknown) => void;
+    mbConfig: () => Record<string, any>;
+    mbStateRaw: () => Record<string, any>;
+    mbPersona: { scope: string; apps: string[]; domain: string };
+  };
+
+  /** One console, seeded with `raw`, showing `entries` on the apps menu, driven to a standstill. */
+  const boot = (raw: string, entries: string[], scope = 'Office Manager', domain = '') => {
+    const d = DOC();
+    d.menus.raw = raw;
+    const html = statusHtml(d);
+    const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+    const dom = makeDom(IDS);
+    const api = runInNewContext(
+      builderSource(script, '{ mbStart: mbStart, mbRebuild: mbRebuild, mbOnResolve: mbOnResolve,'
+        + ' mbConfig: mbConfig, mbPersona: mbPersona, mbStateRaw: function(){ return mbState; } }'),
+      dom.ctx,
+    ) as Api;
+    api.mbPersona.scope = scope;
+    api.mbPersona.domain = domain;
+    api.mbStart({ apps: { present: true, entries },
+      account: { present: false, entries: [] }, management: { present: false, entries: [] } });
+    /**
+     * ⚠️ THE REPLY IS RESOLVED FROM THE QUESTION, not from a fixture. A canned reply cannot disagree with
+     * the config the console is emitting, which is precisely the disagreement every assertion below is
+     * about: create a rename, and the row must come back renamed BECAUSE the resolver says so.
+     */
+    const settle = (max = 16) => {
+      let rounds = 0;
+      const asks = () => dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.resolveRequest);
+      while (dom.pending() && rounds < max) {
+        const before = asks().length;
+        dom.flush();
+        const now = asks();
+        for (let i = before; i < now.length; i++) {
+          const q = now[i]![SPK_BRIDGE.resolveKey] as { c: string; domain: string; scope: string; apps: string[] };
+          const env = { PORTAL_MENUS: q.c } as never;
+          const ctx = { domain: q.domain, app: q.apps, scope: q.scope } as never;
+          const matched = {} as never, rawAdds = {} as never, rawRenames = {} as never;
+          const plan = resolveMenus(env, ctx, matched, rawAdds, rawRenames);
+          api.mbOnResolve({ plan, matched, rawAdds, rawRenames, appsHide: appsHideSources(env, ctx) },
+            now[i]![SPK_BRIDGE.idKey]);
+        }
+        rounds++;
+      }
+      return rounds;
+    };
+    settle();
+    const card = () => dom.byId['spkmb-menus']!.children[0]!;
+    const row = (text: string) => card().all('.fm').find((r) => r.textContent.includes(text));
+    const btn = (host: any, re: RegExp) => host.all('button').find((b: any) => re.test(b.textContent));
+    const emitted = () => JSON.parse(dom.byId['spkmb-json']!.textContent || '{}');
+    return { dom, api, settle, card, row, btn, emitted };
+  };
+
+  // ── creating one, from the row itself ──────────────────────────────────────────────────────────────
+  {
+    const t = boot(JSON.stringify({ apps: { hide: ['SNAPmobile Web'] } }), ['User Portal', 'SNAPmobile Web']);
+    const start = t.btn(t.row('User Portal')!, /^rename$/);
+    ok(!!start, `[renew] a stock row offers to rename itself (${t.row('User Portal')?.textContent})`);
+    start!.fire('click');
+    t.settle();
+    // Structural, so it asks WHERE — and in the rename half's own words, not the add half's.
+    const fork = t.card().all('.mbfork')[0];
+    ok(!!fork && /rename it/i.test(fork.textContent),
+      `[renew] and asks which rule should carry it, in this half's own words (${fork?.all('strong')[0]?.textContent})`);
+    t.btn(fork!, /everyone/)!.fire('click');
+    t.settle();
+
+    const form = t.card().all('.fmform')[0];
+    ok(!!form, '[renew] answering opens the form');
+    // ⚠️ THE ORIGINAL IS PINNED, NOT TYPED. This is the whole enforcement of "no chained rename": the
+    // control appears only on stock rows, which enforces nothing if the form then lets someone type an
+    // original equal to another rule's output.
+    ok(!!form && form.all('.fmpin').length === 1 && form.all('.fmpin')[0]!.textContent.includes('User Portal'),
+      '[renew] with the original name pinned to the row');
+    ok(!!form && !form.all('input').some((i) => i.value === 'User Portal'),
+      '[renew] and in no input — there is no way to type an original name, which is what stops a chain');
+
+    const to = form!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Analytics Dashboard';
+    to.fire('input');
+    t.settle();
+    ok(JSON.stringify(t.emitted().apps.rename) === JSON.stringify([{ from: 'User Portal', to: 'Analytics Dashboard' }]),
+      `[renew] typing a new name writes the rename, keyed on the original (${JSON.stringify(t.emitted().apps.rename)})`);
+    ok(JSON.stringify(t.emitted().apps.hide) === JSON.stringify(['SNAPmobile Web']),
+      '[renew] and the menu\'s other half is untouched');
+
+    t.btn(form!, /^Done$/)!.fire('click');
+    t.settle();
+    const done = t.row('Analytics Dashboard');
+    ok(!!done && done.textContent.includes('was User Portal'),
+      `[renew] the row comes back under its new name, saying where it came from (${done?.textContent})`);
+    ok(!!done && !!t.btn(done, /revert/) && !!t.btn(done, /edit name/),
+      '[renew] and now offers to edit or revert it');
+    // The change log is the audit trail the panel leans on, so a rename has to reach it under its own name.
+    const log = t.dom.byId['spkmb-changed']!.textContent;
+    ok(/ren/.test(log) && /User Portal/.test(log) && /Analytics Dashboard/.test(log),
+      `[renew] and the change log records it as its own kind of change (${log.slice(0, 90)})`);
+  }
+
+  // ── THE REGRESSION THE HALVES TABLE EXISTS FOR ─────────────────────────────────────────────────────
+  // mbEnsure read "half === 'hide' ? hideRungs : addRungs", so a third half carving a new rung wrote it
+  // into the ADD half's state — where the add half would then emit it as added entries. Nothing about
+  // the wording would have looked wrong; the config would just have been.
+  {
+    const t = boot(JSON.stringify({ apps: { add: [{ label: 'Alpha', url: 'https://a.example' }] } }),
+      ['User Portal']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    // A CARVE, not "everyone" — the flat path never builds a rung, so it cannot show this bug.
+    const fork = t.card().all('.mbfork')[0]!;
+    t.btn(fork, /just Office Manager/)!.fire('click');
+    t.settle();
+    const st = t.api.mbStateRaw().apps;
+    ok(!!st.renameRungs, '[half] carving a rung for a rename creates the RENAME half\'s rungs');
+    ok(!st.addRungs, '[half] and leaves the add half flat, where the operator left it');
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Dashboard'; to.fire('input');
+    t.settle();
+    const out = t.emitted().apps;
+    ok(JSON.stringify(out.add) === JSON.stringify([{ label: 'Alpha', url: 'https://a.example' }]),
+      `[half] so nothing lands in the added entries (${JSON.stringify(out.add)})`);
+    ok(!!out.rename && !!out.rename.scopes && JSON.stringify(out.rename.scopes['Office Manager'])
+      === JSON.stringify([{ from: 'User Portal', to: 'Dashboard' }]),
+      `[half] and the rename lands in the rule that was asked for (${JSON.stringify(out.rename)})`);
+  }
+
+  // ── THE TOOLTIP'S THREE STATES, THROUGH THE UI AND BACK OUT ────────────────────────────────────────
+  // A text box offers two states and this needs three: absent means leave the portal's own tooltip alone,
+  // "" means remove it, and a string sets it. The picker IS the presence, so they cannot desync.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: [{ from: 'User Portal', to: 'Dash' }] } }), ['User Portal']);
+    t.btn(t.row('Dash')!, /edit name/)!.fire('click');
+    t.settle();
+    const form = () => t.card().all('.fmform')[0]!;
+    const field = (cls: string) => form().all('input').find((i) => new RegExp(` ${cls}$`).test(` ${i.className}`))!;
+    const mode = () => form().all('select')[0]!;
+    ok(mode().value === 'keep', '[title] a rename written with no tooltip key opens on "leave it alone"');
+    ok(field('mbin-title').hidden, '[title] and the text box is not even offered, because there is nothing to type');
+
+    mode().value = 'set'; mode().fire('change');
+    field('mbin-title').value = 'Usage reports'; field('mbin-title').fire('input');
+    t.settle();
+    ok(t.emitted().apps.rename[0].title === 'Usage reports',
+      `[title] setting one writes it (${JSON.stringify(t.emitted().apps.rename[0])})`);
+
+    mode().value = 'clear'; mode().fire('change');
+    t.settle();
+    ok(Object.prototype.hasOwnProperty.call(t.emitted().apps.rename[0], 'title')
+      && t.emitted().apps.rename[0].title === '',
+      `[title] removing one writes the empty string, which is the instruction to remove it (${JSON.stringify(t.emitted().apps.rename[0])})`);
+
+    mode().value = 'keep'; mode().fire('change');
+    t.settle();
+    ok(!Object.prototype.hasOwnProperty.call(t.emitted().apps.rename[0], 'title'),
+      `[title] and going back to "leave it alone" DROPS THE KEY — the one state a truthiness test cannot express (${JSON.stringify(t.emitted().apps.rename[0])})`);
+    // The three forms are not this file's opinion: the resolver is what has to tell them apart.
+    const three = JSON.stringify({ apps: { rename: [
+      { from: 'A', to: 'a' }, { from: 'B', to: 'b', title: '' }, { from: 'C', to: 'c', title: 'tip' }] } });
+    const plan = resolveMenus({ PORTAL_MENUS: three } as never,
+      { domain: 'x.example', app: [], scope: 'Office Manager' } as never);
+    ok(!('title' in plan.apps.rename[0]!) && plan.apps.rename[1]!.title === '' && plan.apps.rename[2]!.title === 'tip',
+      '[title] and the resolver keeps all three distinct end to end');
+  }
+
+  // ── REVERTING ACTS WHERE THE THING IS ──────────────────────────────────────────────────────────────
+  // Same principle as unhiding: "stop renaming this" has one honest reading, so it comes out of every
+  // rule renaming it for this reader — not only the one the picture happens to name.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: {
+      scopes: { 'Office Manager': [{ from: 'User Portal', to: 'Dash' }] },
+      '*': [{ from: 'User Portal', to: 'Portal' }],
+    } } }), ['User Portal']);
+    ok(!!t.row('Dash'), `[revert] the more specific rule answers, as precedence says (${t.row('User Portal')?.textContent})`);
+    t.btn(t.row('Dash')!, /revert/)!.fire('click');
+    t.settle();
+    const out = t.emitted().apps.rename;
+    ok(JSON.stringify(out.scopes['Office Manager']) === '[]',
+      `[revert] the rule that was answering loses it (${JSON.stringify(out)})`);
+    // ⚠️ THE DEFAULT KEEPS ITS ENTRY, because it was never renaming this reader — mbOwners only reaches
+    // the rules that MATCHED. Reverting is not "delete every rename with this name from the config".
+    ok(JSON.stringify(out['*']) === JSON.stringify([{ from: 'User Portal', to: 'Portal' }]),
+      '[revert] and a rule that was not answering this reader is left alone');
+    ok(!!t.row('Portal'), '[revert] so the row falls through to the rule underneath, which is what the config now says');
+  }
+
+  // ── A CAPTURE OLDER THAN THE IDENTITY RULE ─────────────────────────────────────────────────────────
+  // menuLabels reports the original now, so a fresh capture is stock — but one already in an operator's
+  // browser holds the RENAMED name. Offering to rename that row is exactly how a chain gets written.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: [{ from: 'User Portal', to: 'My Dashboard' }] } }),
+      ['My Dashboard']);
+    const r = t.row('My Dashboard')!;
+    ok(!t.btn(r, /^rename$/) && !t.btn(r, /edit name/),
+      `[stale] a row whose label is some rule's OUTPUT is not offered a rename (${r.textContent})`);
+    ok(/from a rename/.test(r.textContent) && !/stock/.test(r.textContent) && /recapture/.test(r.textContent),
+      `[stale] and says what it is and what to do about it, rather than calling it stock (${r.textContent})`);
+  }
+
+  // ── ...BUT A GENUINE STOCK ROW THAT MERELY SHARES THE NAME IS NOT THAT ─────────────────────────────
+  // ⚠️ The test above fires on "this label is some rule's output". So did the code — which caught a real
+  // stock entry whose shipped name collides with another rule's new name, called it "from a rename", and
+  // told the operator to recapture the role. Recapturing changes nothing: the row is genuinely called
+  // that. The signature of a stale capture is that the renamed entry is MISSING from the page, replaced
+  // by its own output; when both are here, there is nothing wrong with the second row.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: [{ from: 'User Portal', to: 'Reports' }] } }),
+      ['User Portal', 'Reports']);
+    const renamed = t.row('Reports')!;
+    ok(!!t.btn(t.row('User Portal')!, /edit name/) || /Reports/.test(renamed.textContent),
+      '[collide] the premise: one row is renamed TO the name another row genuinely has');
+    const stock = t.card().all('.fm').filter((r) => /Reports/.test(r.textContent))
+      .find((r) => !/was User Portal/.test(r.textContent))!;
+    ok(!!stock, `[collide] the stock row is drawn (${t.card().all('.fm').map((r) => r.textContent).join(' | ')})`);
+    ok(!!t.btn(stock, /^rename$/),
+      `[collide] and IS offered the control — it is stock, whatever another rule renames to (${stock.textContent})`);
+    ok(!/recapture/.test(stock.textContent),
+      '[collide] with no advice that would have changed nothing');
+  }
+
+  // ── THE RAIL SEES THE HALF ─────────────────────────────────────────────────────────────────────────
+  // It iterated a literal ['hide','add'], so a rename-only rule was invisible there — and the delete
+  // button lives ONLY in the rail, which made such a rule impossible to remove from the console at all.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: {
+      scopes: { 'Office Manager': [{ from: 'User Portal', to: 'Dash' }] } } } }), ['User Portal']);
+    const rail = t.dom.byId['spkmb-rules']!;
+    const rule = rail.all('.rule').find((x) => x.textContent.includes('Office Manager'));
+    ok(!!rule, `[rail] a rename-only rule is listed (${rail.textContent.slice(0, 120)})`);
+    ok(!!rule && /renames 1/.test(rule.textContent), `[rail] and counted (${rule?.textContent})`);
+    ok(!!rule && rule.className.includes('live'), '[rail] and marked as applying to the reader on screen');
+    const rm = rule!.all('button').find((b) => /remove this rule/.test(b.textContent));
+    ok(!!rm, '[rail] and can be removed — the only place a rung can be, which is why a missing half stranded one');
+    rm!.fire('click');
+    t.settle();
+    ok(!t.emitted().apps.rename.scopes['Office Manager'],
+      `[rail] removing it takes the rung out (${JSON.stringify(t.emitted().apps)})`);
+  }
+
+  // ── THE FORK IS PER HALF ────────────────────────────────────────────────────────────────────────────
+  // The answer sticks for the half it was given for, and only that half. A rename answer that also
+  // silenced the hide question would land a hide in a rule nobody chose for it.
+  {
+    const t = boot(JSON.stringify({ apps: {} }), ['User Portal', 'SNAPmobile Web']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    ok(t.card().all('.mbwhere').some((w) => /Renaming the next item lands in/.test(w.textContent)),
+      `[fork] the answer sticks, and the line says so in this half's words (${t.card().all('.mbwhere').map((w) => w.textContent).join(' | ')})`);
+    t.btn(t.row('SNAPmobile Web')!, /^rename$/)!.fire('click');
+    t.settle();
+    ok(t.card().all('.mbfork').length === 0, '[fork] a second rename does not ask again');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    const box = t.row('SNAPmobile Web')!.all('input')[0]!;
+    box.checked = true; box.fire('change');
+    t.settle();
+    ok(t.card().all('.mbfork').length === 1,
+      '[fork] but the hide half still asks — an answer is about one half, not about the menu');
+  }
+
+  // ── "CHANGE" HAS TO CHANGE SOMETHING, NOW ──────────────────────────────────────────────────────────
+  // It cleared the sticky answer and stopped, so the line vanished, the picture was byte-identical, and
+  // the effect only surfaced whenever the operator next ticked something — David, on dev: "clicking it
+  // makes it go away, but nothing visually changes." A button called change opens the thing it changes.
+  {
+    const t = boot(JSON.stringify({ apps: {} }), ['User Portal']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /everyone/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    const where = t.card().all('.mbwhere')[0];
+    ok(!!where && /Renaming the next item lands in/.test(where.textContent), '[change] the line names where edits land');
+    t.btn(where!, /^change$/)!.fire('click');
+    t.settle();
+    ok(t.card().all('.mbfork').length === 1,
+      '[change] and clicking it re-asks the question, rather than clearing the answer invisibly');
+    ok(/re-aiming|nothing is waiting/i.test(t.card().all('.mbfork')[0]!.textContent),
+      `[change] saying nothing is waiting on it, which is the difference from the same question mid-edit (${t.card().all('.mbfork')[0]?.all('p')[0]?.textContent})`);
+    // ⚠️ AND IT CARVES NOTHING. The held-edit path runs the callback after mbEnsure has already created
+    // the rung, so routing an answer-with-no-edit through it would carve a rule from a click that only
+    // meant to re-aim the next one — and then throw on the null callback.
+    const before = JSON.stringify(t.emitted());
+    t.btn(t.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    ok(JSON.stringify(t.emitted()) === before,
+      `[change] answering it creates no rule on its own — it only re-aims (${JSON.stringify(t.emitted())})`);
+    ok(t.card().all('.mbwhere').some((w) => /Renaming the next item lands in/.test(w.textContent)
+      && /Office Manager/.test(w.textContent)),
+      `[change] and the line comes back naming the new target (${t.card().all('.mbwhere').map((w) => w.textContent).join(' | ')})`);
+  }
+
+  // ── THE DEFAULT STAYS AIMABLE AFTER A CARVE ────────────────────────────────────────────────────────
+  // The whole-menu default was offered only when NOTHING else was, so the moment a scope rule existed it
+  // became the one audience you could never aim back at — and carving is what CREATES that default, so
+  // it existed and was unreachable. David, on dev: "click Change and it ONLY shows Just Reseller still."
+  {
+    const t = boot(JSON.stringify({ apps: {} }), ['User Portal', 'SNAPmobile Web']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbwhere')[0]!, /^change$/)!.fire('click');
+    t.settle();
+    const opts = t.card().all('.mbfork')[0]!.all('button').map((b) => b.textContent);
+    ok(opts.some((o) => /everyone else/.test(o)),
+      `[aim] the whole-menu default the carve created is offered, not stranded (${opts.join(' | ')})`);
+    ok(opts.some((o) => /Office Manager/.test(o)),
+      '[aim] beside the rule that is answering right now');
+    // ⚠️ AND IT SAYS WHAT IT WOULD DO. While a scope rule names this reader the default does not answer
+    // them, so an edit landing there changes nothing on screen — useful, and a trap unless said here.
+    ok(/NOT the one on screen/.test(t.card().all('.mbfork')[0]!.textContent),
+      `[aim] with the consequence at the moment of deciding (${t.card().all('.mbfork')[0]!.all('.optnote').map((n) => n.textContent).join(' | ')})`);
+  }
+
+  // ── UNDOING ONE CHANGE, FROM THE LOG ───────────────────────────────────────────────────────────────
+  // Reset was the only way back and it discards everything. David: "it feels like I need to do a full
+  // reset to start fresh but that may not always be needed."
+  {
+    const t = boot(JSON.stringify({ apps: { hide: [] } }), ['User Portal', 'SNAPmobile Web']);
+    const log = () => t.dom.byId['spkmb-changed']!;
+    // BY WHAT IT MEANS, not by position: a row can also carry its rule name as a control now.
+    const xOf = (r: any) => r.all('button').find((b: any) => b.textContent === '\u00d7');
+    const undos = () => log().all('.chgrow').map(xOf).filter(Boolean);
+
+    // Two changes, one after the other, so undoing the first cannot be a disguised reset.
+    const box = t.row('SNAPmobile Web')!.all('input')[0]!;
+    box.checked = true; box.fire('change');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /everyone/)!.fire('click');
+    t.settle();
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    // Its own half, so its own question — see [fork] above.
+    t.btn(t.card().all('.mbfork')[0]!, /everyone/)!.fire('click');
+    t.settle();
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Dash'; to.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    ok(log().all('.chgrow').length === 2, `[undo] two changes are logged (${log().textContent.slice(0, 80)})`);
+    ok(undos().length === 2, '[undo] and each offers to be taken back on its own');
+
+    // Newest first, so the SECOND row is the hide — undo it and the rename must survive untouched.
+    xOf(log().all('.chgrow')[1]!)!.fire('click');
+    t.settle();
+    const out = t.emitted().apps;
+    ok(JSON.stringify(out.hide) === '[]', `[undo] the hide comes back off (${JSON.stringify(out.hide)})`);
+    ok(JSON.stringify(out.rename) === JSON.stringify([{ from: 'User Portal', to: 'Dash' }]),
+      `[undo] and the LATER change is untouched — this is not a reset wearing a smaller button (${JSON.stringify(out.rename)})`);
+    ok(log().all('.chgrow').length === 1,
+      '[undo] the log drops it, because it records what the config carries and not what was once typed');
+    ok(!t.row('SNAPmobile Web')!.all('input')[0]!.checked, '[undo] and the picture follows');
+
+    // ⚠️ CARVING A RULE HAS NO INVERSE HERE. Later edits can be living inside the new rung, so removing
+    // it would take them too — the rail's own control is where that happens, beside the count.
+    const t2 = boot(JSON.stringify({ apps: {} }), ['User Portal']);
+    t2.btn(t2.row('User Portal')!, /^rename$/)!.fire('click');
+    t2.settle();
+    t2.btn(t2.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t2.settle();
+    const to2 = t2.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to2.value = 'Dash'; to2.fire('input');
+    t2.btn(t2.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t2.settle();
+    const rows = t2.dom.byId['spkmb-changed']!.all('.chgrow');
+    const rule = rows.find((r) => /rule/.test(r.all('.kind')[0]!.textContent))!;
+    const x2 = (r: any) => r.all('button').find((b: any) => b.textContent === '\u00d7');
+    ok(!!rule && !x2(rule),
+      `[undo] carving a rule offers none, rather than one that silently discards what moved in (${rule?.textContent})`);
+    ok(rows.some((r) => !!x2(r)),
+      '[undo] while the rename made in the same breath still does');
+  }
+
+  // ── DELETING A RULE IS THE ONE WITH NO OTHER ROUTE BACK ────────────────────────────────────────────
+  // Once a rung is gone it is gone from the rail too, so there is nowhere else to undo it from. Its
+  // inverse has to restore the contents AND the position — a rung that comes back at the end of its axis
+  // is a diff on a rule the operator only meant to look at.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: { scopes: {
+      'Office Manager': [{ from: 'User Portal', to: 'Dash' }],
+      Reseller: [{ from: 'User Portal', to: 'Portal' }],
+      'Basic User': [{ from: 'User Portal', to: 'Home' }],
+    } } } }), ['User Portal']);
+    const before = JSON.stringify(t.emitted());
+    const rule = t.dom.byId['spkmb-rules']!.all('.rule').find((x) => x.textContent.includes('Reseller'))!;
+    rule.all('button').find((b) => /remove this rule/.test(b.textContent))!.fire('click');
+    t.settle();
+    ok(!t.emitted().apps.rename.scopes.Reseller, '[rung] the rung goes');
+    const undo = t.dom.byId['spkmb-changed']!.all('.chgrow')[0]!.all('button')
+      .find((b) => b.textContent === '\u00d7');
+    ok(!!undo, '[rung] and the log offers it back, since the rail no longer can');
+    undo!.fire('click');
+    t.settle();
+    ok(JSON.stringify(t.emitted()) === before,
+      `[rung] contents and POSITION both — a rung restored at the end of its axis is a diff on a rule nobody edited\n  got  ${JSON.stringify(t.emitted().apps.rename)}\n  want ${JSON.parse(before).apps.rename && JSON.stringify(JSON.parse(before).apps.rename)}`);
+  }
+
+  // ── CARRYING ONE CHANGE TO ANOTHER RULE, FROM THE LOG ──────────────────────────────────────────────
+  // The rule name in the log reads as the record of a choice, so it is where an operator reaches to
+  // change it. What it opens is a LIST and not a toggle: there are four ways to name a reader, not two,
+  // and picking one can carve a rung that takes over an audience another rule was answering.
+  {
+    const t = boot(JSON.stringify({ apps: {} }), ['User Portal']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Dash'; to.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    const log = () => t.dom.byId['spkmb-changed']!;
+    const renRow = () => log().all('.chgrow').find((r) => /Dash/.test(r.textContent))!;
+    ok(JSON.stringify(t.emitted().apps.rename.scopes['Office Manager'])
+      === JSON.stringify([{ from: 'User Portal', to: 'Dash' }]), '[move] it lands where it was aimed');
+    const link = renRow().all('button').find((b) => /Office Manager/.test(b.textContent));
+    ok(!!link, `[move] and the log names that rule as a control (${renRow().textContent})`);
+    link!.fire('click');
+    t.settle();
+    const pick = log().all('.chgpick')[0];
+    ok(!!pick && /Move it to/.test(pick.textContent), '[move] clicking it offers where else it could live');
+    ok(!!pick && !pick.all('button').some((b) => /Office Manager/.test(b.textContent)),
+      `[move] and never back to where it already is (${pick?.all('button').map((b) => b.textContent).join(' | ')})`);
+
+    const dflt = pick!.all('button').find((b) => /everyone else/.test(b.textContent))!;
+    ok(!!dflt, '[move] including the whole-menu default');
+    dflt.fire('click');
+    t.settle();
+    const out = t.emitted().apps.rename;
+    ok(JSON.stringify(out.scopes['Office Manager']) === '[]',
+      `[move] choosing one takes it out of the rule it was in (${JSON.stringify(out)})`);
+    // ⚠️ THE DESTINATION WAS SEEDED WITH A COPY OF THIS VERY RENAME — carving seeds from what the persona
+    // already gets, and that included it. Pushing on top would emit it twice; skipping would leave the
+    // log pointing at an item in no list, killing its own undo silently.
+    ok(JSON.stringify(out['*']) === JSON.stringify([{ from: 'User Portal', to: 'Dash' }]),
+      `[move] and puts it in the new one ONCE, not beside the copy the seeding already made (${JSON.stringify(out['*'])})`);
+    ok(/everyone else/.test(renRow().textContent),
+      `[move] the log says where it is now (${renRow().textContent})`);
+    // And the inverse followed it, rather than splicing at the address the change has left. Asserted
+    // BEFORE clicking: an inverse still aimed at the old list fails mbCanUndo, so the control would be
+    // gone and a bare click would only crash the harness rather than name the defect.
+    const back = renRow().all('button').find((b) => b.textContent === '×');
+    ok(!!back, `[move] and the change is still undoable afterwards, which it is not if its inverse stayed behind (${renRow().textContent})`);
+    back!.fire('click');
+    t.settle();
+    ok(JSON.stringify(t.emitted().apps.rename['*']) === '[]',
+      `[move] undo acts where the change now IS (${JSON.stringify(t.emitted().apps.rename)})`);
+  }
+
+  // ── "EVERYONE" AND "EVERYONE ELSE" ARE ONE HALF IN ITS TWO SHAPES ──────────────────────────────────
+  // David, working out the model: "I can save for Everyone, and switch to Reseller, but only back to
+  // Everyone Else once the menu has been customized?" Close, and the trigger is earlier — carving IS
+  // what creates the default, in the same click. Both names can never be offered at once, and the flat
+  // shape never comes back, which is why one replaces the other rather than joining it.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: [{ from: 'User Portal', to: 'Home' }] } }),
+      ['User Portal', 'SNAPmobile Web']);
+    t.btn(t.row('SNAPmobile Web')!, /^rename$/)!.fire('click');
+    t.settle();
+    let opts = () => t.card().all('.mbfork')[0]!.all('button').map((b) => b.textContent);
+    ok(opts().some((o) => /everyone/.test(o)) && !opts().some((o) => /everyone else/.test(o)),
+      `[shapes] a flat half offers "everyone" and no default, because it has none (${opts().join(' | ')})`);
+    t.btn(t.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Mobile'; to.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+
+    const out = t.emitted().apps.rename;
+    // ⚠️ CARVING IS A NO-OP ON WHAT ANYONE GETS. The list that applied to everyone is copied into BOTH
+    // the new rule and the default — a rung wins outright rather than merging, so seeding only the
+    // default would silently strip the carved audience of everything they had.
+    ok(!!out.scopes && out.scopes['Office Manager'].some((r: { to: string }) => r.to === 'Home'),
+      `[shapes] the carve copies what applied to everyone into the new rule (${JSON.stringify(out)})`);
+    ok(JSON.stringify(out['*']) === JSON.stringify([{ from: 'User Portal', to: 'Home' }]),
+      '[shapes] and into the default it creates in the same click — that default is not owed to any later edit');
+
+    t.btn(t.card().all('.mbwhere')[0]!, /^change$/)!.fire('click');
+    t.settle();
+    ok(opts().some((o) => /everyone else/.test(o)) && !opts().some((o) => /^everyone$/.test(o)),
+      `[shapes] so "everyone else" is offered from that moment, and "everyone" never again (${opts().join(' | ')})`);
+  }
+
+  // ── MOVING OUT OF THE FLAT LIST ────────────────────────────────────────────────────────────────────
+  // ⚠️ THE COMMONEST MOVE, AND IT WAS A NO-OP THE LOG REPORTED AS DONE. mbEnsure converts a flat half by
+  // COPYING the flat list into both the new rung and the whole-menu default, so a move that removed the
+  // item afterwards removed it from the array conversion had just orphaned — leaving the item in both
+  // copies. "Moved to the rule for Office Manager", and every reader still got it.
+  {
+    const t = boot(JSON.stringify({ apps: {} }), ['User Portal', 'SNAPmobile Web']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /everyone/)!.fire('click');   // the FLAT list
+    t.settle();
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Dash'; to.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    const log = () => t.dom.byId['spkmb-changed']!;
+    const renRow = () => log().all('.chgrow').find((r) => /Dash/.test(r.textContent))!;
+    renRow().all('button').find((b) => /everyone/.test(b.textContent))!.fire('click');
+    t.settle();
+    t.btn(log().all('.chgpick')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    const out = t.emitted().apps.rename;
+    ok(JSON.stringify(out.scopes['Office Manager']) === JSON.stringify([{ from: 'User Portal', to: 'Dash' }]),
+      `[flat] it arrives in the rule that was chosen (${JSON.stringify(out)})`);
+    ok(JSON.stringify(out['*']) === '[]',
+      `[flat] and is NOT still sitting in the default the conversion created — which is every other reader (${JSON.stringify(out['*'])})`);
+    // The undo has to reach the copy that exists, not the array the conversion orphaned.
+    renRow().all('button').find((b) => b.textContent === '×')!.fire('click');
+    t.settle();
+    ok(JSON.stringify(t.emitted().apps.rename.scopes['Office Manager']) === '[]'
+      && JSON.stringify(t.emitted().apps.rename['*']) === '[]',
+      `[flat] and undoing it leaves nothing behind (${JSON.stringify(t.emitted().apps.rename)})`);
+  }
+
+  // ── A STUCK ANSWER THAT HAS STOPPED MEANING SOMETHING ──────────────────────────────────────────────
+  // mbEnsure refuses a target that no longer fits the half's shape, and mbApply read that as done. Answer
+  // "everyone" while the half is flat, let a move convert it to rungs, and every later edit on that half
+  // did nothing at all — with the line under the menu still naming the rule it was going to.
+  {
+    const t = boot(JSON.stringify({ apps: {} }), ['User Portal', 'SNAPmobile Web']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /everyone/)!.fire('click');
+    t.settle();
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Dash'; to.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    const log = () => t.dom.byId['spkmb-changed']!;
+    log().all('.chgrow')[0]!.all('button').find((b) => /everyone/.test(b.textContent))!.fire('click');
+    t.settle();
+    t.btn(log().all('.chgpick')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    // The half now has rungs; the stuck answer still names the flat list.
+    t.btn(t.row('SNAPmobile Web')!, /^rename$/)!.fire('click');
+    t.settle();
+    ok(t.card().all('.mbfork').length === 1,
+      '[stuck] an answer that has stopped resolving is thrown away and asked again, not silently obeyed');
+    // Named "the rule for …" now rather than "just …": the move created that rung, so it is a rule that
+    // already answers this reader rather than a carve to make.
+    t.btn(t.card().all('.mbfork')[0]!, /Office Manager/)!.fire('click');
+    t.settle();
+    const form = t.card().all('.fmform')[0];
+    ok(!!form, '[stuck] and the edit it was holding still happens');
+    const to2 = form!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to2.value = 'Mobile'; to2.fire('input');
+    t.settle();
+    ok(t.emitted().apps.rename.scopes['Office Manager'].length === 2,
+      `[stuck] landing where the new answer says (${JSON.stringify(t.emitted().apps.rename)})`);
+  }
+
+  // ── A DESTINATION THAT ALREADY SAYS THIS ───────────────────────────────────────────────────────────
+  // Replacing an identity match is right only for the SEEDED copy in a rung the move just created. In a
+  // rung that already existed, an equal identity is somebody else's entry.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: {
+      scopes: { 'Office Manager': [] },
+      '*': [{ from: 'User Portal', to: 'Portal' }],
+    } } }), ['User Portal']);
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /rule for Office Manager|just Office Manager/)!.fire('click');
+    t.settle();
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Dash'; to.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    const log = () => t.dom.byId['spkmb-changed']!;
+    const row = log().all('.chgrow').find((r) => /Dash/.test(r.textContent))!;
+    row.all('button').find((b) => /Office Manager/.test(b.textContent))!.fire('click');
+    t.settle();
+    const opts = log().all('.chgpick')[0]!.all('button').map((b) => b.textContent);
+    ok(!opts.some((o) => /everyone else/.test(o)),
+      `[clash] a rule already carrying this original is not offered — arriving would overwrite its entry or sit beside it unreachable (${opts.join(' | ')})`);
+    ok(JSON.stringify(t.emitted().apps.rename['*']) === JSON.stringify([{ from: 'User Portal', to: 'Portal' }]),
+      '[clash] and that entry is still exactly as it was written');
+  }
+
+  // ── WHAT CANNOT BE MOVED ───────────────────────────────────────────────────────────────────────────
+  // A removal has nothing to carry, and carving a rule is not an item at all.
+  {
+    const t = boot(JSON.stringify({ apps: { rename: [{ from: 'User Portal', to: 'Dash' }] } }), ['User Portal']);
+    t.btn(t.row('Dash')!, /revert/)!.fire('click');
+    t.settle();
+    const row = t.dom.byId['spkmb-changed']!.all('.chgrow')[0]!;
+    ok(/stopped renaming/.test(row.textContent), '[move] the revert is logged');
+    ok(!row.all('button').some((b) => /everyone|rule for/.test(b.textContent)),
+      `[move] and offers no rule to move it to, because a removal put nothing anywhere (${row.textContent})`);
+    ok(!!row.all('button').find((b) => b.textContent === '×'),
+      '[move] while still offering to be undone, which is a different question');
+  }
+
+  // ── A LOCKED HALF HAS NO WORKING CONTROL, AND NOW SAYS SO ──────────────────────────────────────────
+  // The tick box was live on a half mbEnsure refuses. Ticking asked the rule question — whose "everyone"
+  // option even claimed "this menu has no rules yet" — then emitted nothing, and the answered fork meant
+  // the second tick did not even ask. A control that moves and does nothing is worse than none.
+  {
+    // A bare domain map with no "*" is valid config this builder cannot round-trip, so the half locks.
+    const t = boot(JSON.stringify({ apps: { hide: { 'acme.example': ['User Portal'] } } }), ['User Portal']);
+    ok(t.api.mbStateRaw().apps.hideLocked === true, '[locked] the premise: this hide half is locked');
+    const box = t.row('User Portal')!.all('input')[0]!;
+    ok(box.disabled === true, '[locked] the tick box is disabled rather than live and inert');
+    ok(/cannot round-trip/.test(box.title || ''), `[locked] with a reason (${box.title})`);
+    const foot = t.card().all('.fmfoot').map((f) => f.textContent).join(' | ');
+    ok(/Editing is off/.test(foot) && /hide list/.test(foot),
+      `[locked] and the menu says which half is not editable here (${foot})`);
+    ok(!t.card().all('button').some((b) => /Hide it/.test(b.textContent)),
+      '[locked] the hide-by-name box is gone too — same half, same refusal');
+    ok(t.card().all('button').some((b) => /Add an entry/.test(b.textContent)),
+      '[locked] while the half that IS editable keeps its control');
+  }
+
+  // ── BLANKING A REQUIRED FIELD IS A DELETION, AND HAS TO READ AS ONE ────────────────────────────────
+  // Done with an empty url dropped the entry and logged nothing, so the rail read "Nothing yet.
+  // Untouched menus are emitted exactly as they run now." beside a config that had just lost one.
+  {
+    const t = boot(JSON.stringify({ apps: { add: [{ label: 'Support', url: 'https://s.example' }] } }),
+      ['User Portal']);
+    t.btn(t.row('Support')!, /^edit$/)!.fire('click');
+    t.settle();
+    const url = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-url$/.test(` ${i.className}`))!;
+    url.value = ''; url.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    ok(JSON.stringify(t.emitted().apps.add) === '[]', '[blank] the entry is dropped, as it must be');
+    const row = t.dom.byId['spkmb-changed']!.all('.chgrow')[0];
+    ok(!!row && /removed/.test(row.textContent),
+      `[blank] and the log says a removal happened (${t.dom.byId['spkmb-changed']!.textContent.slice(0, 80)})`);
+    const x = row!.all('button').find((b) => b.textContent === '×');
+    ok(!!x, '[blank] with a way back');
+    x!.fire('click');
+    t.settle();
+    ok(JSON.stringify(t.emitted().apps.add) === JSON.stringify([{ label: 'Support', url: 'https://s.example' }]),
+      `[blank] which restores it exactly (${JSON.stringify(t.emitted().apps.add)})`);
+  }
+
+  // ── TOP-LEVEL MENU ORDER IS THE OPERATOR'S ─────────────────────────────────────────────────────────
+  {
+    const written = { management: { hide: ['NDP'] }, apps: { hide: ['User Portal'] } };
+    const t = boot(JSON.stringify(written), ['User Portal']);
+    ok(JSON.stringify(t.emitted()) === JSON.stringify(written),
+      `[order] a config written management-first comes back management-first (${JSON.stringify(t.emitted())})`);
+  }
+
+  // ── AN INVERSE WHOSE SUBJECT IS ALREADY GONE ───────────────────────────────────────────────────────
+  // Reachability is about the LIST; this is about the thing in it. Hide an entry and untick it again and
+  // the first change has already been reversed by the second — an × on it removes nothing and then drops
+  // the line as though it had worked, which is the silent-success failure one level in.
+  {
+    const t = boot(JSON.stringify({ apps: { hide: [] } }), ['User Portal']);
+    const box = () => t.row('User Portal')!.all('input')[0]!;
+    box().checked = true; box().fire('change');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /everyone/)!.fire('click');
+    t.settle();
+    const x = (r: any) => r.all('button').find((b: any) => b.textContent === '×');
+    const hid = () => t.dom.byId['spkmb-changed']!.all('.chgrow').find((r) => /hid User Portal/.test(r.textContent))!;
+    ok(!!x(hid()), '[gone] the hide offers to be taken back while it is in the config');
+    box().checked = false; box().fire('change');
+    t.settle();
+    ok(JSON.stringify(t.emitted().apps.hide) === '[]', '[gone] unticking reverses it by the other route');
+    ok(!x(hid()),
+      `[gone] so the first change stops offering an inverse that would remove nothing (${hid().textContent})`);
+  }
+
+  // ── AN UNDO WHOSE LIST IS NO LONGER PART OF THE CONFIG ─────────────────────────────────────────────
+  // Carving a flat half COPIES the flat list into the new rung and the default, so the array an earlier
+  // hide was pushed into belongs to nobody afterwards. Splicing it would change nothing while the log
+  // entry vanished as though it had worked — the one failure this control must not have.
+  {
+    const t = boot(JSON.stringify({ apps: { hide: [] } }), ['User Portal', 'SNAPmobile Web']);
+    const box = t.row('SNAPmobile Web')!.all('input')[0]!;
+    box.checked = true; box.fire('change');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /everyone/)!.fire('click');   // lands in the FLAT list
+    t.settle();
+    const x3 = (r: any) => r.all('button').find((b: any) => b.textContent === '\u00d7');
+    ok(!!x3(t.dom.byId['spkmb-changed']!.all('.chgrow')[0]!),
+      '[orphan] the hide can be taken back while its list is the config');
+    // Re-aim at a carve and then actually LAND something there — re-aiming alone creates nothing, so it
+    // is the second hide that converts the half and leaves the first one's array behind.
+    t.btn(t.card().all('.mbwhere')[0]!, /^change$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    const box2 = t.row('User Portal')!.all('input')[0]!;
+    box2.checked = true; box2.fire('change');
+    t.settle();
+    ok(!!t.emitted().apps.hide.scopes,
+      `[orphan] the second hide converts the half to rungs (${JSON.stringify(t.emitted().apps.hide)})`);
+    const stale = t.dom.byId['spkmb-changed']!.all('.chgrow')
+      .find((r) => /hid SNAPmobile Web/.test(r.textContent))!;
+    ok(!!stale && !x3(stale),
+      `[orphan] and stops offering once the array it holds is no longer reachable (${stale?.textContent})`);
+    ok(!stale.all('button').some((b) => /everyone|rule for|just /.test(b.textContent)),
+      `[orphan] and so does the offer to move it, for the same reason (${stale.textContent})`);
+  }
+
+  // ── MOVING INTO A RULE THAT DOES NOT EXIST YET ─────────────────────────────────────────────────────
+  // ⚠️ The destination gets CARVED, and carving seeds it from what this persona already gets — which
+  // includes the very change being moved. So the item arrives to find an equal-but-different copy of
+  // itself already sitting there. Pushing emits it twice; skipping leaves the log holding an item that
+  // is in no list, which silently kills both its undo and its own move control.
+  {
+    const t = boot(JSON.stringify({ apps: {} }), ['User Portal'], 'Office Manager', 'acme.example');
+    t.btn(t.row('User Portal')!, /^rename$/)!.fire('click');
+    t.settle();
+    t.btn(t.card().all('.mbfork')[0]!, /just Office Manager/)!.fire('click');
+    t.settle();
+    const to = t.card().all('.fmform')[0]!.all('input').find((i) => / mbin-to$/.test(` ${i.className}`))!;
+    to.value = 'Dash'; to.fire('input');
+    t.btn(t.card().all('.fmform')[0]!, /^Done$/)!.fire('click');
+    t.settle();
+    const log = () => t.dom.byId['spkmb-changed']!;
+    const renRow = () => log().all('.chgrow').find((r) => /Dash/.test(r.textContent))!;
+    renRow().all('button').find((b) => /Office Manager/.test(b.textContent))!.fire('click');
+    t.settle();
+    const dom2 = log().all('.chgpick')[0]!.all('button').find((b) => /acme\.example/.test(b.textContent))!;
+    ok(!!dom2, '[seeded] a rule this half does not have yet is offered');
+    // The consequence inline, because choosing it carves a rung that outranks the scope rule.
+    ok(/OVERRIDE/.test(log().all('.chgpick')[0]!.textContent),
+      `[seeded] with the warning the fork question would have given, not hidden in a tooltip (${log().all('.chgpick')[0]!.textContent})`);
+    dom2.fire('click');
+    t.settle();
+    const out = t.emitted().apps.rename;
+    ok(!!out.domains && JSON.stringify(out.domains['acme.example'])
+      === JSON.stringify([{ from: 'User Portal', to: 'Dash' }]),
+      `[seeded] it arrives ONCE, beside no copy of itself (${JSON.stringify(out.domains)})`);
+    ok(JSON.stringify(out.scopes['Office Manager']) === '[]', '[seeded] and leaves the rule it was in');
+    ok(!!renRow().all('button').find((b) => b.textContent === '×'),
+      '[seeded] and the log still holds the item it moved, so it can still be taken back');
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
