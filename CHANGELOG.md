@@ -90,8 +90,12 @@ release. The version at `/health` always matches a heading here.
 - **Clearing a required field and pressing Done is recorded as a removal.** It deletes the entry, which
   is correct, but the change log said "Nothing yet" beside a config that had just lost one. It now logs
   the removal and offers to put it back.
-- **Menus are emitted in the order you wrote them.** A config written `management` before `apps` came
-  back the other way round — a moved block on a menu nobody had touched.
+- **The builder writes your menu KEYS back in the order you wrote them.** Nothing about menu order in the
+  portal is involved — key order in this setting has no effect on anything, and never did. This is about
+  the diff: the builder emits your complete config every time, so a config hand-written `management`
+  before `apps` came back the other way round and read as a whole block changing on a menu you never
+  opened, burying the change you did make. Only reachable if you wrote the config by hand; anything the
+  console produced was already in its order.
 - **An added entry written with `"title": ""` now survives the builder untouched.** The empty tooltip was
   dropped from the emitted config, which changed nothing about what the config *does* and was therefore
   pure noise in the diff you run before pasting — on a menu you never opened.
