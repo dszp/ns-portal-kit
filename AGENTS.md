@@ -270,6 +270,14 @@ Each rung proves something the previous one did not.
   *successful* request that renders no banner — indistinguishable, from inside the portal, from the feature
   being switched off. If a banner does not appear, check the body the endpoint returns before you check
   anything in this Worker.
+- **A settings-only redeploy is not visible in the portal for up to ~3 minutes.** The injected client
+  bundle is cached per permission tier under a key containing the kit's version, so an upgrade replaces it
+  at once — but redeploying the same version with a changed setting leaves that key identical, and the
+  previous bundle is served until it expires (60s in the Worker, up to 120s more in a browser that already
+  loaded it). It heals itself; no purge is needed and none is offered. The trap is diagnostic: verifying a
+  `PORTAL_MENUS` change by reloading the portal a minute later shows the old menu and reads exactly like a
+  config that failed to land. The console's **Config** tab is answered server-side and updates
+  immediately — new value there plus old behaviour in the portal means wait, not debug.
 - **Soft exclusions are creation-only.** `RINGOTEL_EXCLUDE_*` decides whether an app account may be
   *created*; it never hides a user who already has one. Do not use it as a way to hide people.
 - **System/service users and non-3-4-digit extensions can never be activated**, by anyone, including a

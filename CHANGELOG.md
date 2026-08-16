@@ -20,6 +20,45 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [0.6.1] — 2026-08-16
+
+### Changed
+
+- **The injected bundles no longer carry their own comments.** The kit's client code is written with the
+  same commentary as the rest of the source — it is maintained, not generated — and a strip pass existed
+  precisely so the reader's browser did not have to carry that. It only removed lines that *began* with
+  `//`, so every block comment and every trailing comment reached the browser anyway: about 5% of the
+  admin bundle and about a fifth of the console one, in the one file whose entire purpose is to be sent
+  to a customer's browser. Every comment is out now. **Nothing about behaviour changes** — same features,
+  same logic, fewer bytes. The client code in `src/kit.ts` is untouched and still fully commented for
+  whoever maintains it; what changed is only what leaves the Worker.
+  - **It also stopped costing anything per request.** The strip ran inside the bundle *builder*, and a
+    build is every Cache API miss rather than once per version: the tier entry carries `max-age=60`, so
+    each tier rebuilds roughly once a minute in every colo that serves it. The stripped bodies are module
+    constants now — computed once per isolate — so the request path does not pay for the strip at all.
+    That is what made being thorough affordable in the first place.
+  - **A test proves the strip only ever removes comments.** A scanner that eats to the end of a line has
+    to know what a string is (a body is full of `https://…`) and what an escape is (`/^\//` is a path
+    regex whose escaped slash sits against its own closing delimiter — that shape broke the first
+    version, and the existing "emitted JS compiles" assertion caught it). So every bundle is now stripped
+    twice on every test run, once by this scanner and once by a real JavaScript parser, and the two
+    results must match exactly. Anything removed that is not a comment fails a test instead of shipping.
+
+### Fixed
+
+- **`ARCHITECTURE.md` said a deploy invalidates the per-tier bundle cache. Only a *release* does.** The
+  cache key carries the version, so bumping it replaces every tier immediately — but a config-only
+  deploy, such as editing `PORTAL_MENUS` in `wrangler.jsonc`, leaves that key byte-identical and the
+  previous bundle keeps being served until the entry's own `max-age` expires. The mechanism is right and
+  needs no change: it is 60 seconds in the Worker plus up to 120 in the browser, it heals itself, and a
+  purge would be the worse trade. The documentation was the problem, because the failure it produces is
+  diagnostic — you deploy a menu change, look two minutes later, see the old menu and conclude the config
+  did not land. `ARCHITECTURE.md` no longer claims more than the key can deliver, and the timing is now
+  written where you would actually hit it: `CONFIG.md` says how long a settings change takes to reach a
+  signed-in browser, `SETUP.md` says it beside the end-to-end check, and `AGENTS.md` lists it among the
+  things that fail silently. All four name the same tiebreaker — the console's **Config** tab is answered
+  server-side, so the new value there alongside old behaviour in the portal means wait, not debug.
+
 ## [0.6.0] — 2026-08-12
 
 ### Added
@@ -1991,6 +2030,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.6.1]: https://github.com/dszp/ns-portal-kit/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/dszp/ns-portal-kit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dszp/ns-portal-kit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dszp/ns-portal-kit/compare/v0.3.0...v0.4.0

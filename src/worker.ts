@@ -1871,7 +1871,12 @@ export default {
         if (!auth.principal) throw new HttpError(403, 'The gated bundle requires a delegated ns_t');
         const allowedKeys = featurePolicyKeys().filter((k) => can(auth.principal!, k, policies));
         // Server tier-cache: key includes a host discriminator (caches.default is zone-shared across
-        // dia/portal/dev on example.com) + VERSION, so tiers never collide and a deploy busts it.
+        // dia/portal/dev on example.com) + VERSION, so tiers never collide and a RELEASE busts it.
+        // ⚠ A deploy that does NOT bump VERSION — a config-only change such as editing PORTAL_MENUS in
+        // wrangler.jsonc — leaves this key identical, so the OLD bundle is served until the entry's own
+        // `max-age=60` expires, then up to `private, max-age=120` more in the browser. ~3 minutes worst
+        // case, self-healing, no purge needed; just don't read a stale menu right after a config deploy
+        // as the config having failed to land. (Observed 2026-08-14 on the prod SNAPAnalytics rename.)
         const tierKey = new Request(`https://inject.internal/${url.hostname}/portal/${tierHash(allowedKeys)}/${VERSION}`);
         const hit = await caches.default.match(tierKey);
         let bundle: string;

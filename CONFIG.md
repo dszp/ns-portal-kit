@@ -61,6 +61,17 @@ claim, the superadmin list) refuse rather than assume.
 **Each setting's anchor is stable.** `CONFIG.md#RINGOTEL_WRITE_DOMAINS` resolves and keeps resolving even
 if the heading around it is reworded.
 
+**A settings-only deploy takes up to about three minutes to reach a signed-in browser.** Server-side
+answers — `/health`, the console, every data route — change the instant the deploy lands. The injected
+client bundle does not: it is cached per tier inside the Worker under a key that includes the kit's
+*version*, so a release replaces it immediately while a config-only deploy leaves that key identical. The
+old bundle is then served until its own `max-age=60` expires, plus up to 120 seconds more in the browser
+that already has it. This heals itself and needs no purge — but it is worth knowing before you change
+`PORTAL_MENUS`, reload the portal, see the old menu and go hunting for a mistake in your JSON. Hard-reload
+the portal tab, or wait. The console's **Config** tab is answered server-side, so it shows the value you
+just deployed straight away — if it reports the new value and the menu still looks old, you are looking at
+this cache and not at a broken config.
+
 ---
 
 <a id="group-core"></a>

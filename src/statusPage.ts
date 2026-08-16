@@ -1000,7 +1000,7 @@ function renderMenus(doc: StatusDoc): string {
     <div class="persona" id="spkmb-persona">
       <div><label for="spkmb-scope">Previewing as</label>
         <select id="spkmb-scope"></select></div>
-      <!-- "Integrations", not "Apps" (David, 2026-08-11) — an operator reading this page thinks in
+      <!-- "Integrations", not "Apps" (2026-08-11) — an operator reading this page thinks in
            integrations, and "Apps" collides with the Apps MENU three inches below it, which is a
            different thing entirely. The config key stays app, and anywhere this console echoes the key
            it still says app: a label may speak the reader's language, but a value they have to type
@@ -1037,7 +1037,7 @@ function renderMenus(doc: StatusDoc): string {
     </div>
     <div id="spkmb-out" hidden>
       <h4 class="whyh">The config</h4>
-      <!-- ABOVE the output rather than below it (David): collapsed either way, but a reader scrolls to
+      <!-- ABOVE the output rather than below it: collapsed either way, but a reader scrolls to
            the config and stops there, so a reference underneath is one nobody knows exists. It costs a
            line here and buys the chance of being noticed. -->
       ${menuSchema()}
@@ -2922,7 +2922,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     }
     // ⚠️ THE WHOLE-MENU DEFAULT IS ALWAYS AIMABLE ONCE THE HALF HAS RUNGS, whether or not it answered.
     // It used to be offered only when nothing else was, so carving a scope rule made the default the one
-    // audience you could never aim back at — David, on dev: "click Change and it ONLY shows Just
+    // audience you could never aim back at — reported from dev: "click Change and it ONLY shows Just
     // Reseller still." Carving created that default (mbMakeTargeted seeds both), so it exists and is
     // unreachable, which is the worst of the two.
     //
@@ -3768,7 +3768,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         : owners.length ? 'hidden · ' + owners.map(function(o){ return mbSrcName(o.src); }).join(' + ')
         : 'hidden';
       // TWO RULES, TWO LINES. Concatenated they ran the tag out to the full width of the card and wrapped
-      // the label beside it — David, on his own Simple User menu. The break is a child element rather
+      // the label beside it — reported from a real Simple User menu. The break is a child element rather
       // than a wrap, so each fact still reads as one unbroken phrase.
       t.textContent = !isHidden ? (ren ? 'renamed · ' + was : (chained ? 'from a rename' : 'stock')) : why;
       if (isHidden && was) {
@@ -3870,7 +3870,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     // something — an operator adding a link the menu already has.
     // ⚠️ THAT app, not ANY app. These rows are one integration's sign-in block; with a second integration
     // active on its own they were still drawn, which had the picture promising a sign-in panel the portal
-    // would never render there (David, toggling documo alone).
+    // would never render there (found by toggling documo alone).
     var appOn = mn.name === 'apps' && !!MB_INJECTED.app
       && mbPersona.apps.indexOf(MB_INJECTED.app) >= 0;
     if (appOn && (MB_INJECTED.downloads || MB_INJECTED.signIn)) {
@@ -3926,7 +3926,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     // same fork question, so neither can quietly widen a rule.
     // ⚠️ TWO CONTROLS FOR TWO DIFFERENT HALVES, on two rows. They sat side by side with ONE button
     // between them, so the button beside the hide box belonged to the add half and the hide box
-    // responded only to Enter — David, reading his own menu: "are they supposed to click Add an entry to
+    // responded only to Enter — reported from a real menu: "are they supposed to click Add an entry to
     // add? It's a little confusing between adding a custom Hide entry and adding a new item entry."
     // Each half now owns its own row and its own button, and neither is reachable by a control that
     // belongs to the other.
@@ -4035,7 +4035,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     var cap = mbCapture(mbPersona.scope);
     if (!cap || mbAdopted[key]) return false;
     mbAdopted[key] = true;
-    // ⚠️ THE DOMAIN IS OFFERED, NOT ADOPTED (David, 2026-08-11). A capture is about a ROLE; filling its
+    // ⚠️ THE DOMAIN IS OFFERED, NOT ADOPTED (2026-08-11). A capture is about a ROLE; filling its
     // domain in silently adds a second dimension to what you are editing, and a domains rung outranks
     // everything — so the preview and the fork's narrower option both become specific to one customer
     // without anyone choosing that. Marking it made the narrowing visible; not doing it makes the
@@ -4068,7 +4068,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     if (!box) return;
     // ⚠️ NOTHING FILLS THIS FIELD BUT THE OPERATOR. It used to adopt a capture's domain, marked amber
     // with a line explaining the risk — and the mark existed only because the narrowing was not chosen.
-    // Removing the fill removes the reason for the mark, the note, and a bug David found: adopt-once is
+    // Removing the fill removes the reason for the mark, the note, and a bug found in use: adopt-once is
     // per capture, so switching to a SECOND captured role filled the field again and a Clear never
     // survived. What is left is the offer in the caveat line, and this Clear.
     box.className = '';
@@ -4089,7 +4089,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     if (!note) return;
     note.textContent = '';
 
-    // ── the domains the captures came from, offered to ANY role (David, 2026-08-11) ──────────────────
+    // ── the domains the captures came from, offered to ANY role (2026-08-11) ──────────────────
     //
     // Under the field, because it is about the field. Across every capture rather than only the role on
     // screen: a domain is a domain, and previewing an Office Manager against a domain you happened to
@@ -4261,7 +4261,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       // WHAT WAS CAPTURED vs WHAT WAS INFERRED, kept apart. The entries and the domain came off that
       // session; which apps were active is one bit of evidence, and saying so is what stops the next
       // confusion after the one this fixed.
-      // "AN", not "the" (David) — with more than one available, the definite article claims a specific
+      // "AN", not "the" — with more than one available, the definite article claims a specific
       // integration in the same breath as saying we cannot tell which. And where only one is available
       // we can do better than an article at all: name it.
       var app = cap.appRows === true
@@ -4296,7 +4296,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     // ⚠️ "THE NEXT ITEM", not the present tense. "Renaming lands in everyone else" is a statement about
     // the config, and it was false the moment an operator re-aimed after making a rename: the rename
     // they had just made was in the rule for Reseller, the chip above the menu said so, the rail said
-    // so, and this line said otherwise — David, on dev, reading exactly that contradiction and naming
+    // so, and this line said otherwise — reported from dev, reading exactly that contradiction and naming
     // the assumption behind it: "I just selected a choice to complete my rename, so I naturally think
     // clicking change and selecting the opposite is undoing the choice I just made." Re-aiming has
     // never moved work already done, and the line has to be about what it actually governs.
@@ -4305,7 +4305,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     p.appendChild(a); p.appendChild(b);
     // ⚠️ CHANGE IT NOW, not on the next edit. Clearing the answer and stopping there did the right
     // thing invisibly: the line vanished, the picture was identical, and the effect only showed up
-    // whenever the operator next ticked something — David, on dev: "clicking it makes it go away, but
+    // whenever the operator next ticked something — reported on dev: "clicking it makes it go away, but
     // nothing visually changes." A button called "change" has to open the thing it changes.
     mbBtn('change', function(){
       delete mbFork[mbForkKey(mn, half)];
@@ -4350,7 +4350,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
     var st = mbState[mn.name];
     var base = MB_BASE[mn.name] || {};
     var card = document.createElement('div');
-    // The mbmenu class carries the chrome: the blue left edge David singled out as the one thing that
+    // The mbmenu class carries the chrome: the blue left edge singled out in review as the one thing that
     // helped him track structure, and a heading with enough weight that the menu name stops competing
     // with the labels inside it. The level you navigate by should be the level that looks like a level.
     card.className = 'card card-wide mbmenu';
@@ -4466,7 +4466,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
           sub.appendChild(document.createTextNode(' — '));
           // ⚠️ THE RULE NAME IS THE CONTROL. An operator who has just chosen where a change lands reads
           // this line as the record of that choice, so the choice is where they reach to change it —
-          // David: "making it a link would invite clicks, clicks would make the change clear, undoing
+          // Reported: "making it a link would invite clicks, clicks would make the change clear, undoing
           // would be another click." What it opens is a LIST rather than a toggle, and that is not
           // ceremony: there are four ways to name this reader, not two, and picking one can CARVE a rung
           // that takes over an audience another rule was answering. A toggle would do that silently.
@@ -4481,7 +4481,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
         }
         row.appendChild(k); row.appendChild(w);
         // ONE CHANGE AT A TIME. Reset is the only way back today, and it discards everything —
-        // David: "it feels like I need to do a full reset to start fresh but that may not always be
+        // Reported: "it feels like I need to do a full reset to start fresh but that may not always be
         // needed." Offered only where the inverse is exact and still applies; a rule this session
         // CARVED has none, because later edits can be living inside it, and the rail's own
         // "remove this rule" is the control for that, beside the count of what would go with it.
@@ -4652,7 +4652,7 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
   }
 
   // A structural edit re-renders every card, because a rung change can move anything. What it must NOT do
-  // is move the PAGE — David, after adding one entry: "I actually lost track of what had been changed at
+  // is move the PAGE — reported after adding one entry: "I actually lost track of what had been changed at
   // all really, the UI changed too much." Rebuilding under a reader who is mid-edit scrolls them somewhere
   // else and takes their focus with it, so the change they just made is somewhere off screen and the thing
   // they were about to do next has moved. Hold the scroll position and put focus back where it was.

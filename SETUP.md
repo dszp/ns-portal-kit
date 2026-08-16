@@ -443,6 +443,13 @@ admitted — that would leak the account list to whoever asked.
 actually loading the script. Serving the primary and being loaded by a portal are different facts, and the
 Addresses block marks which is which. The end-to-end check is still: open your portal and look.
 
+**Give a settings-only change about three minutes before you judge it.** The injected client bundle is
+cached per permission tier under a key that includes the kit's version, so upgrading replaces it at once —
+but redeploying with the *same* version and a changed setting leaves that key identical, and the previous
+bundle is served until it expires (60 seconds in the Worker, up to 120 more in a browser that already has
+it). The console's Config tab is answered server-side and updates immediately, so it is the tiebreaker: new
+value there and old behaviour in the portal means you are early, not broken.
+
 ---
 
 <a id="cloudflare-plan"></a>

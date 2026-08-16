@@ -113,7 +113,14 @@ Portal-backend mode serves its own client JS, **per tier**, instead of shipping 
   per-tier body. `allowedKeys` is `can()`-filtered by the caller *before* the bundle is built, so a bundle is
   a **pure function of (allowed keys, env)** — no per-user field can enter a shared tier's bytes. Served
   `private` + `Vary: Origin, Authorization`, cached **inside the Worker** per tier (key = host + tier hash +
-  VERSION), so a deploy busts it.
+  VERSION). The version in that key is what makes a **release** replace every tier at once. ⚠ A deploy that
+  does *not* bump the version — a config-only change such as editing `PORTAL_MENUS` — leaves the key
+  identical, so the previous bundle is served until the entry's `max-age=60` expires, plus up to
+  `max-age=120` more in the browser. Self-healing, no purge; just don't read a stale menu right after a
+  config deploy as the config having failed to land.
+  - **The bodies are emitted comment-free**, stripped once per isolate rather than per build (a build is
+    every cache miss). `kit.selftest.ts` proves that strip against a real JavaScript parser on every
+    bundle, so a scanner bug fails a test rather than shipping corrupted JS to every reader.
 - **Secondaries** (`PORTAL_SECONDARIES`) — a manifest of extra scripts: `url:` (external, loaded
   client-side) or `r2:` (a file in a private R2 bucket bound as `ASSETS`, which the Worker serves + gates at
   `/kit/asset/<name>.js`). The gate reuses the same LEVELS vocabulary.

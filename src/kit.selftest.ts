@@ -6,7 +6,8 @@
 import { Script, runInNewContext } from 'node:vm';
 import { buildKitBundle, buildSelfBundle, buildSpkBundle, featurePolicyKeys, selfFeaturePolicyKeys, primaryJs, SELF_FEATURE_KEYS, SPK_FEATURE_KEYS, FEATURE_KEYS } from './kit.js';
 import { keysDeliveredBy, FEATURE_REGISTRY } from './features.js';
-import { parseManifest, kitGateAllows, kitConfigError } from './kit.js';
+import { parseManifest, kitGateAllows, kitConfigError, stripComments } from './kit.js';
+import * as esbuild from 'esbuild';
 import { VERSION } from './brand.js';
 import { SPK_BRIDGE } from './spkBridge.js';
 const b64url = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -1595,6 +1596,68 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
         `[rename] and reset puts the original label back (${JSON.stringify(shown(li))})`);
       ok((li.getAttribute as (k: string) => string | null)('data-svxr') === null,
         '[rename] with the marker cleared, so a second reset is not a second restore');
+    }
+  }
+
+  // ── ⚠️ THE STRIP REMOVES COMMENTS AND NOTHING ELSE, PROVEN BY A REAL PARSER ───────────────────────
+  // These bundles are the bytes in a customer's browser, and stripComments is a hand-rolled scanner over
+  // them. "It parses" is not enough — a scanner can eat a line and still leave valid JavaScript that
+  // does something else. So the check is EQUIVALENCE against esbuild, a real JavaScript parser already
+  // in the tree: strip with ours, strip with theirs, normalise both the same way, demand they match.
+  // Anything our scanner removes that is not a comment shows up here as a difference.
+  //
+  // It also pins the one bet the scanner takes. It does not model regex literals, so a literal whose
+  // body holds an UNESCAPED // or /* — a character class like /[/*]/ — would be misread. There is none
+  // today; the day someone writes one, this fails instead of production.
+  {
+    const senv = { NS_SERVER: 'api.example.com', NS_PORTAL_ISS: 'manage.example.com', PORTAL_MODE: '1',
+      PORTAL_HANDOFF_URL: '', PORTAL_SUPERADMINS: 'boss@example.com', CACHE_SCOPE: 'portal' } as never;
+    const sall = ['kit.status', 'me.menuConfig', 'me.appAccess', 'portal.self', 'portal.versionLine'];
+    const bundles: Record<string, string> = {
+      'kit.js': buildKitBundle(sall, senv),
+      'self.js': buildSelfBundle(sall, senv),
+      'spk.js': buildSpkBundle(sall, senv),
+    };
+    // The same normaliser on both sides, so only the CONTENT of the two strips is compared.
+    const norm = async (js: string): Promise<string> =>
+      (await esbuild.transform(js, { loader: 'js', legalComments: 'none', minifyWhitespace: true })).code;
+
+    for (const [name, shipped] of Object.entries(bundles)) {
+      ok(shipped.length > 1000, `[strip] ${name} is a real bundle (${shipped.length}B)`);
+      // 1. No comment of any kind survives. The old strip left block and trailing comments in — 5% of
+      //    the admin bundle, 20% of the console one — while claiming to remove them.
+      ok(!shipped.includes('/*'), `[strip] ${name} carries no block comment`);
+      // 2. THE EQUIVALENCE: our output and a real parser's differ nowhere. Ours has already been
+      //    stripped, so if we removed anything that was not a comment, esbuild's pass over the ORIGINAL
+      //    keeps it and the two disagree.
+      const oursNorm = await norm(shipped);
+      const theirsNorm = await norm((await esbuild.transform(shipped, { loader: 'js', legalComments: 'none' })).code);
+      ok(oursNorm === theirsNorm, `[strip] ${name}: our strip and a real parser agree exactly`);
+      // 3. And it compiles — subsumed by the above, but it names a scanner bug fastest.
+      let compiles = true;
+      try { new Script(shipped); } catch { compiles = false; }
+      ok(compiles, `[strip] ${name} compiles`);
+    }
+
+    // 4. THE SCANNER ITSELF, on the shapes that have bitten or could. In each, one character decides
+    //    whether the tail of the line is a comment or code.
+    const cases: [string, string, string][] = [
+      ['a path regex ends in an escaped slash then its own delimiter — the bug that shipped',
+        'var r={p:/^\\//,m:f}; // gone', 'var r={p:/^\\//,m:f};'],
+      ['a url in a string is not a comment',
+        "var u='https://x.example/a'; // gone", "var u='https://x.example/a';"],
+      ['a block comment mid-expression',
+        'var a = /* gone */ 1;', 'var a =  1;'],
+      ["an apostrophe inside a double-quoted string does not open one",
+        'var s="it\'s"; // gone', 'var s="it\'s";'],
+      ['a comment marker inside a string survives',
+        "var s='/* not a comment */'; // gone", "var s='/* not a comment */';"],
+      ['an escaped quote does not end the string',
+        "var s='a\\'b'; // gone", "var s='a\\'b';"],
+    ];
+    for (const [what, input, want] of cases) {
+      const got = stripComments(input).trim();
+      ok(got === want, `[scan] ${what} | got: ${got} | want: ${want}`);
     }
   }
 

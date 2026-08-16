@@ -1743,9 +1743,67 @@ try{if(_AF.menuConfig||_AF.appAccess)menuHides()}catch(e){}},VLT[vi]);`;
  * maintainability; the client does not need the prose. Only lines whose first non-space characters are a
  * line comment are dropped — never a trailing comment — so a mid-line double-slash inside a string,
  * regex, or URL is left untouched. Blank runs left behind collapse. Not a minifier: no rename or join. */
-function stripLineComments(js: string): string {
-  const isFullLineComment = (ln: string): boolean => ln.replace(/^\s+/, '').slice(0, 2) === '//';
-  return js.split('\n').filter((ln) => !isFullLineComment(ln)).join('\n').replace(/\n\n+/g, '\n');
+/**
+ * EVERY COMMENT OUT OF AN EMITTED BODY, and nothing else touched.
+ *
+ * This used to drop whole-line `//` comments only, which left block comments and trailing comments in
+ * the bytes — 5% of the admin bundle, 20% of the console one, in a file whose whole point is that it is
+ * the thing sent to a customer's browser. Stripping comments and then shipping most of them is the
+ * control disagreeing with its own purpose.
+ *
+ * ⚠️ IT HAS TO KNOW WHAT A STRING IS. A bundle body contains urls — `https://…` — and a line-based rule
+ * got away with ignoring that only because it never removed anything mid-line. The moment trailing
+ * comments are in scope, an unaware scanner eats the rest of every line holding a url.
+ *
+ * ⚠️ AND IT HAS TO HONOUR A BACKSLASH OUTSIDE A STRING TOO. `/^\//` — a path regex, and there are a
+ * dozen of them — is the characters slash, caret, backslash, slash, slash: the escaped slash and the
+ * literal's own closing delimiter sit next to each other, so a scanner that only escapes inside strings
+ * reads that pair as a line comment and eats the rest of the line. It shipped a bundle that would not
+ * parse, and `[bundle] emitted JS compiles` caught it on the first run. A backslash outside a string is
+ * only ever an escape (a bare one is not valid JavaScript), so the pair is copied opaquely.
+ *
+ * What it still does NOT model is a regular-expression literal as such, and that is a checked bet rather
+ * than an oversight: a regex can only confuse this now if its own body holds an UNESCAPED `//` or `/*`,
+ * which means a character class like `/[/*]/` and nothing else. There is none in any body today, and
+ * `kit.selftest.ts` proves the whole strip against a real JavaScript parser on every bundle — so the day
+ * someone writes one it fails a test instead of shipping a corrupted bundle to every reader.
+ *
+ * Template literals are handled for completeness only: a body cannot contain a backtick at all, because
+ * these bodies ARE template literals (see the guard in templates.selftest.ts).
+ */
+export function stripComments(js: string): string {
+  let out = '';
+  for (let i = 0; i < js.length;) {
+    const c = js[i];
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < js.length) {
+        if (js[j] === '\\') { j += 2; continue; }
+        if (js[j] === c) { j++; break; }
+        j++;
+      }
+      out += js.slice(i, j);
+      i = j;
+    } else if (c === '\\') {
+      // An escape and whatever it escapes, opaquely — see the regex note above.
+      out += js.slice(i, i + 2);
+      i += 2;
+    } else if (c === '/' && js[i + 1] === '/') {
+      // To the newline, which is KEPT: dropping it would join two statements and hand the result to
+      // automatic semicolon insertion.
+      while (i < js.length && js[i] !== '\n') i++;
+    } else if (c === '/' && js[i + 1] === '*') {
+      const end = js.indexOf('*/', i + 2);
+      i = end < 0 ? js.length : end + 2;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  // Whitespace-only lines are what the removals leave behind; collapse them rather than ship a bundle
+  // that is a third blank.
+  return out.split('\n').map((ln) => (ln.trim() ? ln.replace(/\s+$/, '') : '')).join('\n')
+    .replace(/\n{2,}/g, '\n');
 }
 
 function wrapBundle(featureKeys: ReadonlyArray<{ flag: string; key: string }>, allowedKeys: string[], env: KitEnv, body: string): string {
@@ -1774,21 +1832,37 @@ var _KC=${cfg};
 window.__kitCfg=window.__kitCfg||{};window.__kitCfg.af=_AF;window.__kitCfg.kc=_KC;
 var B=window.__kitCfg.base;
 if(!B)return;
-${stripLineComments(body)}
+${body}
 }());
 `;
 }
 
+/**
+ * ── THE BODIES, COMMENT-FREE, COMPUTED ONCE ────────────────────────────────────────────────────────
+ *
+ * Stripping used to happen inside wrapBundle, which runs on every bundle BUILD — and a build is every
+ * Cache API miss, not once per version: the tier entry carries `max-age=60`, so each tier rebuilds about
+ * once a minute in every colo that serves it. The strip depends on nothing but the body, so it belongs
+ * where the body does. Module scope runs once per isolate, which makes how THOROUGH the strip is free:
+ * the request path no longer pays for it at all.
+ *
+ * Composed here rather than at each call site so the composition and the strip cannot drift apart —
+ * stripping the two halves separately would work today and stop working the moment a body ended
+ * mid-comment.
+ */
+const KIT_ADMIN_JS = stripComments(KIT_COMMON + KIT_ADMIN_BODY);
+const KIT_SELF_JS = stripComments(KIT_COMMON + KIT_SELF_BODY);
+
 /** The gated ADMIN bundle (unchanged behavior — same feature body, same FEATURE_KEYS). */
 export function buildKitBundle(allowedKeys: string[], env: KitEnv): string {
-  return wrapBundle(FEATURE_KEYS, allowedKeys, env, KIT_COMMON + KIT_ADMIN_BODY);
+  return wrapBundle(FEATURE_KEYS, allowedKeys, env, KIT_ADMIN_JS);
 }
 
 /** The minimal SELF bundle (own-account features only). Strips `RINGOTEL_APP_BASE_URL` from `_KC` — the
  * self body never uses `appBase` (only `_KC.label`), so the admin-dashboard URL must not ride a bundle
  * served to every ns_t (portal.self defaults `all`). */
 export function buildSelfBundle(allowedKeys: string[], env: KitEnv): string {
-  return wrapBundle(SELF_FEATURE_KEYS, allowedKeys, { ...env, RINGOTEL_APP_BASE_URL: '' }, KIT_COMMON + KIT_SELF_BODY);
+  return wrapBundle(SELF_FEATURE_KEYS, allowedKeys, { ...env, RINGOTEL_APP_BASE_URL: '' }, KIT_SELF_JS);
 }
 
 /** Flag↔key map for the SPK bundle. One entry — but keep the shape so wrapBundle stays uniform. */
@@ -2072,7 +2146,7 @@ if(end&&end.parentNode===bar)bar.insertBefore(b,end);else bar.appendChild(b)}
  * ⚠️ FEEDBACK HAS TO OUTLIVE THE SURFACE IT IS ON. On the masquerade bar the button stays put, so the
  * label IS the confirmation and a modal would just cost a second click. In the account-menu fallback the
  * dropdown closes the instant you click, taking the label with it — so the capture succeeded and looked
- * like nothing happened at all (David, on the fallback entry). There the modal is the only thing that
+ * like nothing happened at all (observed live, on the fallback entry). There the modal is the only thing that
  * survives, which is the opposite conclusion from the same principle rather than a reversal of it.
  */
 function capDo(el,transient){
@@ -2172,6 +2246,10 @@ setTimeout(function(){_spkOb.disconnect()},8000);
  *  `{"error":"Request failed"}`, the injected primary silently drops the non-200, and the operator loses
  *  the Management-menu entry that leads to the one page that names the broken setting. The console must
  *  survive exactly the class of config it exists to report — and this body never reads `_KC.dl`. */
+/** Same once-per-isolate treatment as the other two; declared here because SPK_BODY is declared below
+ *  them and a `const` is not hoisted. */
+const SPK_JS = stripComments(KIT_COMMON + SPK_BODY);
+
 export function buildSpkBundle(allowedKeys: string[], env: KitEnv): string {
-  return wrapBundle(SPK_FEATURE_KEYS, allowedKeys, { ...env, RINGOTEL_APP_BASE_URL: '', PORTAL_APP_DOWNLOADS: '' }, KIT_COMMON + SPK_BODY);
+  return wrapBundle(SPK_FEATURE_KEYS, allowedKeys, { ...env, RINGOTEL_APP_BASE_URL: '', PORTAL_APP_DOWNLOADS: '' }, SPK_JS);
 }
