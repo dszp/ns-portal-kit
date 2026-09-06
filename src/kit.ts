@@ -550,7 +550,7 @@ add.forEach(function(m){if(!m||!m.url||seen.indexOf(m.url)>=0)return;seen.push(m
 var li=document.createElement('li');li.className='_svxadd';li.setAttribute('data-u',m.url);
 // The literal, not truthiness: the server refuses any other value, and a client that read true as
 // "yes" would be the one place a second spelling could send the token.
-if(m.handoff==='ns_t'){li.appendChild(menuHandoff(fill(m.url),fillRaw(m.label),m.title?fillRaw(m.title):''))}
+if(m.handoff==='ns_t'){menuHandoff(li,fill(m.url),fillRaw(m.label),m.title?fillRaw(m.title):'')}
 else{var a=document.createElement('a');a.textContent=fillRaw(m.label);a.href=fill(m.url);a.target='_blank';a.rel='noopener noreferrer';
 if(m.title)a.title=fillRaw(m.title);li.appendChild(a)}
 if(before&&before.parentNode===ul)ul.insertBefore(li,before);else ul.appendChild(li)})}
@@ -576,14 +576,16 @@ if(before&&before.parentNode===ul)ul.insertBefore(li,before);else ul.appendChild
  * would 403 in exactly the browsers that honour rel on a form. The default policy sends the portal's
  * ORIGIN as Referer -- no path, no token -- which is what the receiver needs and nothing more.
  */
-function menuHandoff(url,label,title){
+function menuHandoff(li,url,label,title){
 var f=document.createElement('form');f.className='_svxho';f.method='POST';f.action=url;f.target='_blank';f.setAttribute('rel','noopener');
 var h=document.createElement('input');h.type='hidden';h.name='ns_t';h.value='';f.appendChild(h);
-var b=document.createElement('button');b.type='submit';b.textContent=label;if(title)b.title=title;
-// Drawn as its sibling rows are. Bootstrap styles li > a and nothing else, so a button gets the same
-// box by hand -- inherit the font and colour, keep the row's padding, lose the button chrome.
-b.style.cssText='display:block;width:100%;text-align:left;background:none;border:0;margin:0;padding:3px 20px;font:inherit;line-height:20px;color:inherit;white-space:nowrap;cursor:pointer';
-f.appendChild(b);
+// The visible row is an ANCHOR that is the li's DIRECT child, because Bootstrap's dropdown rules are
+// written as li > a -- an anchor inside the form got the underline and none of the row styling. The
+// form sits beside it, hidden; the anchor's href is inert and its click submits the form, so the
+// token still travels only in the POST body.
+var b=document.createElement('a');b.href='javascript:void(0)';b.textContent=label;if(title)b.title=title;
+b.addEventListener('click',function(e){e.preventDefault();if(f.requestSubmit)f.requestSubmit();else{var ev=document.createEvent('Event');ev.initEvent('submit',true,true);if(f.dispatchEvent(ev))f.submit()}});
+f.style.display='none';li.appendChild(b);li.appendChild(f);
 f.addEventListener('submit',function(e){var t=tok();
 if(!t){e.preventDefault();console.warn('menu handoff: no session token in this page, nothing sent');return}
 h.value=t;setTimeout(function(){h.value=''},0)});

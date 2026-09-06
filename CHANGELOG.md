@@ -22,6 +22,10 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+### Fixed
+
+- A `handoff` menu entry is drawn as an anchor that is the row's direct child, so the portal's own dropdown hover applies; the form sits hidden beside it and the token still travels only in the POST body.
+
 ## [0.7.1] — 2026-09-06
 
 ### Changed

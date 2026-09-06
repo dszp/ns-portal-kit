@@ -954,12 +954,13 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(/setAttribute\('rel','noopener'\)/.test(ho) && !/noreferrer/.test(ho),
       '[handoff] rel="noopener" on the form, and never noreferrer — that would send Origin: null and the receiver would refuse it');
     ok(/\.type='hidden'/.test(ho) && /\.name='ns_t'/.test(ho), '[handoff] one hidden input named ns_t');
-    ok(/\.type='submit'/.test(ho), '[handoff] and a submit control carrying the label');
+    ok(/createElement\('a'\);b\.href='javascript:void\(0\)'/.test(ho), '[handoff] and the visible row is an anchor like its siblings, so the menu hover applies');
+    ok(/requestSubmit\(\)/.test(ho), '[handoff] whose click submits the form');
     const listenAt = ho.indexOf("addEventListener('submit'");
     const tokAt = ho.indexOf('tok()');
     ok(listenAt > -1 && tokAt > listenAt,
       `[handoff] the token is read INSIDE the submit handler, never at render (listener@${listenAt}, tok@${tokAt})`);
-    ok(!/\.href/.test(ho), '[handoff] nothing in it writes an href — the token has no URL to ride');
+    ok((ho.match(/\.href=/g) || []).length === 1 && /b\.href='javascript:void\(0\)'/.test(ho), '[handoff] the only href written is the inert anchor — the token has no URL to ride');
     const applier = b.slice(b.indexOf('function menuApply('), b.indexOf('function menuHandoff('));
     ok(/m\.handoff==='ns_t'/.test(applier) && /menuHandoff\(/.test(applier), '[handoff] menuApply branches on the literal and delegates');
     ok(/a\.href=fill\(m\.url\);a\.target='_blank';a\.rel='noopener noreferrer'/.test(applier), '[handoff] and a plain item still renders as the anchor it always was');
@@ -996,17 +997,18 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
       { label: 'Docs', url: 'https://docs.example.com/x' },
     ] }, null);
     ok(ul.children.length === 2, '[handoff] both entries drawn, one row each');
-    const form = ul.children[0]!.children[0]!;
+    const button = ul.children[0]!.children[0]!;
+    const form = ul.children[0]!.children[1]!;
     const link = ul.children[1]!.children[0]!;
-    ok(form.tagName === 'FORM' && link.tagName === 'A', '[handoff] the handoff row holds a form, the plain row an anchor');
+    ok(button.tagName === 'A' && form.tagName === 'FORM' && link.tagName === 'A',
+      '[handoff] the handoff row is an anchor that is the li\'s DIRECT child (Bootstrap styles li > a) with its form beside it');
     ok(form.method === 'POST' && form.action === 'https://tools.example.com/launch?from=%2Fportal%2Fusers' && form.target === '_blank',
       '[handoff] POST to the entry url with {page} filled, in a new tab');
     const hidden = form.children.find((c) => c.tagName === 'INPUT')!;
-    const button = form.children.find((c) => c.tagName === 'BUTTON')!;
     ok(!!hidden && hidden.type === 'hidden' && hidden.name === 'ns_t' && hidden.value === '',
       '[handoff] the hidden field is named ns_t and is EMPTY at render');
-    ok(!!button && button.type === 'submit' && button.textContent === 'Bulk tool' && button.title === 'Opens the tool',
-      '[handoff] the submit control carries the label and tooltip');
+    ok(!!button && button.tagName === 'A' && button.textContent === 'Bulk tool' && button.title === 'Opens the tool',
+      '[handoff] the visible row is an anchor carrying the label and tooltip');
     ok(link.href === 'https://docs.example.com/x' && link.textContent === 'Docs', '[handoff] the plain entry is untouched');
 
     // Submit with a token: the field is filled for the navigation, then cleared behind it.
