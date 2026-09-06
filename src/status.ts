@@ -40,10 +40,11 @@ import { identityUsable, type NsIdentityEnv } from './nsIdentity.js';
 // activation config. Aliased so both fit in one intersection without colliding.
 import { scopeOf, ringotelEnabled, type RingotelEnv as RingotelDataEnv } from './ringotel.js';
 import { resolveRingotelConfig, ringotelConfigError, RingotelConfigError, type RingotelEnv as EligibilityEnv } from './eligibility.js';
+import { onebillEnabled, onebillConfigError, ONEBILL_SETTING_NAMES, type OnebillEnv } from './onebill.js';
 
 export type StatusEnv = FeaturesEnv & KitEnv & SetupEnv & MenuEnv
   & AppAccessEnv & RingotelDataEnv & EligibilityEnv & NsEventsEnv & NsDeviceEnv
-  & BrandEnv & NsIdentityEnv;
+  & BrandEnv & NsIdentityEnv & OnebillEnv;
 
 export interface BuildStatusOpts {
   principal: Principal | null;
@@ -489,6 +490,13 @@ function ringotelGateCard(env: StatusEnv, ringErr: string | null): CardResult {
   return ringotelEnabled(env) ? { state: 'on' } : inertOn(env, ['RINGOTEL_API_KEY']);
 }
 
+/** Same shape as {@link ringotelGateCard}: `onebillConfigError` (a malformed ONEBILL_LINK_GROUP)
+ *  outranks the on/inert read, same as a bad Ringotel config outranks its own on/inert. */
+function onebillGateCard(env: StatusEnv, err: string | null): CardResult {
+  if (err) return { state: 'misconfigured', notes: [err] };
+  return onebillEnabled(env) ? { state: 'on' } : inertOn(env, ['ONEBILL_TENANT_ID', 'ONEBILL_CLIENT_SECRET', 'ONEBILL_USERNAME', 'ONEBILL_PASSWORD']);
+}
+
 /** Same predicate `ringotel.activate`'s feature card uses (`prereqSatisfied`) — a raw
  *  `isSet(RINGOTEL_WRITE_DOMAINS)` reads `on` for `','` (parses to an empty domain list; every write is
  *  refused), which is exactly the state `ringotel.activate` reports as `inert`. Two cards deriving "is
@@ -677,7 +685,8 @@ function ratelimitCard(env: StatusEnv): CardResult {
  * table, so the whole non-feature surface is auditable in one place — mirrors FEATURE_REGISTRY's role for
  * features. `group` picks the closest existing `SettingGroup` for a subsystem with no group of its own
  * (`auth`/`exposure`/`cache`/`nsdevices` → `core`; `writes`/`sso`/`offboarding`/`ratelimit` → the group
- * their primary setting already carries; `onebill`/`documo` → `core`, having no setting to inherit from).
+ * their primary setting already carries; `documo` → `core`, having no setting to inherit from; `onebill`
+ * has its own `SettingGroup` since it owns seven settings of its own).
  */
 /**
  * Which subsystems cannot act in this deployment's mode, and why. Declared here beside the row table rather
@@ -697,7 +706,7 @@ function applicabilityOfSubsystem(id: string, _env: StatusEnv): Applicability {
 function buildSubsystems(
   env: StatusEnv,
   hostname: string,
-  errs: { kitErr: string | null; menuErr: string | null; aaErr: string | null; ringErr: string | null },
+  errs: { kitErr: string | null; menuErr: string | null; aaErr: string | null; ringErr: string | null; onebillErr: string | null },
   events: CardResult & { armed: boolean },
 ): SubsystemCard[] {
   const identity = resolveWriteIdentity(env);
@@ -767,10 +776,10 @@ function buildSubsystems(
       description: 'Throttles live ns_t verification calls against the NetSapiens core.',
       settings: ['JWT_RATE_LIMITER'],
       result: ratelimitCard(env) },
-    { id: 'onebill', name: 'OneBill billing integration', group: 'core', tab: 'integration', parent: null,
-      description: 'Not wired into this Worker.',
-      settings: [],
-      result: { state: 'not-integrated' } },
+    { id: 'onebill', name: 'OneBill links', group: 'onebill', tab: 'integration', parent: null,
+      description: 'Links each NetSapiens domain and site to the OneBill account that bills it. Opens from Management → OneBill Integration.',
+      settings: [...ONEBILL_SETTING_NAMES],
+      result: onebillGateCard(env, errs.onebillErr) },
     { id: 'documo', name: 'Documo fax integration', group: 'core', tab: 'integration', parent: null,
       description: 'Not wired into this Worker.',
       settings: [],
@@ -1402,6 +1411,7 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
   const menuErr = menuConfigError(env);
   const ringErr = ringotelConfigError(env);
   const evErr = nsEventsConfigError(env);
+  const onebillErr = onebillConfigError(env);
 
   const configErrors: StatusDoc['configErrors'] = [];
   const addErr = (subsystem: string, reason: string | null): void => {
@@ -1413,6 +1423,7 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
   addErr('Portal menus', menuErr);
   addErr('Ringotel activation', ringErr);
   addErr('NetSapiens events', evErr);
+  addErr('OneBill links', onebillErr);
 
   // ── feature cards: one per registry entry ────────────────────────────────────────────────────────
   const ownerErrs: OwnerErrs = { featuresErr, kitErr, ringErr, aaErr, menuErr };
@@ -1423,7 +1434,7 @@ export function buildStatus(env: StatusEnv, opts: BuildStatusOpts): StatusDoc {
   // block doing anything" gate read the same answer. Two evaluations of "are events armed" is how the
   // Config tab would come to grey out a block the Integrations tab reports as ON.
   const events = eventsCard(env);
-  const subsystems = buildSubsystems(env, hostname, { kitErr, menuErr, aaErr, ringErr }, events);
+  const subsystems = buildSubsystems(env, hostname, { kitErr, menuErr, aaErr, ringErr, onebillErr }, events);
 
   // ── setting views: one per SETTINGS row, secrets by presence only ───────────────────────────────
   // Same rule as the cards: a setting that cannot act in this mode is not shown at all, whether or not it has

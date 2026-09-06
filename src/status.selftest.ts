@@ -84,10 +84,10 @@ ok(envBadge('svc.example.com', 'dev') === 'DEV', 'CACHE_SCOPE=dev wins over a pr
   const doc = buildStatus(OK_ENV, { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' });
   const byKey = (k: string) => doc.features.find((f) => f.key === k)!;
 
-  // EXACT, not a floor. `>= 18` against a registry of exactly 24 passes by coincidence and loosens
+  // EXACT, not a floor. `>= 18` against a registry of exactly 26 passes by coincidence and loosens
   // silently — deleting a registry entry left it green. Same reason EXPECTED_SUBSYSTEM_IDS below is a set
   // and not a count: adding a feature should be a deliberate edit here.
-  ok(doc.features.length === 24, `every registry feature gets a card, and there are exactly 24 (got ${doc.features.length})`);
+  ok(doc.features.length === 26, `every registry feature gets a card, and there are exactly 26 (got ${doc.features.length})`);
   ok(doc.features.every((f) => f.name && f.description), 'cards carry a name and description');
 
   ok(byKey('me.devices').state === 'off', 'a feature gated `off` reports off');
@@ -213,11 +213,13 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // 61 after the standalone viewer left this repo (2026-08-09) and took NS_API_TOKEN,
   // ALLOW_UNGATED_SERVICE_TOKEN, ACCESS_AUD, ACCESS_TEAM_DOMAIN and PORTAL_MODE with it; 60 in 0.3.1,
   // when BRAND_LABEL followed them — its only reader was the viewer's theme picker; 61 again with
-  // DOCUMO_DOMAINS, the stand-in driving the second app's menu targeting. Pinned as an EXACT
-  // number on purpose — `>= 60` was a floor that passed by coincidence, so deleting a row did not trip
-  // it. Bump this deliberately when adding one; the drift guard in statusModel.selftest.ts is what
-  // proves the table matches `interface Env`.
-  ok(SETTINGS.length === 61, `sanity: the descriptor table has exactly 61 rows (got ${SETTINGS.length})`);
+  // DOCUMO_DOMAINS, the stand-in driving the second app's menu targeting. 70 through 0.3.x; 72 with the
+  // OneBill baseline-acceptance feature, which added ONEBILL_RECURRING_RULES (config) and ONEBILL_DB
+  // (a binding, alongside ASSETS and JWT_RATE_LIMITER). Pinned as an EXACT number on purpose — `>= 60`
+  // was a floor that passed by coincidence, so deleting a row did not trip it. Bump this deliberately
+  // when adding one; the drift guard in statusModel.selftest.ts is what proves the table matches
+  // `interface Env`.
+  ok(SETTINGS.length === 73, `sanity: the descriptor table has exactly 73 rows (got ${SETTINGS.length})`);
   // Every row is rendered now: there is one deployment shape, so no setting is inapplicable to it.
   ok(doc.settings.length === SETTINGS.length,
     `every row is rendered (${doc.settings.length} of ${SETTINGS.length})`);
@@ -249,9 +251,9 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   }
   // Exactly the bindings group gets that text — no var or secret is misdescribed as a binding.
   const bindingRows = doc.settings.filter((x) => /BINDING/i.test(x.whyNot)).map((x) => x.name).sort();
-  ok(JSON.stringify(bindingRows) === JSON.stringify(['ASSETS', 'JWT_RATE_LIMITER']),
-    `only the two bindings carry the binding instruction (got: ${bindingRows.join(', ')})`);
-  ok(doc.settings.filter((x) => x.group === 'bindings').length === 2, 'and the bindings group is those same two rows');
+  ok(JSON.stringify(bindingRows) === JSON.stringify(['ASSETS', 'JWT_RATE_LIMITER', 'ONEBILL_DB']),
+    `only the three bindings carry the binding instruction (got: ${bindingRows.join(', ')})`);
+  ok(doc.settings.filter((x) => x.group === 'bindings').length === 3, 'and the bindings group is those same three rows');
   const rl = buildStatus({ ...OK_ENV }, { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' });
   ok(rl.subsystems.find((x) => x.id === 'ratelimit')!.state === 'on', 'sanity: the rate-limit card reports on either way');
 
@@ -343,11 +345,14 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // "inert-but-deliberate" while asserting 'off' — the assertion is the correct one.)
   ok(sub('events').state === 'off', 'NS events with nothing touched reads off — the same footing as an explicit off');
 
-  // OneBill and Documo: libraries exist in the workspace, nothing is wired into this Worker. Saying so
-  // is the point — omitting them would be lying by absence.
-  ok(sub('onebill').state === 'not-integrated', 'OneBill reports not-integrated');
+  // OneBill is wired in now: with no credentials set, it reads inert and names its four required
+  // settings. Documo has no library consuming it in this Worker at all, so it stays not-integrated.
+  ok(sub('onebill').state === 'inert', 'OneBill with no credentials set is inert');
+  ok(sub('onebill').missing.some((m) => m.setting === 'ONEBILL_TENANT_ID'), 'and names the tenant id among what is missing');
+  // Ten config settings (ONEBILL_SETTING_NAMES in onebill.ts, now including ONEBILL_RECURRING_RULES);
+  // ONEBILL_DB is a `bindings`-group row, not a config setting, and is not part of this card's list.
+  ok(sub('onebill').settings.length === 9, 'OneBill\'s card lists all nine of its config settings');
   ok(sub('documo').state === 'not-integrated', 'Documo reports not-integrated');
-  ok(sub('onebill').settings.length === 0, 'a not-integrated subsystem has no settings to show');
 
   // An armed events config reports on.
   const armed = buildStatus({
@@ -531,7 +536,7 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
 // just settings[].value, but configErrors[].reason, card notes[], and missing why/how too. ───────────
 {
   const secretNames = SETTINGS.filter((s) => s.kind === 'secret').map((s) => s.name);
-  ok(secretNames.length === 7, `sanity: exactly 7 secret settings (got ${secretNames.length})`);
+  ok(secretNames.length === 10, `sanity: exactly 10 secret settings (got ${secretNames.length})`);
 
   // Every sentinel gets its OWN random body, and no key name in it. The previous shape gave all eight the
   // same 33-char prefix and suffixed the setting's name, which meant `slice(0,10)` and `slice(0,14)` were
@@ -543,6 +548,7 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   const BODIES = [
     'q7Ld2Xn4Mb9Rz', 'Ht6Vc1Ws8Pj3K', 'Fy5Gk9Zt2Nq7B', 'Jr4Bm7Xv1Ld6C',
     'Wp8Nh3Qs5Tz2M', 'Cv9Rk2Fj6Yb4L', 'Zx1Ty7Dn5Gm8P',
+    'Bq3Ws9Ln6Tk2F', 'Dm7Xr4Vc1Gp8H', 'Ky5Nz2Tj9Wq4L',
   ];
   ok(new Set(BODIES).size === secretNames.length, 'sanity: one distinct sentinel body per secret');
   const sentinelEnv: Record<string, string> = { ...OK_ENV, RINGOTEL_API_KEY: 'x', RINGOTEL_WRITE_DOMAINS: '*' };

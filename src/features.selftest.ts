@@ -478,5 +478,20 @@ ok(can(P('Reseller'), 'me.appAccess', selfPolicies), 'me.appAccess default admit
   }
 }
 
+// ── onebill.view / onebill.write (the OneBill links page) ─────────────────────────────────────────
+// The two keys are deliberately a rung apart: reading which account bills a domain is reseller work;
+// changing that link is not. Same principal fixtures as kit.status above.
+{
+  const bare = resolveFeaturePolicies({});
+  ok(FEATURE_REGISTRY.some((f) => f.key === 'onebill.view'), 'registry has onebill.view');
+  ok(FEATURE_REGISTRY.some((f) => f.key === 'onebill.write'), 'registry has onebill.write');
+  ok(can(P('Reseller', 'other@d.example'), 'onebill.view', bare), 'onebill.view admits a reseller by default');
+  ok(!can(P('Reseller', 'other@d.example'), 'onebill.write', bare),
+    'onebill.write does NOT — writing a billing link defaults to a named superadmin');
+  const withBoss = resolveFeaturePolicies({ PORTAL_SUPERADMINS: 'boss@0000.svc' });
+  ok(can(P('Basic User', 'boss@0000.svc'), 'onebill.write', withBoss), 'a named superadmin may write');
+  ok(!can(P('Office Manager', 'om@d.example'), 'onebill.view', bare), 'and an Office Manager sees neither');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -325,6 +325,8 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
       'Whether this account is offered the portal\'s own control for creating a domain. It is the one domain-record capability with no target to name — you are making the domain, so there is nothing yet to be specific about.',
       '### What denying it does, and does not do',
       'It removes the control. It does not remove the capability: the form behind it belongs to your NetSapiens portal and posts directly to it, with this kit nowhere in the path. Someone who knows the URL is unaffected. Treat this as a guardrail against the wrong click by someone who should not be making that click, not as a permission — the platform\'s own scopes are the only thing that can refuse the write.',
+      '### The usual shape',
+      'A deny, naming the accounts to carve out of this key\'s own default: `{"users":{"deny":["100@example.com"]}}`. It reads as "reseller — this key\'s default — except that account", so it stays correct as staff are added, because it names the exception rather than everyone who keeps the control. Add it as a top-level key in your existing `PORTAL_FEATURES` object, beside whatever else is in there; every key you do not name keeps its default. The Permissions tab\'s "Copy the configuration" hands you your current overrides to paste back with this added.',
     ],
   },
   {
@@ -340,6 +342,7 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
       'It removes the controls. It does not remove the capability. The edit form belongs to your NetSapiens portal and posts directly to it; this kit is not in that path and cannot refuse the write. A missed control therefore fails open — you get the button back, never a false sense that something was blocked. Use the platform\'s own scopes for anything that must actually be prevented.',
       '### The usual shape',
       'The reason to reach for this is almost always "everyone who has it today, except these people", which is what a deny-only gate means: `{"users":{"deny":["100@example.com"]}}`. That stays correct as staff are added, because it names the exception rather than its complement.',
+      'It goes in `PORTAL_FEATURES` as a top-level key beside your other overrides — the value is one JSON object, so adding a key means writing that object back with the key in it, and anything you do not name keeps its built-in default. A deny beats a `PORTAL_SUPERADMINS` account (the one place other than `off` where that happens) and follows the person through a masquerade.',
     ],
   },
   {
@@ -351,6 +354,8 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
       'Whether this account is offered the portal\'s own control for deleting a domain. Separate from editing on purpose: "may adjust a customer\'s limits, may never delete the customer" is an ordinary thing to want of junior staff, and one key covering both could not express it.',
       '### What denying it does, and does not do',
       'It removes the control, not the capability — the same caveat as the other two, and it matters most here, because this is the irreversible one. Nothing in a browser can stop a determined request; only the platform\'s own scopes can.',
+      '### The usual shape',
+      'A deny: `{"users":{"deny":["100@example.com"]}}` — this key\'s default (`reseller`) minus that account. Pair it with `portal.domainCreate` and leave `portal.domainEdit` alone to get "may adjust a customer\'s limits, may never delete the customer"; the three keys are independent, so one you do not name keeps its default. Naming a level too — `{"levels":["reseller"],"users":{"deny":["100@example.com"]}}` — says both halves explicitly, and is worth it only when you are also changing which levels hold the key.',
     ],
   },
  {
@@ -391,6 +396,8 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
       'It reads only the labels already rendered on the page in front of you, and writes only to your own browser. Nothing is sent anywhere, no configuration changes, and the capability is gated on the masquerade itself: the rule requires masking to be on and the operator behind the mask to be a superadmin, so it cannot be reached by anyone signing in normally.',
     ],
   },
+  { key: 'onebill.view', name: 'OneBill links', description: 'See the OneBill entry in the Management menu and read which OneBill account each NetSapiens domain and site is linked to.', default: 'reseller', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'], usersBackstop: 'requireFleetRead (worker.ts) \u2014 the page names every domain, so a domain-locked account admitted by name is still refused at the route' },
+  { key: 'onebill.write', name: 'OneBill links \u2014 write', description: 'Link, relink or remove the NetSapiens domain and site recorded on an OneBill account. Requires onebill.view.', default: 'superadmin', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'], usersBackstop: 'requireFleetRead (worker.ts), and the route requires onebill.view too' },
 ];
 
 /** The registry's policy keys, in order (drives `_AF` + the default policy set). */

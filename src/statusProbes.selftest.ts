@@ -5,6 +5,19 @@ import { PROBE_CATALOG, probeCatalogFor } from './statusModel.js';
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => { c ? pass++ : fail++; console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); };
 
+// --- stub Cache API (per-colo cache) with an in-memory map — same shape as worker.selftest.ts's.
+// The OneBill probe reads `caches.default` for its OAuth token cache; Node has no such global.
+class MemoryCache {
+  store = new Map<string, Response>();
+  async match(req: Request): Promise<Response | undefined> {
+    const r = this.store.get(req.url);
+    return r ? r.clone() : undefined;
+  }
+  async put(req: Request, res: Response): Promise<void> { this.store.set(req.url, res.clone()); }
+  async delete(req: Request): Promise<boolean> { return this.store.delete(req.url); }
+}
+(globalThis as any).caches = { default: new MemoryCache() };
+
 const SECRET = 'SENTINEL-RT-KEY-zz9';
 const CTX = { server: 'mock.local', token: 'delegated-token', domain: 'acme.example' };
 const byId = (rs: any[], id: string) => rs.find((r) => r.id === id)!;
@@ -35,7 +48,8 @@ globalThis.fetch = modeFetch;
     ok(/NS_EVENTS_BASE_URL/.test(d) && /NS_EVENTS_PATH_SECRET/.test(d),
       `and it names the settings it was waiting on, not just that it was waiting (got: ${d})`);
   }
-  ok(byId(rs, 'onebill-documo').state === 'skip', 'OneBill/Documo are not integrated');
+  ok(byId(rs, 'onebill').state === 'skip', 'no OneBill credentials ⇒ the OneBill probe skips');
+  ok(byId(rs, 'documo').state === 'skip', 'Documo is not integrated into this Worker');
 }
 
 // ── a working upstream ─────────────────────────────────────────────────────────
@@ -178,6 +192,66 @@ globalThis.fetch = modeFetch;
     ok(!!ev && ev.state === 'fail' && /failed unexpectedly/.test(ev.detail),
       'the escaping throw becomes guarded\'s own fail result, not a lost panel');
   }
+
+  globalThis.fetch = modeFetch; // restore the shared mode-based stub for the blocks below
+}
+
+// ── OneBill: an OAuth grant, then one one-row subscriber read — never a fleet-wide walk ────────────
+{
+  const OB_ENV = {
+    NS_SERVER: 'mock.local',
+    ONEBILL_TENANT_ID: 'tenant-0000', ONEBILL_CLIENT_SECRET: 'shh', ONEBILL_USERNAME: 'api@example.com', ONEBILL_PASSWORD: 'pw',
+  };
+  // The search row never carries `accountAttribute` (onebill-lib: attributes ride only the
+  // single-record GET), so the probe falls back to `getSubscriber` for its one row — `singleRecord`
+  // is what that second read answers with, distinct from the search's own `subscriberBody`.
+  const stubOnebill = (subscriberStatus: number, subscriberBody: unknown, singleRecord: unknown = { accountNumber: 'CLI00001', accountAttribute: [{ key: 'PBX', childAttribute: [{ key: 'Domain', value: 'acme.example' }, { key: 'Site', value: '' }] }] }) => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'tok-123', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      // getSubscriber's path ends in the account number; searchSubscribers' does not (it carries
+      // query params on the bare /subscribers path instead).
+      if (/\/subscribers\/[^/?]+(\?|$)/.test(url) && !url.includes('/subscribers?')) {
+        return new Response(JSON.stringify(singleRecord), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(subscriberBody), { status: subscriberStatus, headers: { 'content-type': 'application/json' } });
+    }) as any;
+  };
+
+  // pass, one row
+  stubOnebill(200, { subscriber: [{ accountNumber: 'CLI00001' }], resultSize: 1, totalCount: 76 });
+  let rs = await runProbes(OB_ENV as any, CTX);
+  ok(byId(rs, 'onebill').state === 'pass', 'a reachable OneBill API with a real token and a one-row read ⇒ pass');
+  ok(/1 subscriber row/.test(byId(rs, 'onebill').detail), 'and the detail names the row count it actually read');
+
+  // pass, zero rows (a tenant with nothing to return is still a working API)
+  stubOnebill(200, { subscriber: [], resultSize: 0 });
+  rs = await runProbes(OB_ENV as any, CTX);
+  ok(byId(rs, 'onebill').state === 'pass', 'zero matching rows is still a pass — the API answered');
+
+  // the group named by ONEBILL_LINK_GROUP is not declared on the one record the probe can read ⇒ fail
+  stubOnebill(200, { subscriber: [{ accountNumber: 'CLI00001' }], resultSize: 1 }, { accountNumber: 'CLI00001' });
+  rs = await runProbes(OB_ENV as any, CTX);
+  ok(byId(rs, 'onebill').state === 'fail', 'the group is not declared on the one record read ⇒ fail');
+  ok(/create an account-level custom-field group with the key "PBX"/.test(byId(rs, 'onebill').detail), 'with the same checklist sentence the page uses');
+
+  // a rejected credential: report it, and never quote it
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'invalid_client' }), { status: 401 })) as any;
+  rs = await runProbes({ ...OB_ENV, ONEBILL_PASSWORD: SECRET } as any, CTX);
+  ok(byId(rs, 'onebill').state === 'fail', 'a 401 on the OAuth grant ⇒ fail');
+  ok(/401/.test(byId(rs, 'onebill').detail), 'and the detail carries the status code');
+  ok(!JSON.stringify(rs).includes(SECRET), 'but never the credential itself');
+
+  // upstream unreachable entirely
+  globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
+  rs = await runProbes(OB_ENV as any, CTX);
+  ok(byId(rs, 'onebill').state === 'fail', 'a network failure ⇒ fail, never a throw');
+  ok(!/connection reset/.test(byId(rs, 'onebill').detail), 'and the detail does not quote the raw upstream error');
+
+  // Documo has nothing to check, regardless of what OneBill is doing.
+  ok(byId(rs, 'documo').state === 'skip', 'Documo always skips — it is not wired into this Worker');
 
   globalThis.fetch = modeFetch; // restore the shared mode-based stub for the blocks below
 }

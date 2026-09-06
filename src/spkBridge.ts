@@ -136,4 +136,91 @@ export const SPK_BRIDGE = {
    * separate message would be a second field for one boolean travelling the same wire to the same place.
    */
   stockKey: 'stock',
+
+  /**
+   * iframe → parent: the OneBill links page asks for the report (`{op:'list', refresh?}`) or for an
+   * apply (`{op:'apply', ops}`). The parent forwards them to `GET /kit/onebill/links` and
+   * `POST /kit/onebill/apply` — the page itself fetches nothing, because it is a sandboxed `srcdoc`
+   * with no `ns_t` and no origin of its own to send one from.
+   *
+   * Correlated by {@link idKey} like the check/preview pairs, and for a sharper reason than either: a
+   * list and an apply can be outstanding at once, and the two answers are not interchangeable. An apply
+   * result rendered as a report would redraw the table from nothing.
+   */
+  onebillRequest: 'onebill',
+  /** parent → iframe: the reply to {@link onebillRequest}. */
+  onebillResponse: 'onebill-result',
+  /**
+   * BOTH DIRECTIONS: the payload field. iframe → parent it is the request (`{op, refresh?, ops?}`);
+   * parent → iframe it is `{report}`, `{results}`, or `{unavailable: '<why>'}`.
+   *
+   * ⚠️ `unavailable` obeys the same rule as {@link errorKey}: it renders as a FAILED load or a FAILED
+   * apply, never as an empty table and never as a silent no-op. An empty links table says "OneBill has
+   * no links to show", which is a confident answer to a question that was never asked.
+   */
+  onebillKey: 'onebill',
+
+  /**
+   * iframe to parent: "load the account panel for this domain" (`{domain, refresh?}`). The parent
+   * forwards it to `GET /kit/onebill/account`.
+   *
+   * A THIRD message pair rather than a third `op` on {@link onebillRequest}, deliberately: the links
+   * report and one account's report are different documents with different shapes, and a mis-tagged
+   * reply that redrew the table from an account report would empty the page. The reply also carries
+   * `unavailable` under the same rule as {@link errorKey} — a failed load renders as a failed load,
+   * never as an empty panel, which would read as "this account is billed for nothing".
+   */
+  accountRequest: 'account:load',
+  /** parent to iframe: the reply to {@link accountRequest}. */
+  accountResponse: 'account:report',
+  /** BOTH DIRECTIONS: iframe to parent `{domain, refresh?}`; parent to iframe `{report}` or `{unavailable}`. */
+  accountKey: 'account',
+
+  /**
+   * iframe to parent: "record this decision" (`{account, group, action: 'accept'|'clear', and exactly
+   * one of items: [{key}], all: true, shortfall: true; note?}`), forwarded to
+   * `POST /kit/onebill/baseline`. The route takes exactly one of `account` | `domain`; the page always
+   * sends the ACCOUNT its panel is showing, because a panel can be open on an account holding one SITE
+   * of a domain whose bare row belongs to somebody else — by domain that write lands on the wrong
+   * account or is refused as a multi-account split.
+   *
+   * ⚠️ Naming an account is not being trusted with one. The Worker resolves the number through the
+   * CALLER'S OWN link report and refuses any resulting scope that touches a domain they cannot see,
+   * before a single per-domain read; the string itself reaches nothing downstream. The page still names
+   * no count either: what is billed and what is observed are read from the report the write loads.
+   *
+   * `decidedBy` is deliberately NOT in the payload. The Worker takes it from the caller's own ns_t,
+   * because a page-supplied name is exactly the field an audit trail must not accept.
+   */
+  baselineRequest: 'baseline:accept',
+  /** parent to iframe: the reply to {@link baselineRequest}. */
+  baselineResponse: 'baseline:saved',
+  /** BOTH DIRECTIONS: iframe to parent the write (subject: `account`); parent to iframe `{row}` — the
+   *  comparison row as it now reads — or `{unavailable}`. */
+  baselineKey: 'baseline',
+
+  /**
+   * iframe to parent: "bill this item to that account instead" (`{viewing, domain, key, accountNumber:
+   * string | null, note?}`), forwarded to `POST /kit/onebill/assign?viewing=<account>`. An
+   * `accountNumber` of `null` takes the decision back and hands the item to the automatic rule — which
+   * is a durable change of its own, so the parent forwards the field exactly as sent and lets the
+   * Worker refuse a body that simply left it out.
+   *
+   * `viewing` names the panel that is open, not what was decided, which is why it rides the QUERY
+   * STRING while the decision rides the body — and why the reply is that account's whole report rather
+   * than one row: an item can move OUT of the account being viewed, and every count on the page changes
+   * with it. A fourth pair rather than an `op` on {@link baselineRequest} for the reason the third one
+   * exists: a comparison row and an account report are different documents, and the wrong one rendered
+   * in the wrong place empties the panel.
+   *
+   * `decidedBy` is deliberately NOT in the payload — the Worker takes it from the caller's own ns_t,
+   * and the account the item moves to is checked against what the caller can actually see.
+   */
+  assignRequest: 'assign:set',
+  /** parent to iframe: the reply to {@link assignRequest}. */
+  assignResponse: 'assign:saved',
+  /** BOTH DIRECTIONS: iframe to parent the decision plus `viewing`; parent to iframe `{report}` — the
+   *  viewed account's report as it now reads — or `{unavailable}`, which renders as a failed move and
+   *  never as a silent no-op. */
+  assignKey: 'assign',
 } as const;

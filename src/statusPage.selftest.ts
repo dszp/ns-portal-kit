@@ -256,12 +256,22 @@ const DOC = () => buildStatus(
 
   // Every field the page's handler reads off the received message.
   const fieldsRead = new Set([...script.matchAll(/\bm\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]!));
-  // Every field the parent puts into ANY reply. Scoped by the protocol tag rather than by one message
-  // type: there are two replies now (probe results, and the observed-page facts), and a rule that only
-  // covered the first would have gone quiet on the second exactly when it was newest.
+  // Every field the parent puts into ANY reply TO THIS PAGE. Scoped by the protocol tag rather than by one
+  // message type: there are several replies now (probe results, the observed-page facts, the menu reads),
+  // and a rule that only covered the first would have gone quiet on the next one exactly when it was newest.
+  //
+  // ⚠️ FOUR REPLIES ARE DELIBERATELY EXCLUDED. The same bundle also serves the OneBill links page, a
+  // SECOND consumer with its own message pairs (SPK_BRIDGE.onebillRequest/Response, accountRequest/Response,
+  // baselineRequest/Response, assignRequest/Response) and their own payload fields (onebill, account,
+  // baseline, assign). The console neither sends nor reads any of them, so folding them in would assert the
+  // union of two protocols against one page — and the fix would be to list a key here that the console must
+  // never carry. That page's own half of this guard lives in onebillPage.selftest.ts, scoped the same way.
   const sendRe = new RegExp(`postMessage\\(\\{([^}]*${SPK_BRIDGE.tag}[^}]*)\\}`, 'g');
+  const OTHER_PAGE = [SPK_BRIDGE.onebillResponse, SPK_BRIDGE.accountResponse, SPK_BRIDGE.baselineResponse, SPK_BRIDGE.assignResponse];
   const fieldsSent = new Set(
-    [...bundle.matchAll(sendRe)].flatMap((m) => m[1]!.split(',').map((kv) => kv.split(':')[0]!.trim())),
+    [...bundle.matchAll(sendRe)]
+      .filter((m) => !OTHER_PAGE.some((t) => m[1]!.includes(t)))
+      .flatMap((m) => m[1]!.split(',').map((kv) => kv.split(':')[0]!.trim())),
   );
 
   // Every payload field the protocol defines. Listed explicitly rather than derived from SPK_BRIDGE's

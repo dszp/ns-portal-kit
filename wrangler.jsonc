@@ -9,6 +9,8 @@
   //   RINGOTEL_API_KEY enables the Ringotel integration (absent ⇒ it does not run at all)
   //   RINGOTEL_LABEL / RINGOTEL_LABEL_SHORT   white-label display names (default "Ringotel")
   //   BRAND_NAME       your company name (default: unbranded, "NS Portal Kit")
+  //   ONEBILL_TENANT_ID, ONEBILL_CLIENT_SECRET, ONEBILL_USERNAME, ONEBILL_PASSWORD (OneBill links; set
+  //     the tenant id as a secret too if you would rather keep it out of this file — see CONFIG.md)
   //
   // Regenerate Env types after edits: `pnpm cf-typegen`.
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -98,10 +100,48 @@
     // Enrichment toggles.
     // "RINGOTEL_PRESENCE": "1",     // 🟢/🔴 presence circles (point-in-time, cached ≤10m)
     // "NS_DEVICE_DETAILS": "1"      // desk-phone model + registration presence
+    //
+    // ── OPTIONAL: OneBill billing reconciliation (src/onebill.ts) ─────────────────────────────────
+    // Off unless ONEBILL_TENANT_ID plus the three ONEBILL_* secrets above are all set. The custom-field
+    // group named below must already exist in OneBill — SETUP.md walks through declaring it.
+    // "ONEBILL_TENANT_ID": "<your OneBill tenant id>",   // a secret instead, if this repo is public
+    // "ONEBILL_BASE_URL": "https://api.example.com",     // only if yours is not the standard one
+    // "ONEBILL_LINK_GROUP": "{\"group\":\"PBX\",\"ns\":\"NS\",\"valueField\":\"Domain\",\"qualifierField\":\"Site\"}",
+    // "ONEBILL_USAGE_OFFERS": "Domain Usage",  // offers whose subscription identifier IS the domain
+    // "ONEBILL_USAGE_IGNORE": "_OLD",          // substrings marking a retired identifier
+    //
+    // The rulebook: which of YOUR offers counts toward which inventory dimension. Unset, the account
+    // panel is a fact sheet. Worked example in SETUP.md — do not copy someone else's product names.
+    // "ONEBILL_RECURRING_RULES": "[{\"offer\":\"Seat\",\"counts\":\"extensions.withAnyDevice\",\"group\":\"Seats\"}]",
+    //
+    // Fax server hosts, from a fax number's dial-rule destination host. A number routed to one of these
+    // counts as dids.fax instead of dids.total. Unset, nothing is a fax line.
+    // "NS_FAX_SERVER_HOSTS": "203.0.113.7",
+    //
+    // What a device-name suffix means here - the part of a device name after the extension number, so
+    // "1001wp" has suffix "wp". Setting this replaces the default legend (wp/m/t) rather than adding to
+    // it, so restate the ones you want to keep. Omit "t" and Teams detection is off entirely.
+    // "NS_DEVICE_SUFFIXES": "{\"wp\":{\"label\":\"SNAPmobile Web\"},\"m\":{\"label\":\"SNAPmobile\"},\"t\":{\"label\":\"Teams\",\"teams\":true}}"
   },
 
   // NB: do NOT also declare ALLOWED_ORIGINS / ALLOWED_DOMAINS in a .dev.vars file. A key present in
   // both is shadowed by the value here during `wrangler dev`, which silently disables the allowlist.
+
+  // Optional: the OneBill account panel's baseline and assignment store. Without it the panel still
+  // renders the inventory and the comparison; only per-item Accept/Clear, the accepted status and the
+  // manual item-to-account assignment are absent.
+  //
+  //   npx wrangler d1 create <your-db-name>
+  //   npx wrangler d1 migrations apply <your-db-name> --remote
+  //
+  // migrations/ holds 0001-0005 and `migrations apply` runs whichever this database has not seen, so
+  // run it again after every update, not only the first time. APPLY BEFORE YOU DEPLOY: the baseline
+  // reads name the current columns, so an unmigrated database makes the panel answer an error rather
+  // than degrade. Two of them DELETE rows because the model changed under them: 0002 clears
+  // billing_baseline, and 0003 clears billing_baseline_item AND billing_baseline - the item
+  // acceptances and the group rows both. 0004 and 0005 delete nothing. See CONFIG.md -> ONEBILL_DB.
+  //
+  // "d1_databases": [{ "binding": "ONEBILL_DB", "database_name": "<your-db-name>", "database_id": "<id>" }],
 
   "observability": { "enabled": true, "logs": { "head_sampling_rate": 1 } }
 

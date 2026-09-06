@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { APP_NAMES, MENU_VARS, MENU_VAR_HELP } from './menus.js';
 import { SETTINGS, settingNames, PROBE_CATALOG, probeCatalogFor, SUBSYSTEM_DETAIL, DOCS_BASE, settingDocsUrl } from './statusModel.js';
 import { buildStatus } from './status.js';
+import { parseFeatures, featurePolicyKeys } from './features.js';
 
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => { c ? pass++ : fail++; console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); };
@@ -122,6 +123,38 @@ ok(unrowed.length === 0,
   const unknown = [...new Set(promised)].filter((v) => !(MENU_VARS as readonly string[]).includes(v));
   ok(promised.length > 0 && unknown.length === 0,
     `and the reference promises none the runtime would refuse${unknown.length ? ` (promised but unknown: ${unknown.join(', ')})` : ''}`);
+  // ── every PORTAL_FEATURES example in the reference must survive the REAL parser ──────────────────
+  // Added 2026-08-16, with the domain-record deny examples: the reference now carries worked gate configs
+  // an adopter is meant to copy, and a copyable example that the parser rejects is worse than none — they
+  // paste it, get a 500 on every route after /health, and reasonably conclude the feature is broken. The
+  // console's own GATE_EXAMPLES are already validated this way (status.ts's `examplesError`); the markdown
+  // had no equivalent, which is exactly the asymmetry that lets docs rot while the product stays right.
+  //
+  // Self-selecting rather than tagged: a ```jsonc block counts as a PORTAL_FEATURES example when it parses
+  // as an object AND every top-level key is a real feature key. Menu configs (apps/account/management),
+  // wrangler fragments and prose snippets fail that test and are skipped, so nothing has to be marked up.
+  // Comments are stripped only at a line start or after whitespace, never after a colon — `"https://x"`
+  // must survive, or a block would be skipped for the wrong reason and the guard would quietly shrink.
+  {
+    const knownKeys = new Set(featurePolicyKeys());
+    const blocks = [...md.matchAll(/```jsonc\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    let checked = 0;
+    for (const raw of blocks) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw.replace(/(^|\s)\/\/[^\n]*/gm, '$1')); } catch { continue; }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      const keys = Object.keys(parsed as Record<string, unknown>);
+      if (!keys.length || !keys.every((k) => knownKeys.has(k))) continue;
+      checked++;
+      let err: string | null = null;
+      try { parseFeatures({ PORTAL_FEATURES: JSON.stringify(parsed) } as never); } catch (e) { err = (e as Error).message; }
+      ok(err === null, `CONFIG.public.md gate example ${checked} is valid PORTAL_FEATURES${err ? ` — ${err}` : ''}`);
+    }
+    // A guard that stopped finding its subject passes silently. The count is a floor, not the exact number,
+    // so adding an example does not break it — dropping them all does.
+    ok(checked >= 5, `and the reference carries gate examples for it to check (found ${checked})`);
+  }
+
   const nohelp = MENU_VARS.filter((v) => !(MENU_VAR_HELP[v] ?? '').trim());
   ok(nohelp.length === 0,
     `and each one says what it fills, for the editor's own hint${nohelp.length ? ` (missing: ${nohelp.join(', ')})` : ''}`);
@@ -135,7 +168,7 @@ ok(new Set(settingNames()).size === SETTINGS.length, 'no duplicate rows');
 // The bindings group is a security-adjacent control of a different kind: it decides which fix-it text an
 // operator is handed (BINDING_WHY_NOT vs CONFIG_WHY_NOT), so assert it explicitly rather than trusting the
 // table. `group`, not a third `SettingKind` — see BINDING_WHY_NOT's own comment.
-const BINDINGS = ['ASSETS', 'JWT_RATE_LIMITER'];
+const BINDINGS = ['ASSETS', 'ONEBILL_DB', 'JWT_RATE_LIMITER'];
 const markedBinding = SETTINGS.filter((s) => s.group === 'bindings').map((s) => s.name).sort();
 ok(JSON.stringify(markedBinding) === JSON.stringify([...BINDINGS].sort()),
   `exactly the structural bindings are group:'bindings' (got: ${markedBinding.join(', ')})`);
@@ -143,13 +176,14 @@ ok(SETTINGS.filter((s) => s.group === 'bindings').every((s) => s.kind === 'confi
   'and a binding is never marked secret — it has no value to withhold');
 
 // The probe catalog: one row per live check, and the Checks tab renders the not-run state from it.
-ok(PROBE_CATALOG.length === 6, `the probe catalog has exactly 6 checks (got ${PROBE_CATALOG.length})`);
+ok(PROBE_CATALOG.length === 7, `the probe catalog has exactly 7 checks (got ${PROBE_CATALOG.length})`);
 ok(new Set(PROBE_CATALOG.map((p) => p.id)).size === PROBE_CATALOG.length, 'with no duplicate ids');
 ok(PROBE_CATALOG.every((p) => p.name.trim() && p.what.trim() && p.cost.trim()), 'each carrying a name, a what and a cost');
 
 // The secret list is a security control, so assert it explicitly rather than trusting the table.
 const SECRETS = ['RINGOTEL_API_KEY', 'NS_EVENTS_PATH_SECRET', 'NS_API_KEY',
-  'NS_ADMIN_USER', 'NS_ADMIN_PASS', 'NS_OAUTH_CLIENT_ID', 'NS_OAUTH_CLIENT_SECRET'];
+  'NS_ADMIN_USER', 'NS_ADMIN_PASS', 'NS_OAUTH_CLIENT_ID', 'NS_OAUTH_CLIENT_SECRET',
+  'ONEBILL_CLIENT_SECRET', 'ONEBILL_USERNAME', 'ONEBILL_PASSWORD'];
 const markedSecret = SETTINGS.filter((s) => s.kind === 'secret').map((s) => s.name).sort();
 ok(JSON.stringify(markedSecret) === JSON.stringify([...SECRETS].sort()),
   `exactly the credential keys are kind:'secret' (got: ${markedSecret.join(', ')})`);

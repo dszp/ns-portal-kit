@@ -29,3 +29,7 @@ worker-configuration.d.ts
 # Live-probe scratch scripts — contain real domains/emails/extensions. NEVER commit; the
 # public mirror is generated from `git archive HEAD`, so an accidental add would publish them.
 .probe-*.ts
+
+# Python bytecode from tools/ (build-capture-tuples.py imports its rule module).
+__pycache__/
+*.pyc

@@ -82,6 +82,8 @@ Each answer becomes configuration, and each default is the *quiet* option rather
 | Should app activation **writes** be enabled, and for which domains? | `RINGOTEL_WRITE_DOMAINS` mutates a **third-party** app system: activating users, deactivating them, resetting passwords. **Empty means every write is refused**, which is the safe state; `*` means every in-scope domain. Note activation now **replaces the SIP password of a softphone device it did not create** (`RINGOTEL_ROTATE_SIP_ON_ACTIVATE`, default on) — correct, but it will break anything else still registering with that credential, so the operator should be told rather than surprised. |
 | Should **change-event subscriptions** be enabled? | This is the only thing that puts a stored NetSapiens credential on this Worker, and it also publishes a callback URL and needs a cron trigger. In exchange, a user renamed or re-emailed in NetSapiens reaches the app directory without anyone clicking anything. Off unless all of its settings are present. |
 | Should **directory pre-population** be enabled, and who may run it? | It creates *inactive* app-directory entries in bulk for users who have none — a write, gated by `ringotel.prepop` (default `reseller`) and bounded by `RINGOTEL_WRITE_DOMAINS`. Harmless in itself, but it is the operator's directory and they should expect it to fill up. |
+| Should the **OneBill billing reconciliation** be enabled? | It reads a third-party billing system with four credentials the operator has to issue, and it needs a **custom-field group declared in OneBill** before it can store anything ([SETUP.md § Set up the OneBill custom-field group first](./SETUP.md#onebill-group)). Both halves are theirs, not yours. Ask separately whether they want the *comparison* — that needs `ONEBILL_RECURRING_RULES`, a rulebook naming their own offers, which only they can write. |
+| Who may **accept a billing gap**? | `onebill.write` (default `superadmin`) covers setting a link *and* recording that a billing-vs-inventory gap is normal. That second one is a judgement about a customer's invoice with an append-only audit trail attached, so the operator names who signs it, not you. |
 | Who should see each feature? | Defaults are deliberate (`callflow.view` = `reseller`, the write features = `office_manager`). Widening a gate is a policy change about who can act on customers. |
 | Should the portal's **menus** be customized? | `PORTAL_MENUS` adds, hides and renames entries in menus the operator's *customers* use. It is cosmetic and never a security control — hiding a link does not remove access to what it pointed at — but it lands on real users' portals. A first rule should be scoped to one account or one domain and widened after they have looked at it. |
 | Is there an endpoint that will supply the **status banner** text? | `STATUS_BANNER_WEBHOOK` names a URL **the operator has to build and host**. The kit renders whatever that endpoint returns and has no message store of its own, so there is no way to "just set a message" here — see the Never entry below. If they do not have such an endpoint, the answer is to leave it unset. |
@@ -133,6 +135,21 @@ Settings, formats and defaults: [CONFIG.md](./CONFIG.md) ·
   lowering the gate. On a deployment serving **more than one reseller**, widening it to `reseller` is an
   actual cross-tenant disclosure: the request-time gate admits any reseller-scope principal, so one
   reseller would see the others' domain names and settings.
+- **Never write `ONEBILL_RECURRING_RULES` for the operator.** It says which of *their* products pays for
+  which piece of inventory, and a plausible-looking rule produces a confident comparison that is wrong —
+  a seat plan mapped to `extensions.total` instead of `extensions.withAnyDevice` reports every
+  unprovisioned extension as billed. Leave it unset (the panel is then a fact sheet, which is honest) and
+  hand them [SETUP.md § The recurring comparison](./SETUP.md#recurring-comparison).
+- **Never guess `NS_FAX_SERVER_HOSTS`.** It is the destination host of a real dial rule on their platform.
+  A wrong host silently counts nothing as a fax line; an invented one could reclassify numbers that are
+  not faxes. If they do not know it, leave it unset — every count then reads as it did before.
+- **Never accept, clear or assign anything on the account panel.** Those controls record a human's
+  judgement about a customer's bill, stamped with the signed-in account. Verify the page loads; do not
+  press a button on it.
+- **Never deploy this version against an `ONEBILL_DB` you have not migrated.** Apply `migrations/` first —
+  the baseline reads name the current columns, so an unmigrated database makes the account panel answer an
+  error rather than degrade. And read what `0002` and `0003` delete before you run them on a database that
+  already holds acceptances.
 - **Never enable a write feature that was not asked for**, and never widen `RINGOTEL_WRITE_DOMAINS` to `*`
   to make a test pass.
 - **Never put the same key in both `vars` and `.dev.vars`.** The `wrangler.jsonc` value wins silently. This
@@ -167,14 +184,31 @@ Settings, formats and defaults: [CONFIG.md](./CONFIG.md) ·
      later without a redeploy; setting it before the first deploy just means there is never a console you
      cannot open. Reference: [CONFIG.md § PORTAL_SUPERADMINS](./CONFIG.md#PORTAL_SUPERADMINS).
    - `RINGOTEL_API_KEY` if any app feature is wanted — that one key gates all of them.
+   - `ONEBILL_CLIENT_SECRET`, `ONEBILL_USERNAME` and `ONEBILL_PASSWORD` only if OneBill was asked for.
+     `ONEBILL_TENANT_ID` goes in `vars` (or a secret, if the repo is public). All four together are the
+     gate: any one missing and there are no OneBill calls, no menu entry and no routes.
    - Plus anything the fork/privacy decision moved out of `vars`.
 
-4. **Deploy.**
+4. **Only if the OneBill billing comparison was asked for.** Two things happen outside this repo and
+   before the deploy, in this order:
+   - The operator declares the custom-field group in OneBill — procedure and field names in
+     [SETUP.md § Set up the OneBill custom-field group first](./SETUP.md#onebill-group). Until it exists
+     the page shows a setup card instead of the table and every write is refused.
+   - If they want to accept gaps rather than only see them, create and bind the D1 database and **apply
+     the migrations before `pnpm run deploy`**:
+     ```bash
+     npx wrangler d1 create <their-db-name>
+     # add the d1_databases block (binding ONEBILL_DB) to wrangler.jsonc, then:
+     npx wrangler d1 migrations apply <their-db-name> --remote
+     ```
+     Reference: [CONFIG.md § ONEBILL_DB](./CONFIG.md#ONEBILL_DB).
+
+5. **Deploy.**
    ```bash
    pnpm run deploy     # `run` matters: bare `pnpm deploy` is a pnpm builtin, not this script
    ```
 
-5. **Hand over the primary URL.** Confirm `https://<your-worker-host>/p.js` returns **200** and JavaScript
+6. **Hand over the primary URL.** Confirm `https://<your-worker-host>/p.js` returns **200** and JavaScript
    (`p` is the default `PRIMARY_BASENAME`), then give that exact URL to whoever controls the Manager
    Portal's injected-script slot — the operator, or their provider. Two more settings live in two different
    places and fail the same silent way: the Worker's `ALLOWED_ORIGINS` must include the portal origin, and
@@ -182,14 +216,14 @@ Settings, formats and defaults: [CONFIG.md](./CONFIG.md) ·
    to compose the primary into a script the operator already injects:
    [SETUP.md § Point your portal at the primary](./SETUP.md#primary-url).
 
-6. **If the operator's portal is already serving real customers, roll out narrow.** Do not go from nothing
+7. **If the operator's portal is already serving real customers, roll out narrow.** Do not go from nothing
    to everyone in one step: `ALLOWED_DOMAINS` set to one expendable domain, and `portal.access` +
    `portal.self` gated to the operator's own account, makes the first live test a change to exactly one
    person. Widen afterwards, one axis at a time. Procedure and the exact `PORTAL_FEATURES` line:
    [SETUP.md § A safe first deploy](./SETUP.md#safe-first-deploy). State what the other users experience
    meanwhile — they still load a few kilobytes of primary that is refused every bundle and injects nothing.
 
-7. **Only if change-event subscriptions were asked for.** Confirm first that the operator's NetSapiens
+8. **Only if change-event subscriptions were asked for.** Confirm first that the operator's NetSapiens
    release exposes the flat `/subscriptions` endpoints — a core without them cannot register anything, and
    that is a platform fact you cannot configure around. Then: set `NS_EVENTS_BASE_URL` to *this
    deployment's own* origin, `NS_EVENTS_DOMAINS` (it can never exceed `RINGOTEL_WRITE_DOMAINS`), the
@@ -233,7 +267,8 @@ Each rung proves something the previous one did not.
    the setup checklist still wants, **Features** and **Integrations** separate *off* from **inert** (allowed,
    but unable to run because a setting it needs is absent — the state that looks like working configuration
    from every other angle), and **Checks** makes live calls that prove a credential works rather than merely
-   being present.
+   being present — including, where OneBill is configured, a probe that reports whether its
+   custom-field group is actually declared.
 
    **If it refuses you**, the refusal names which of two things is wrong — no superadmin named, or the
    feature switched off in `PORTAL_FEATURES`. It will not name who *is* admitted; that would leak the
@@ -278,6 +313,15 @@ Each rung proves something the previous one did not.
   `PORTAL_MENUS` change by reloading the portal a minute later shows the old menu and reads exactly like a
   config that failed to land. The console's **Config** tab is answered server-side and updates
   immediately — new value there plus old behaviour in the portal means wait, not debug.
+- **A OneBill custom-field group that is not declared reads as an empty tenant.** OneBill materialises a
+  blank instance of every declared group onto every subscriber, so one record is enough to tell whether
+  `ONEBILL_LINK_GROUP`'s group and fields exist. If they do not, the page shows a setup card naming which
+  of the three is missing — the group, the value field, or the qualifier field — rather than a table with
+  no rows. The integration console's OneBill probe reports the same thing as a failing check.
+- **`NS_FAX_SERVER_HOSTS` unset makes fax rules read as a shortfall.** If the rulebook maps a fax offer to
+  `dids.fax` and no host is configured, `dids.fax` is 0 while those numbers stay in `dids.total`: the fax
+  row reports a shortfall and the DID row an excess, and both are configuration rather than a billing
+  problem. Configure the host, or map the fax offers to `ignore: true` — not neither.
 - **Soft exclusions are creation-only.** `RINGOTEL_EXCLUDE_*` decides whether an app account may be
   *created*; it never hides a user who already has one. Do not use it as a way to hide people.
 - **System/service users and non-3-4-digit extensions can never be activated**, by anyone, including a

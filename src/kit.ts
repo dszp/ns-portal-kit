@@ -368,8 +368,16 @@ const KIT_COMMON = String.raw`
 function tok(){try{return localStorage.getItem('ns_t')}catch(e){return null}}
 function dom(){return(typeof window.current_domain!=='undefined'&&window.current_domain)||null}
 function masq(){try{return !!(document.querySelector('.mask-bar')||document.querySelector('a[href*="endMasquerade"]'))}catch(e){return false}}
-function jget(p){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw new Error(x.status);return x.json()})}
-function jpost(p,body){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{method:'POST',headers:{Authorization:'Bearer '+j,'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(x){if(!x.ok)throw new Error(x.status);return x.json()})}
+// A NON-2xx CARRIES A REASON, AND IT USED TO BE THROWN AWAY. Every route in this Worker answers a refusal
+// as {error: '<what was wrong>'} -- the apply route's bounds check names the exact link it will not write
+// -- and both helpers discarded the body and threw the status, so the operator read "400" and had no way
+// to learn which link. The message stays the bare status (every existing caller compares it, and several
+// render it), and the reason rides along as e.body/e.status for callers that want to say more.
+function jerr(x){return x.text().then(function(t){var e=new Error(x.status);e.status=x.status;
+try{e.body=JSON.parse(t)}catch(p){e.body=t}
+throw e})}
+function jget(p){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)return jerr(x);return x.json()})}
+function jpost(p,body){var j=tok();if(!j)return Promise.reject(new Error('auth'));return fetch(B+p,{method:'POST',headers:{Authorization:'Bearer '+j,'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(x){if(!x.ok)return jerr(x);return x.json()})}
 // Reseller-or-above, decoded from the caller's own ns_t. Lives here in COMMON rather than in one bundle
 // because both need it now: the admin body gates the force-activate override on it, and the self body
 // decides whether the footer version line is a link. Two copies of a scope decoder is the shape of bug
@@ -665,7 +673,8 @@ var x=document.createElement('button');x.textContent='✕';
 x.style.cssText='border:0;background:transparent;font-size:18px;cursor:pointer;line-height:1';
 x.addEventListener('click',close);
 h.appendChild(s);h.appendChild(x);
-var f=document.createElement('iframe');f.style.cssText='flex:1;border:0;width:100%';f.sandbox='allow-scripts allow-popups';f.title=t;f.srcdoc=src;
+var f=document.createElement('iframe');f.style.cssText='flex:1;border:0;width:100%';// allow-modals: the OneBill page confirms every write with confirm(); without it a sandboxed confirm() returns false SILENTLY (David, 2026-09-03).
+f.sandbox='allow-scripts allow-popups allow-modals';f.title=t;f.srcdoc=src;
 f.addEventListener('load',function(){try{f.contentDocument.addEventListener('keydown',key)}catch(e){}});
 b.appendChild(h);b.appendChild(f);o.appendChild(b);
 o.addEventListener('click',function(e){if(e.target===o)close()});
@@ -1873,11 +1882,16 @@ export const SPK_FEATURE_KEYS = [
   // is a SEPARATE key, though: the two are never held by the same principal at the same moment — one
   // requires masking to be off in practice, the other requires it to be on.
   { flag: 'capture', key: 'kit.captureMenus' },
+  // The OneBill links page's Management entry. Same trade as `capture`: the finders and `box()` are
+  // already here, so a fourth delivery path for one menu item would be a route, a cache tier and a
+  // gate for a handful of lines. The flag is carried now — `onebill.view` is a WIDER audience than the
+  // console's, so the bundle already ships to them — and the entry that reads it lands with the page.
+  { flag: 'onebill', key: 'onebill.view' },
 ] as const;
 export const spkFeaturePolicyKeys = (): string[] => SPK_FEATURE_KEYS.map((f) => f.key);
 
 const SPK_BODY = String.raw`
-if(!_AF.status&&!_AF.capture)return;
+if(!_AF.status&&!_AF.capture&&!_AF.onebill)return;
 // ── the captured stock menus, per role ──────────────────────────────────────────────────────────────
 // WHY THIS EXISTS: the editor draws each menu the way the audience you pick would see it, and it gets
 // the RULES right because the Worker resolves them. The stock entries it starts from are whatever was on
@@ -1999,6 +2013,10 @@ return out}
 window.addEventListener('message',function(e){
 if(!_spkFrame||e.source!==_spkFrame.contentWindow)return;
 var d=e.data;if(!d)return;
+// Hoisted here so the OneBill, account and baseline handlers below can all use it -- it used to live
+// inside the OneBill block alone, which meant the other two would have had to redeclare it or do
+// without the route's own words in a failure message.
+var owhy=function(e){return (e&&e.body&&e.body.error)?e.body.error:('HTTP '+((e&&e.message)||'request failed'))};
 if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.pageRequest}'){
 try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.pageResponse}',${SPK_BRIDGE.pageKey}:spkPage()},'*')}catch(x){}
 return}
@@ -2061,6 +2079,54 @@ jget('/kit/menus/resolve?'+qs)
 else rr({invalid:(r&&r.error)||'This config cannot be resolved.'})})
 .catch(function(){rr({unavailable:'Could not reach this deployment to build the preview. Nothing here is a report about your config.'})});
 return}
+// The OneBill page. It has no ns_t of its own -- sandboxed srcdoc, no origin -- so every read and every
+// write it does comes through here. Two operations on one message pair: they answer to the same page and
+// share its correlation id, and a second pair would be a second protocol for one screen.
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.onebillRequest}'){
+var oq=d.${SPK_BRIDGE.onebillKey}||{};var oid=d.${SPK_BRIDGE.idKey};
+var orr=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.onebillResponse}',${SPK_BRIDGE.idKey}:oid,${SPK_BRIDGE.onebillKey}:v},'*')}catch(x){}};
+// EVERY field the page reads, named. The whitelist one branch up has dropped a field before (warnings),
+// and the failure is silent on both ends -- so results, and only results, come across for an apply.
+// The route's OWN words when it gave any -- a refused apply names the link it would not write, and
+// "400" does not. (owhy is declared once, above, for this and the two handlers that follow.)
+if(oq.op==='apply'){jpost('/kit/onebill/apply',{ops:oq.ops||[]}).then(function(r){orr({results:(r&&r.results)||[]})}).catch(function(e){orr({unavailable:'The apply did not run: '+owhy(e)+'. Nothing here is a report about what changed.'})});return}
+jget('/kit/onebill/links?mode='+(oq.mode==='full'?'full':'quick')+(oq.refresh?'&refresh=1':'')).then(function(r){orr({report:r})}).catch(function(e){orr({unavailable:'Could not load the OneBill report from this deployment: '+owhy(e)+'.'})});
+return}
+// The account panel. Same page, same ns_t, a separate message pair -- see spkBridge.ts for why.
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.accountRequest}'){
+var aq=d.${SPK_BRIDGE.accountKey}||{};var aid=d.${SPK_BRIDGE.idKey};
+var arr=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.accountResponse}',${SPK_BRIDGE.idKey}:aid,${SPK_BRIDGE.accountKey}:v},'*')}catch(x){}};
+// EITHER selector, never both -- the route refuses two subjects at once, so sending one is the parent's
+// job. ?account= is the only way to open a site row's account; ?domain= is the row the operator clicked.
+if(!aq.domain&&!aq.account){arr({unavailable:'Nothing was named, so nothing was loaded.'});return}
+var q=aq.account?'account='+encodeURIComponent(aq.account):'domain='+encodeURIComponent(aq.domain||'');
+jget('/kit/onebill/account?'+q+(aq.refresh?'&refresh=1':''))
+.then(function(r){arr({report:r})})
+.catch(function(e){arr({unavailable:'Could not load this account from this deployment: '+owhy(e)+'.'})});
+return}
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.baselineRequest}'){
+var bq=d.${SPK_BRIDGE.baselineKey}||{};var bid=d.${SPK_BRIDGE.idKey};
+var brr=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.baselineResponse}',${SPK_BRIDGE.idKey}:bid,${SPK_BRIDGE.baselineKey}:v},'*')}catch(x){}};
+// EVERY field the route accepts, named. decidedBy is NOT forwarded even if the page sent one, and the
+// subject is the ACCOUNT the panel is showing -- a domain would resolve to its whole-domain holder,
+// which on a site-linked panel is a different account. The route still resolves the number itself.
+jpost('/kit/onebill/baseline',{account:bq.account,group:bq.group,action:bq.action,items:bq.items,all:bq.all,shortfall:bq.shortfall,note:bq.note,offer:bq.offer})
+.then(function(r){brr({row:(r&&r.row)||null})})
+.catch(function(e){brr({unavailable:'Nothing was recorded: '+owhy(e)+'.'})});
+return}
+// Moving one item to another account. Same page, same ns_t, its own message pair -- see spkBridge.ts.
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.assignRequest}'){
+var gq=d.${SPK_BRIDGE.assignKey}||{};var gid=d.${SPK_BRIDGE.idKey};
+var grr=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.assignResponse}',${SPK_BRIDGE.idKey}:gid,${SPK_BRIDGE.assignKey}:v},'*')}catch(x){}};
+// EVERY field the route accepts, named. decidedBy is NOT forwarded even if the page sent one, and
+// accountNumber goes across EXACTLY as sent: null is "hand it back to the automatic rule", absent is a
+// page bug, and turning the second into the first here would write a decision nobody made. remove is
+// forwarded the same way -- true takes ONE account out of an address's set, and the route refuses it on
+// any other kind rather than doing the whole-item clear it resembles.
+jpost('/kit/onebill/assign?viewing='+encodeURIComponent(String(gq.viewing||'')),{domain:gq.domain,key:gq.key,accountNumber:gq.accountNumber,remove:gq.remove,note:gq.note})
+.then(function(r){grr({report:(r&&r.report)||null})})
+.catch(function(e){grr({unavailable:'Nothing was moved: '+owhy(e)+'.'})});
+return}
 if(d.${SPK_BRIDGE.tag}!=='${SPK_BRIDGE.request}')return;
 jget('/kit/status?format=json&probe=1').then(function(r){
 try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.response}',${SPK_BRIDGE.dataKey}:(r&&r.probes)||[]},'*')}catch(x){}
@@ -2076,6 +2142,19 @@ fetch(B+'/kit/status',{headers:{Authorization:'Bearer '+j}}).then(function(x){if
 .then(function(html){box('Super Portal Kit - Integration Console',html,'');
 var o=document.getElementById('_svx');_spkFrame=o&&o.querySelector('iframe')})
 .catch(function(){alert('Super Portal Kit is unavailable right now.')})}
+// The OneBill page, opened the same way and into the same single frame slot: box() removes any existing
+// #_svx, so only one of these two pages can be on screen at a time and _spkFrame must point at whichever
+// it is. Dropping the reference BEFORE the fetch keeps the handler from answering a detached frame.
+function onebillOpen(){
+var j=tok();if(!j)return;
+_spkFrame=null;
+// The domain the portal is already inside, if any — the route re-validates it against this caller's
+// own visible domain set (see worker.ts), so appending it here is an offer, not a grant.
+var d=dom(),u=B+'/kit/onebill'+(d?'?domain='+encodeURIComponent(d):'');
+fetch(u,{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw new Error(x.status);return x.text()})
+.then(function(html){box('OneBill Integration',html,'');
+var o=document.getElementById('_svx');_spkFrame=o&&o.querySelector('iframe')})
+.catch(function(){alert('The OneBill page is unavailable right now.')})}
 /**
  * The masquerade bar. masq() already knew both handles it has — a mask-bar class, or the End
  * Masquerade anchor — because the app-status features had to suppress themselves under a mask. Reusing
@@ -2182,15 +2261,28 @@ function spkMenu(){
 // The account menu is the better fallback because acctUl() does not depend on a NAME: it keys on a
 // sign-out entry plus the user's own profile link, and a portal without either is not a portal. Same
 // gate either way (kit.status), so which menu carries the entry changes nothing about who can see it.
+//
+// TWO ENTRIES, ONE PASS. The once-guard is on the <ul>, so a second pass adds nothing -- which means both
+// entries have to be decided here or the second one never lands at all. They are separate keys with
+// different audiences: onebill.view is the wider one, so a caller can hold it WITHOUT kit.status and must
+// still get their entry.
 var CAP=!_AF.status&&_AF.capture;
+// Never inside a mask. The report names every domain the CALLER can see, and a masked session is not the
+// caller -- offering the page there invites reading it as the masked user's own.
+var OB=!!_AF.onebill&&!masq();
 // ⚠️ THE CAPTURE ENTRY GOES TO THE ACCOUNT MENU, NOT MANAGEMENT-WITH-A-FALLBACK. The console prefers
 // Management because that is where an operator tool belongs for an operator. Capture only ever appears
 // while masqueraded as someone lower, and those users have no Management menu — so the preference would
 // resolve to the fallback every single time, and the primary branch would be dead code pretending to be
 // a choice. And it is only the fallback for capture at all: the bar button above is the real home, and
 // this is what happens when the bar cannot be found.
-if(CAP&&!capOn())return;
-var ul=CAP?acctUl():mgmtUl(),fallback=false;
+// Capture with capture disarmed has nothing to draw -- but that says nothing about the OneBill entry,
+// which is a different key on a different surface. Same for the menu CHOICE below: capture prefers the
+// account menu because a masked user has no Management menu, and OneBill prefers Management because an
+// operator tool belongs there. With both live it is Management-first, which is the OneBill rule.
+if(CAP&&!capOn()&&!OB)return;
+if(!_AF.status&&!CAP&&!OB)return;
+var ul=(CAP&&!OB)?acctUl():mgmtUl(),fallback=false;
 if(!ul){ul=acctUl();fallback=!!ul}
 if(!ul||ul.dataset.svxspk)return;
 // ⚠️ "CAN the bar take it", not "HAS it taken it". Asking whether the button is already there is a
@@ -2198,35 +2290,41 @@ if(!ul||ul.dataset.svxspk)return;
 // the bar then added the button, and both showed (David's screenshot). Asking whether the bar EXISTS is
 // order-independent, which matters because both run again on every mutation and the interleaving is not
 // ours to control.
-if(CAP&&masqEnd())return;
+if(CAP&&!OB&&masqEnd())return;
 ul.dataset.svxspk='1';
-var li=document.createElement('li');
-// Marked so anything walking this menu can tell OUR entry from the portal's. The builder skips _svx*
-// rows: offering to hide the console's own link would compose a config that contradicts itself, and the
-// hide would not even work, since hides run before adds.
-li.className='_svxspk';
-var a=document.createElement('a');a.href='javascript:void(0)';
-// TWO ENTRIES, NEVER BOTH — the gates are mutually exclusive in practice. Masked in, the console itself
-// is refused (its gate matches on the effective identity, which is now the masked user) and capture is
-// the only thing on offer; signed in normally, the reverse. Naming the role in the label is the point:
-// it is the one confirmation that the masquerade is actually in effect before you store anything.
-a.textContent=CAP?('Remember this role\u2019s menus'+(myScope()?' ('+myScope()+')':'')):'Super Portal Kit';
-// Bold, because this is an operator/superadmin tool sitting among ordinary per-customer entries and
-// should not read as one of them.
+// ONE BUILDER FOR BOTH ENTRIES, so they cannot end up styled, marked or positioned differently. Bold,
+// because these are operator tools sitting among ordinary per-customer entries and should not read as
+// one of them; marked _svxspk so anything walking this menu can tell OUR rows from the portal's (the
+// menu builder skips them -- offering to hide our own link would compose a config that contradicts
+// itself, and the hide would not work anyway, since hides run before adds).
+//
+// PREPEND, not append. Two reasons. They belong at the top as the operator entries. And appending made
+// the position NON-DETERMINISTIC: managementMenu() (PORTAL_MENUS additions, in the self bundle) also
+// appends to this same <ul>, so whichever bundle's fetch resolved first won — observed live moving
+// between reloads. insertBefore(firstChild) is stable regardless of which runs first.
+var ent=function(label,title,fn){
+var li=document.createElement('li');li.className='_svxspk';
+var a=document.createElement('a');a.href='javascript:void(0)';a.textContent=label;
 a.style.fontWeight='600';
-// In the account menu it sits among the reader's OWN account entries, where an operator tool is more
-// out of place than it is in Management. Say where it landed rather than let it read as one of them.
-if(fallback)a.title='Operator console. Shown here because this portal has no Management menu.';
-a.addEventListener('click',function(e){e.preventDefault();
-if(!CAP){spkOpen();return}
-// TRANSIENT: this entry lives in a dropdown that closes on the click.
-capDo(a,true)});
+if(title)a.title=title;
+a.addEventListener('click',function(e){e.preventDefault();fn(a)});
 li.appendChild(a);
-// PREPEND, not append. Two reasons. It belongs at the top as the operator entry. And appending made the
-// position NON-DETERMINISTIC: managementMenu() (PORTAL_MENUS additions, in the self bundle) also appends
-// to this same <ul>, so whichever bundle's fetch resolved first won — observed live moving between
-// reloads. insertBefore(firstChild) is stable regardless of which runs first.
-ul.insertBefore(li,ul.firstChild)}
+ul.insertBefore(li,ul.firstChild);
+return a};
+// FIRST, so the console lands on top of it (David, 2026-09-02): prepend order is last-wins, and the
+// operator's own console stays the first entry. For a caller holding only onebill.view this is the sole entry.
+if(OB)ent('OneBill Integration','Which OneBill billing account each domain and site is linked to.',onebillOpen)
+// SECOND, on top. The console, or -- masked in, where the console's own gate refuses the effective identity -- the
+// capture entry. Never both: those two gates are mutually exclusive in practice. Naming the role in the
+// capture label is the point, it is the one confirmation that the masquerade is actually in effect
+// before you store anything.
+if(_AF.status||(CAP&&capOn()))ent(CAP?('Remember this role\u2019s menus'+(myScope()?' ('+myScope()+')':'')):'Super Portal Kit',
+// In the account menu it sits among the reader's OWN account entries, where an operator tool is more out
+// of place than it is in Management. Say where it landed rather than let it read as one of them.
+fallback?'Operator console. Shown here because this portal has no Management menu.':'',
+// TRANSIENT: the capture entry lives in a dropdown that closes on the click, so its confirmation has to
+// outlive the control.
+function(a){if(!CAP){spkOpen();return}capDo(a,true)})}
 var _spkF=[{p:/^\//,m:capBtn},{p:/^\//,m:spkMenu}];
 function spkRun(){for(var i=0;i<_spkF.length;i++){try{if(_spkF[i].p.test(location.pathname))_spkF[i].m()}catch(e){}}}
 var _spkRaf=0;function spkSched(){if(_spkRaf)return;_spkRaf=requestAnimationFrame(function(){_spkRaf=0;spkRun()})}

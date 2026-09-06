@@ -112,11 +112,35 @@ Integration features include:
   the diagrams.
 - **White-label integration branding** - configure your app name and references throughout are accurate.
 
+### Billing Reconciliation
+
+An unofficial [OneBill](https://www.onebillsoftware.com/) integration, on the Management menu, that answers
+"is this customer billed for what they actually have?" without counting either side by hand.
+
+- **A links page** lining up OneBill billing accounts against NetSapiens domains — each account's current
+  link or the absence of one, a link proposed from a usage subscription that names the domain, closed
+  accounts whose domain is still live, and a control to set, edit or clear one link at a time. A domain
+  billed per site reads as its own state rather than as unlinked, and the account picker searches by client
+  name.
+- **An account panel** comparing an account's active recurring lines against what NetSapiens holds: seats,
+  transcription, numbers split local, toll-free and fax, E911 addresses, SMS numbers and devices by model.
+  The unit of comparison is the OneBill *account*, so an account holding several sites — or sites across
+  several domains — is compared against everything it actually holds.
+- **A rulebook you write** (`ONEBILL_RECURRING_RULES`) maps your own offers, plan codes and product codes
+  onto those dimensions, with packs, credits and entitlements. Unset, the panel is still a fact sheet of
+  the inventory.
+- **Acceptance, per item.** Every row expands into the actual extensions, numbers and addresses behind its
+  count, and an operator accepts them one at a time — so a gap that is normal is recorded once, with an
+  append-only history, and only a real change is reported afterwards. That half needs an optional D1
+  binding; without it the panel still shows every gap.
+
+Off unless all four `ONEBILL_*` credentials are set. See [SETUP.md](./SETUP.md#onebill-links) and
+[CONFIG.md](./CONFIG.md#group-onebill).
+
 ### Future Integrations
 
 Under consideration for future integrations that are not yet available:
 
-- OneBill
 - Documo
 
 ### TamperMonkey Local Test Harness
@@ -213,19 +237,21 @@ through a first deployment; start there if a field on the deploy form isn't obvi
 scheme) and "NS Portal Kit". The callflow diagrams have a hint of branding color but are otherwise generically 
 color-coded. The remaining branding options are currently custom text strings.
 
-## No bindings to provision
+## Almost no bindings to provision
 
-No KV, D1, or Durable Objects — and R2 only if you choose to serve your own gated scripts from it. All
-caching uses the Workers Cache API (`caches.default`), so a fresh copy deploys with nothing to set up
-first.
+No KV and no Durable Objects. R2 only if you choose to serve your own gated scripts from it, and D1 only
+if you want the OneBill account panel to remember which billing gaps you have accepted. All caching uses
+the Workers Cache API (`caches.default`), so a fresh copy deploys with nothing to set up first.
 
 ## Built on
 
 - [`@dszp/netsapiens-lib`](https://github.com/dszp/netsapiens-lib) — the portable NetSapiens toolkit
   (API client, `ns_t` validation, resolver, renderers)
 - [`@dszp/ringotel-lib`](https://github.com/dszp/ringotel-lib) — the portable Ringotel AdminAPI toolkit
+- [`@dszp/onebill-lib`](https://github.com/dszp/onebill-lib) — the portable OneBill toolkit (subscriber and
+  subscription reads, and the link codec the billing reconciliation is built on)
 
-Both are Node-free and run unchanged in a Worker, in Node, or the browser.
+All three are Node-free and run unchanged in a Worker, in Node, or the browser.
 
 ## Develop
 

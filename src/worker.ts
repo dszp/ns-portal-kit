@@ -85,6 +85,10 @@ import {
   r2Key,
   kitConfigError,
 } from './kit.js';
+import { onebillHtml } from './onebillPage.js';
+import { onebillEnabled, onebillConfigError, loadLinkReport, applyLinks, refreshAppliedAccounts, OnebillRequestError, type ApplyOp, type LinkReport } from './onebill.js';
+import { loadAccountReport, applyBaselineAction, applyAssignment, AccountReadError, type BaselineAction, type AssignRequest } from './onebillAccount.js';
+import { resolveAccountScope, type ResolvedAccountScope } from './onebillScope.js';
 import { buildStatus } from './status.js';
 import { statusHtml } from './statusPage.js';
 import { runProbes } from './statusProbes.js';
@@ -138,9 +142,51 @@ interface Env {
   /** Optional JSON `{ "<nsDomain>": "<branchAddressToMatch>" }` for rare address mismatches. */
   RINGOTEL_OVERRIDES?: string;
 
+  // ── OneBill (src/onebill.ts) — all four credentials present ⇒ on ────────────────────────────────
+  /** OneBill tenant identifier (Config > Settings > Business Profile). A var, not a secret. */
+  ONEBILL_TENANT_ID?: string;
+  /** OneBill OAuth client secret. */
+  ONEBILL_CLIENT_SECRET?: string;
+  /** OneBill API username. */
+  ONEBILL_USERNAME?: string;
+  /** OneBill API password. */
+  ONEBILL_PASSWORD?: string;
+  /** Non-default OneBill API base URL (https only). */
+  ONEBILL_BASE_URL?: string;
+  /** The OneBill web UI base for this tenant (https only; custom domains exist). Trailing slash stripped. */
+  /** JSON GroupLinkSpec mapping the NS↔OneBill custom-field group. Default PBX/NS/Domain/Site. */
+  ONEBILL_LINK_GROUP?: string;
+  /** CSV of subscription offer names whose identifier carries the NS domain. */
+  ONEBILL_USAGE_OFFERS?: string;
+  /** CSV of case-insensitive substrings marking a RETIRED subscription identifier. Default "_OLD". */
+  ONEBILL_USAGE_IGNORE?: string;
+  /** JSON array of RecurringRule for the account panel's comparison. Unset means everything is unmapped. */
+  ONEBILL_RECURRING_RULES?: string;
+  /**
+   * CSV of the fax server hosts THIS NetSapiens deployment sends fax lines to, e.g. "203.0.113.7". A
+   * number whose dial rule hands it to one of these is counted as a fax line rather than as a DID.
+   * Unset means no number is a fax line, and the DID counts are what they were before the setting
+   * existed — netsapiens-lib hardcodes no host, because one operator's fax server is nobody else's.
+   */
+  NS_FAX_SERVER_HOSTS?: string;
+  /**
+   * JSON object naming what a device-name SUFFIX means here — `{"wp":{"label":"SNAPmobile Web"}, …}`.
+   * Setting it REPLACES netsapiens-lib's default legend (wp/m/t) rather than adding to it, which is how a
+   * deployment without TeamMate turns Teams detection off. Ringotel's activation suffix is added on top
+   * whenever that integration is enabled. See `inventoryOpts` in onebillAccount.ts.
+   */
+  NS_DEVICE_SUFFIXES?: string;
+  /**
+   * Optional D1 binding holding the `billing_*` tables. Unbound means the account panel renders with no
+   * accepted column and POST /kit/onebill/baseline answers 404. A deployment that never accepts a
+   * baseline never creates a database.
+   */
+  ONEBILL_DB?: D1Database;
+
   // ── Ringotel activation (writes) — eligibility + the write safety rail (see src/eligibility.ts) ──
   /** NS device-name suffix for the softphone, e.g. "r" → device "100r". Default "r". */
   RINGOTEL_ACTIVATION_SUFFIX?: string;
+
   /** CSV of name-contains matchers to soft-exclude (default `SHARED,SHARED VOICEMAIL,FAX`). */
   RINGOTEL_EXCLUDE_NAMES?: string;
   /** CSV of extension patterns to soft-exclude (default empty; trailing `*` = prefix wildcard). */
@@ -369,6 +415,19 @@ export const ROUTES = {
   // string plus this deployment's own PORTAL_APPS_HIDE, disclosing nothing a console caller cannot
   // already read from the Config tab.
   '/kit/menus/resolve': { sensitivity: 'read' },
+  // The OneBill link page and its report. `read`: both disclose the fleet's domains and their billing
+  // links, which requireFleetRead already bounds to a principal that can read them anyway.
+  '/kit/onebill': { sensitivity: 'read' },
+  '/kit/onebill/links': { sensitivity: 'read' },
+  '/kit/onebill/apply': { sensitivity: 'write' },
+  // One linked domain's inventory and recurring lines. `read` for the same reason as the links report:
+  // it discloses a domain requireFleetRead already bounds this principal to.
+  '/kit/onebill/account': { sensitivity: 'read' },
+  // Accepting a baseline is a durable decision recorded against a billing account. `write`.
+  '/kit/onebill/baseline': { sensitivity: 'write' },
+  // Moving one inventory item to another billing account is the same kind of durable decision, and it
+  // clears the acceptance the account it leaves had recorded against it. `write`.
+  '/kit/onebill/assign': { sensitivity: 'write' },
   '/me/status': { sensitivity: 'read' },
   '/me/devices': { sensitivity: 'read' },
   '/me/resetPassword': { sensitivity: 'write' },
@@ -376,7 +435,7 @@ export const ROUTES = {
 } satisfies Record<string, { sensitivity: CallSensitivity }>;
 
 /** POST paths — the write routes. Everything else is GET-only (405 otherwise). */
-const WRITE_PATHS = new Set(['/rapp/activate', '/rapp/resetPassword', '/me/resetPassword', '/rapp/prepop/apply']);
+const WRITE_PATHS = new Set(['/rapp/activate', '/rapp/resetPassword', '/me/resetPassword', '/rapp/prepop/apply', '/kit/onebill/apply', '/kit/onebill/baseline', '/kit/onebill/assign']);
 
 /**
  * Routes matched by PREFIX rather than exact pathname, because they carry path parameters.
@@ -405,6 +464,30 @@ function domainBlocklist(env: Env): Set<string> {
 }
 
 const ENTITY_KINDS = new Set(['did', 'user', 'queue', 'attendant']);
+
+/**
+ * What a OneBill account number may look like when it arrives from a caller — `?account=`, `?viewing=`
+ * and an assign body's `accountNumber`.
+ *
+ * Bounded rather than passed through because every one of those lands in a 409's text, and one of them
+ * lands in a durable D1 row. Nothing legitimate needs more: OneBill's own numbers are short and
+ * alphanumeric, and whether the number NAMES anything is decided against the link report, never here.
+ */
+const OB_ACCOUNT_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** The OneBill routes that take a POST. A subset of {@link WRITE_PATHS}, restated because the block
+ *  answers its own method gate before the generic one is reached. */
+const OB_POST_PATHS = new Set(['/kit/onebill/apply', '/kit/onebill/baseline', '/kit/onebill/assign']);
+
+/**
+ * The refusal for a domain the caller cannot see, and the one for an account that touches one.
+ *
+ * Two sentences, one shape: neither names a domain. Saying which one would answer a question the caller
+ * was refused for asking — the whole point of putting 403 ahead of 409 on these routes is that "you may
+ * not ask about this" must not be distinguishable from "there is nothing to say about it".
+ */
+const OB_DOMAIN_403 = 'That domain is not in your visible set';
+const OB_ACCOUNT_403 = 'That account holds a domain that is not in your visible set';
 
 class CacheApiVerdictCache implements VerdictCache {
   constructor(private cache: Cache) {}
@@ -541,13 +624,15 @@ function requireFeature(auth: Auth, feature: string, env: Env, policies: Feature
  * that can contain a domain name" is a second hand-maintained list with no mechanical guard, and
  * forgetting to mark one leaks silently. That is the exact failure this whole feature exists to prevent.
  */
-function requireFleetRead(principal: Principal, env: Env): void {
+function requireFleetRead(principal: Principal, env: Env, what = 'The configuration console'): void {
   // The predicate itself lives in features.ts — the integration console's Permissions matrix reads the SAME
   // one to decide what each scope can actually reach, so a matrix that says "an Office Manager can open
   // the console" and a Worker that refuses them cannot come apart. This function owns only the wording.
+  // `what` lets a second caller (the OneBill links page) name itself instead of misleadingly blaming
+  // "the configuration console" for a refusal that has nothing to do with it.
   if (fleetReadAllowed(principal, env)) return;
   throw new HttpError(403,
-    'The configuration console requires reseller scope or a listed superadmin account: it reports settings ' +
+    `${what} requires reseller scope or a listed superadmin account: it reports settings ` +
     'that name other domains, and this account is limited to its own domain.');
 }
 
@@ -651,6 +736,17 @@ function requireDomainValue(auth: Auth, raw: string, env: Env): string {
   const allow = domainAllowlist(env);
   if (allow && !allow.has(domain)) throw new HttpError(403, `Domain "${domain}" is not in ALLOWED_DOMAINS`);
   return domain;
+}
+
+/**
+ * Who to record as having made a decision, for an audit column that outlives the session.
+ *
+ * `principal.id` is the EFFECTIVE identity, which under a masquerade is the masked user — so recording
+ * it alone would credit a customer's account with a decision their reseller made. When a mask is in
+ * effect the label names both, operator first, because the operator is the one who chose.
+ */
+function principalLabel(p: Principal): string {
+  return p.operator ? `${p.operator.id} as ${p.id}` : p.id;
 }
 
 /** Read-route convenience: the domain comes from `?domain=`. */
@@ -1587,6 +1683,316 @@ export default {
     // auth chain, immediately below, needs it before any Group 2 gate has run.
     const policies = resolveFeaturePolicies(env);
 
+    // ── The OneBill links page: the page, its report, and the one write. Placed HERE, beside the
+    // console and ahead of Group 2, for the same reason: it is delivered by the console bundle and is
+    // read through the same bridge, so a deployment broken in one of Group 2's ways must not turn this
+    // into a bare 500 either. The gate chain, in order, and each step is load-bearing:
+    //   404 when the integration is unconfigured (Ringotel's rule — an off integration has no routes),
+    //   a delegated principal, `onebill.view`, then requireFleetRead — the report names every domain in
+    //   the fleet, so a `users:` grant to a domain-locked account must still be refused — then 503 on
+    //   malformed OneBill config, and only then the write gates on the apply path.
+    if (url.pathname === '/kit/onebill' || url.pathname === '/kit/onebill/links' || url.pathname === '/kit/onebill/apply'
+      || url.pathname === '/kit/onebill/account' || url.pathname === '/kit/onebill/baseline' || url.pathname === '/kit/onebill/assign') {
+      try {
+        if (!onebillEnabled(env)) throw new HttpError(404, 'Not found');
+        // The generic method gate lives after this block, so state the same rule here rather than
+        // letting a GET fall into the apply handler (where it would surface as a body parse error).
+        // Three POST routes now, so the rule is stated as a set rather than as one pathname. Every one
+        // of them is in WRITE_PATHS too — unreachable for these paths, since this block returns first,
+        // but that table is this Worker's declared POST allowlist and a write missing from it is a lie.
+        const isPost = OB_POST_PATHS.has(url.pathname);
+        if (isPost ? request.method !== 'POST' : request.method !== 'GET') throw new HttpError(405, 'Method not allowed');
+        const auth = await resolveAuth(request, env, policies);
+        if (!auth.principal) throw new HttpError(403, 'OneBill requires a delegated ns_t');
+        requireFeature(auth, 'onebill.view', env, policies);
+        requireFleetRead(auth.principal, env, 'The OneBill Integration page');
+        const cfgErr = onebillConfigError(env);
+        if (cfgErr) throw new HttpError(503, `OneBill is misconfigured: ${cfgErr}`);
+        const canWrite = can(auth.principal, 'onebill.write', policies);
+
+        // THE BASELINE ROUTE, FIRST HALF. Every gate here is cheap and every one of them refuses, so
+        // they run BEFORE the fleet-wide `/domains` read below: a deployment with no database must not
+        // pay a fleet sweep to answer 404, and a caller whose token no longer re-validates must not
+        // drive an upstream read on the way to being rejected. The second half — resolving which
+        // account the selector names, which genuinely needs the domain set — is below, and the status
+        // codes are the same either way.
+        let baseline: null | { db: D1Database; sel: { domain: string } | { account: string }; req: BaselineAction } = null;
+        if (url.pathname === '/kit/onebill/baseline') {
+          // 404, not 501: an unbound database means this deployment does not have the feature, and the
+          // page has already been told so (`baselinesEnabled: false`) — this is the backstop for a
+          // client that asks anyway.
+          if (!env.ONEBILL_DB) throw new HttpError(404, 'Not found');
+          requireWriteFeature(auth, 'onebill.write', policies);
+          await requireFreshAuth(auth, env);
+          const b = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+          const rawDomain = typeof b?.domain === 'string' ? b.domain.trim() : '';
+          // ⚠️ EXACTLY ONE SUBJECT, and an ACCOUNT is one of them now. A panel can be open on an account
+          // that holds one SITE of a domain, and that domain's bare row belongs to somebody else — so a
+          // write sent by domain would land on the whole-domain holder (a different account) or 409 on a
+          // multi-account split. The page names the account it is showing instead. Naming it is safe for
+          // the reason the GET's `?account=` is: the number is resolved through `boundScope`, which reads
+          // it out of the caller's OWN link report and refuses any scope reaching a domain they cannot
+          // see. Neither is it trusted — nothing downstream sees the caller's string.
+          const rawAccount = typeof b?.account === 'string' ? b.account.trim() : '';
+          // `group` is bounded for the same reason `note` is: it is caller text landing in a durable
+          // row, and nothing legitimate needs more than a short label.
+          const group = typeof b?.group === 'string' ? b.group.trim() : '';
+          const action = b?.action === 'accept' || b?.action === 'clear' ? b.action : null;
+          const note = typeof b?.note === 'string' && b.note.trim() ? b.note.trim().slice(0, 500) : undefined;
+          // Which of the row's plans these items are billed as. Bounded here like `group` and `note` —
+          // caller text landing in a durable row — and validated against the row's OWN offer list by
+          // `applyBaselineAction`, which is the only place that knows what this account is billed under.
+          const offer = typeof b?.offer === 'string' && b.offer.trim() ? b.offer.trim().slice(0, 128) : undefined;
+          // EXACTLY ONE form. Two of them in one body is not a request anyone can mean — accepting the
+          // named items AND the whole row are different decisions — so it is refused rather than ranked.
+          const forms = [Array.isArray(b?.items), b?.all === true, b?.shortfall === true].filter(Boolean).length;
+          const shape = 'Body must be { exactly one of domain | account, group, action: "accept"|"clear", and exactly one of items: [{key}], all: true, shortfall: true; note?; offer? only with action "accept" on items or all }';
+          // Neither is a request with no subject; both is two subjects that can disagree, and ranking
+          // them would make which one wins a thing to remember rather than to read. Same rule as the GET.
+          if (!rawDomain === !rawAccount) throw new HttpError(400, shape);
+          if (rawAccount && !OB_ACCOUNT_RE.test(rawAccount)) throw new HttpError(400, 'That is not an account number');
+          if (!group || group.length > 64 || !action || forms !== 1) throw new HttpError(400, shape);
+          // An offer is what an acceptance is RECORDED as, so it means nothing on a clear (nothing is
+          // being recorded) and nothing on a shortfall (a count has no plan). Refused here rather than
+          // dropped, so a page that sent one is told, and refused BEFORE any read, so `clear`+offer and
+          // `shortfall`+offer cost the same nothing as every other shape mistake.
+          if (offer !== undefined && (action !== 'accept' || b!.shortfall === true)) throw new HttpError(400, shape);
+          let req: BaselineAction;
+          if (Array.isArray(b!.items)) {
+            // Keys are bounded and typed here; whether each names a PRESENT item is decided against the loaded row.
+            const items = (b!.items as unknown[]).map((x) => (x && typeof x === 'object' ? (x as { key?: unknown }).key : undefined));
+            if (!items.length || !items.every((k) => typeof k === 'string' && k.length > 0 && k.length <= 128)) throw new HttpError(400, shape);
+            req = { action, group, items: (items as string[]).map((key) => ({ key })), ...(note ? { note } : {}), ...(offer ? { offer } : {}) };
+          } else if (b!.all === true) req = { action, group, all: true, ...(note ? { note } : {}), ...(offer ? { offer } : {}) };
+          else req = { action, group, shortfall: true, ...(note ? { note } : {}) };
+          baseline = { db: env.ONEBILL_DB, sel: rawAccount ? { account: rawAccount } : { domain: rawDomain }, req };
+        }
+
+        // THE ASSIGN ROUTE, FIRST HALF — the same placement and the same reasoning as the baseline's
+        // above: every gate here refuses BEFORE the fleet-wide `/domains` read, so a deployment with no
+        // database does not pay a fleet sweep to answer 404, and a caller whose token no longer
+        // re-validates is refused without one either. (`requireFreshAuth` is itself an upstream call —
+        // one `/jwt`, which is the point of it — so the claim is about the sweep, not about zero I/O.)
+        //
+        // `viewing` is a fact about the PAGE, not part of the decision, which is why it rides the query
+        // string: the reply is that account's report as it now reads, and the item may have just left it.
+        let assign: null | { db: D1Database; viewing: string; req: AssignRequest } = null;
+        if (url.pathname === '/kit/onebill/assign') {
+          if (!env.ONEBILL_DB) throw new HttpError(404, 'Not found');
+          requireWriteFeature(auth, 'onebill.write', policies);
+          await requireFreshAuth(auth, env);
+          // Trimmed like the body's `accountNumber` below: the two are the same kind of value arriving
+          // by two routes, and a stray space should not make one of them a 400 and the other fine.
+          const viewing = (url.searchParams.get('viewing') ?? '').trim();
+          const b = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+          const aDomain = typeof b?.domain === 'string' ? b.domain.trim() : '';
+          const key = typeof b?.key === 'string' ? b.key : '';
+          // ⚠️ ABSENT AND null ARE DIFFERENT REQUESTS. `null` means "take the decision back and let the
+          // automatic rule have it again" — a real, durable change — so a body that simply forgot the
+          // field must not be read as one. `undefined` here is the "forgot it" case and is refused.
+          const accountNumber = b?.accountNumber === null ? null : typeof b?.accountNumber === 'string' ? b.accountNumber.trim() : undefined;
+          // `remove` takes an account OUT of an item's manual set — only an address HAS a set, and
+          // whether this key is one is decided against the loaded inventory, not here. What is decided
+          // here is the SHAPE: a boolean, and a removal has to say whom it removes. A `remove` with a
+          // null account is a page bug that would otherwise read as the whole-item clear beside it.
+          const remove = b?.remove === undefined ? undefined : b.remove === true ? true : null;
+          const note = typeof b?.note === 'string' && b.note.trim() ? b.note.trim().slice(0, 500) : undefined;
+          const shape = 'Body must be { domain, key, accountNumber: string|null, remove?: true, note? } with ?viewing=<account number>';
+          if (!OB_ACCOUNT_RE.test(viewing)) throw new HttpError(400, shape);
+          if (!aDomain || !key || key.length > 128) throw new HttpError(400, shape);
+          if (accountNumber === undefined || (accountNumber !== null && !OB_ACCOUNT_RE.test(accountNumber))) throw new HttpError(400, shape);
+          if (remove === null || (remove && accountNumber === null)) throw new HttpError(400, shape);
+          assign = { db: env.ONEBILL_DB, viewing, req: { domain: aDomain, key, accountNumber, ...(remove ? { remove } : {}), ...(note ? { note } : {}) } };
+        }
+
+        // The caller's OWN NS-visible domains, minus block/allow — exactly what `/domains` returns them,
+        // and the only domain set that ever reaches OneBill, bounds a write, or validates a `?domain=`
+        // prefilter (below). Computed before answering the PAGE, not only the report, so the page route
+        // can check `?domain=` against it too.
+        // The page WITHOUT a ?domain= needs none of that: answer before the NS round-trip. Only a prefilter
+        // request, the report and an apply pay for listDomains (Task 14 review).
+        if (url.pathname === '/kit/onebill' && !url.searchParams.get('domain')) {
+          return new Response(onebillHtml({ canWrite, version: VERSION }), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors, 'Cache-Control': 'private, no-store' } });
+        }
+        const obClient = new NsClient({ server: assertBareServer(env.NS_SERVER), token: auth.token });
+        const allow = domainAllowlist(env);
+        const block = domainBlocklist(env);
+        const nsDomains = (auth.lockedDomain ? [{ domain: auth.lockedDomain }] : await listDomains(obClient)).map((d) => d.domain);
+        const visible = (d: string): boolean => (!allow || allow.has(normDomain(d))) && !block.has(normDomain(d));
+        const doms = nsDomains.filter(visible);
+
+        if (url.pathname === '/kit/onebill') {
+          // The domain the portal was already on when the menu entry was clicked (onebillOpen() appends
+          // it as ?domain=). Accepted ONLY when it names a domain THIS caller can see — compared with
+          // normDomain so a case difference still matches — and rendered back with `doms`' OWN spelling,
+          // never the query string's: a caller-supplied string never reaches markup unvalidated. Absent,
+          // unknown, or blocked all render no prefilter, same as the top level.
+          const rawPrefilter = url.searchParams.get('domain');
+          const prefilter = rawPrefilter ? doms.find((d) => normDomain(d) === normDomain(rawPrefilter)) : undefined;
+          return new Response(onebillHtml({ canWrite, version: VERSION, ...(prefilter ? { prefilter } : {}) }), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors, 'Cache-Control': 'private, no-store' } });
+        }
+
+        // THE OneBill SWEEP IS TENANT-WIDE while `doms` is not, so a link in this tenant can point at a
+        // domain this deployment refuses to show this caller. "Hidden" is exactly that: a real NS domain
+        // here, filtered out by the allow/block lists — not merely a value we cannot resolve, which is
+        // the ordinary `stale` case and stays named. The predicate is built here, from these two env
+        // keys, and handed to the report; onebill.ts never reads them.
+        const nsSeen = new Set(nsDomains.map(normDomain));
+        // An explicitly BLOCKED domain is hidden whether or not this caller's own token can list it (a
+        // shared tenant has resellers who cannot see each other's domains, and the block list is the one
+        // enumeration this deployment holds); the allow-list half still needs the domain to be real here,
+        // or every typo would count as hidden and the `stale` section would go blind.
+        const hidden = (value: string): boolean => block.has(normDomain(value)) || (nsSeen.has(normDomain(value)) && !visible(value));
+
+        // EVERY account-scoped route bounds itself the same way, so they share one derivation rather
+        // than three that can drift: the caller names a DOMAIN or an ACCOUNT, and either way the scope
+        // that comes back — every domain and site that account holds — must be entirely inside `doms`.
+        // The OneBill account is read out of the link report and never out of the request.
+        //
+        // 403 BEFORE 409 is load-bearing on the domain selector: "you may not ask about this domain"
+        // must not be distinguishable from "this domain is unlinked", or the route becomes an existence
+        // oracle for another reseller's domains. A domain this caller cannot see is 403 whether or not
+        // it is linked, and is refused before the report is consulted at all.
+        //
+        // The account selector cannot have that ordering — an account's domains only exist once the
+        // report is loaded — so it gets the next-strongest thing: the 403 still precedes every
+        // NetSapiens snapshot read and every OneBill subscription read, and neither refusal says which
+        // domain it is about (see OB_DOMAIN_403 / OB_ACCOUNT_403).
+        const boundScope = async (sel: { domain: string } | { account: string }): Promise<{ scope: ResolvedAccountScope; report: LinkReport; openedBy?: string }> => {
+          // The caller's OWN spelling never reaches anything downstream: match against `doms` and carry
+          // that set's spelling forward, exactly as the page's prefilter does.
+          const openedBy = 'domain' in sel ? doms.find((d) => normDomain(d) === normDomain(sel.domain)) : undefined;
+          if ('domain' in sel && !openedBy) throw new HttpError(403, OB_DOMAIN_403);
+          const want: { domain: string } | { account: string } = openedBy ? { domain: openedBy } : sel;
+          // Quick mode and the ordinary cache: this only needs the domain→account join, which the
+          // derived externalId index already carries.
+          const { report } = await loadLinkReport(env, caches.default, obClient, doms, { hidden });
+          // Throws OnebillRequestError 409 for unlinked / conflict / a split billed to more than one
+          // account, and for an account number this report holds no link for — there is no one scope.
+          const scope = resolveAccountScope(report, want);
+          // ⚠️ EVERY domain the account touches must be visible. Without this, an operator who happened
+          // to know another reseller's account number could open a panel rendering that reseller's
+          // domains.
+          //
+          // TODAY IT CANNOT FIRE, and that is not a reason to drop it. `scope` is derived from
+          // `report.rows`, `rows` is built from the `domains` argument, and that argument is `doms` —
+          // so `scope.domains ⊆ doms` holds by construction, and the cache cannot break it either
+          // (the entry key is `domainHash(domains)`, so a narrower caller never reads a wider caller's
+          // entry). What this defends against is the next edit: passing `loadLinkReport` something
+          // wider than `doms` (`nsDomains`, say), or deriving the scope from `RowAccount.links` /
+          // `report.foreign`, both of which CAN name a domain outside the caller's set. Placed here so
+          // that whenever it does start firing it fires before any per-domain read, not downstream of
+          // one.
+          const visibleSet = new Set(doms.map(normDomain));
+          for (const d of scope.domains) if (!visibleSet.has(normDomain(d))) throw new HttpError(403, OB_ACCOUNT_403);
+          return { scope, report, ...(openedBy ? { openedBy } : {}) };
+        };
+
+        if (baseline) {
+          // ⚠️ THE ACCOUNT IS RESOLVED, NEVER TRUSTED. The body may NAME one — a panel showing a
+          // site-linked account has no domain that resolves to it — but the name is only ever a lookup
+          // key into `boundScope`, which reads the account out of the caller's own link report and
+          // refuses (403) any scope touching a domain they cannot see, before a single per-domain read.
+          // The string itself reaches nothing downstream: what `applyBaselineAction` gets is the
+          // resolved `scope`. That is the bound this route exists inside, and it is unchanged by the
+          // selector widening.
+          const { scope, report } = await boundScope(baseline.sel);
+          // `decidedBy` comes from the ns_t and NOTHING ELSE. A body field of that name is ignored for
+          // the same reason: the whole value of the history table is that it says who really decided.
+          const row = await applyBaselineAction(env, caches.default, obClient, report, scope, baseline.db, principalLabel(auth.principal), baseline.req);
+          return json({ row }, 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+        }
+
+        if (assign) {
+          const asg = assign;
+          // The item's domain is bounded FIRST, and before the report is loaded — it is a separate claim
+          // from `viewing` (an operator can reach the Unassigned list from a panel that does not hold the
+          // domain), so the account's own bound below does not cover it. Same wording as any other
+          // invisible-domain refusal: a caller learns nothing from which of the two refused them.
+          const wantedDomain = doms.find((d) => normDomain(d) === normDomain(asg.req.domain));
+          if (!wantedDomain) throw new HttpError(403, OB_DOMAIN_403);
+          // The account the PANEL is showing — resolved from the report and bounded exactly like any
+          // other, so `?viewing=` naming an account this caller cannot see refuses before any write.
+          const { scope, report } = await boundScope({ account: asg.viewing });
+          const accountReport = await applyAssignment(
+            env, caches.default, obClient, report, asg.db, principalLabel(auth.principal),
+            { ...asg.req, domain: wantedDomain }, scope,
+          );
+          return json({ report: accountReport }, 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+        }
+
+        if (url.pathname === '/kit/onebill/account') {
+          // EXACTLY ONE selector. Neither is a request with no subject; both is two subjects that can
+          // disagree, and ranking them would make which one wins a thing to remember rather than to read.
+          const rawDomain = url.searchParams.get('domain');
+          // Trimmed like the baseline body's `account` and the assign route's `?viewing=`: the same kind
+          // of value arrives here by a third route, and a stray space should not make one of them a 400
+          // and the others fine.
+          const rawAccount = url.searchParams.get('account')?.trim() ?? null;
+          if (!rawDomain === !rawAccount) throw new HttpError(400, 'Exactly one of ?domain= or ?account= is required');
+          if (rawAccount && !OB_ACCOUNT_RE.test(rawAccount)) throw new HttpError(400, 'That is not an account number');
+          const { scope, report, openedBy } = await boundScope(rawAccount ? { account: rawAccount } : { domain: rawDomain! });
+          const accountReport = await loadAccountReport(env, caches.default, obClient, report, scope, {
+            canWrite,
+            refresh: url.searchParams.get('refresh') === '1',
+            ...(env.ONEBILL_DB ? { db: env.ONEBILL_DB } : {}),
+            ...(openedBy ? { openedBy } : {}),
+          });
+          return json(accountReport, 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+        }
+
+        if (url.pathname === '/kit/onebill/links') {
+          // `quick` unless the caller asks for the audit: the page's first load and its Refresh button
+          // read the derived externalId index (one paged walk), and "Refresh and fully verify" is what
+          // pays for the group-plus-subscriptions sweep. An unrecognised value reads as quick — the
+          // cheap answer is the safe default, and nothing here decides what may be WRITTEN.
+          const mode = url.searchParams.get('mode') === 'full' ? 'full' : 'quick';
+          const { report } = await loadLinkReport(env, caches.default, obClient, doms, { refresh: url.searchParams.get('refresh') === '1', mode, hidden });
+          // Same treatment as the console document, and for the same reason: this body names other
+          // customers' domains and varies by principal, so it is never stored and a shared cache must
+          // not serve one principal's copy to another.
+          return json({ ...report, canWrite }, 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+        }
+
+        // Apply. Both write gates on top of the read chain above, then a fresh /jwt: a server-side
+        // logout must not leave a cached verdict good enough to change a billing link.
+        requireWriteFeature(auth, 'onebill.write', policies);
+        await requireFreshAuth(auth, env);
+        const body = (await request.json().catch(() => null)) as { ops?: ApplyOp[] } | null;
+        if (!body || !Array.isArray(body.ops)) throw new HttpError(400, 'Body must be { ops: [...] }');
+        // ⚠️ THE BOUNDS COME FROM THE LOAD THIS REQUEST PERFORMS, never from the body: an op may only
+        // name a target and an account this caller's own report can name, may not clear an account
+        // holding links they were not shown, and may still send back what that account already holds —
+        // which is the only way removing one foreign link of several can work. See ApplyBounds.
+        // The QUICK load, deliberately: `targets` and `accounts` are the same either way (they come from
+        // the caller's NS domains and the same subscriber walk), and the bounds that actually decide what
+        // is written — what each account already holds, and whether it holds anything hidden — are read
+        // from that account's own record inside `applyLinks`, never from this report.
+        const { report, bounds } = await loadLinkReport(env, caches.default, obClient, doms, { hidden });
+        const results = await applyLinks(env, caches.default, body.ops, bounds, { hidden, setup: report.setup });
+        // Re-read ONLY what changed and patch the cached reports, so the page's reload right after this
+        // is a cache hit showing the write — instead of a second full sweep the operator waits through.
+        const written = [...new Set(results.filter((r) => r.ok).map((r) => r.accountNumber))];
+        await refreshAppliedAccounts(env, caches.default, doms, written, { hidden });
+        return json({ results }, 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+      } catch (err) {
+        // 502, and it NAMES the system: "is this us or them" is the operator's first question, and a
+        // bare 500 makes them go read logs to answer it. OnebillRequestError keeps its own status
+        // (409 for an unlinked domain) and is checked first — it is a verdict, not an upstream failure.
+        if (err instanceof OnebillRequestError) return json({ error: err.message }, err.status, cors);
+        if (err instanceof AccountReadError) {
+          // The SYSTEM is safe to name and is the operator's first question. The MESSAGE is not: it
+          // carries the upstream path and a slice of its response body. Logged here, never returned —
+          // the same rule the generic NS 502 has had a regression guard for since the info-leak fix.
+          console.error(JSON.stringify({ msg: 'onebill upstream read failed', system: err.system, error: err.message }));
+          return json({ error: err.system === 'netsapiens' ? 'NetSapiens read failed' : 'OneBill read failed', system: err.system, message: 'Upstream read failed' }, 502, cors);
+        }
+        if (err instanceof HttpError) return json({ error: err.message, ...(err.reason ? { reason: err.reason } : {}) }, err.status, cors);
+        console.error(JSON.stringify({ msg: 'request failed', path: url.pathname, error: (err as Error).message }));
+        return json({ error: 'Request failed' }, 500, cors);
+      }
+    }
+
     // ── The operator console: GET /kit/status (the document) and GET /kit/spk.js (the bundle — bytes
     // ship starting Task 7). Both are gated by the SAME two checks — resolveAuth, the kit.status feature
     // gate, then requireFleetRead — run HERE, ahead of Group 2, so a deployment broken in one of Group
@@ -1609,7 +2015,11 @@ export default {
         // masquerade itself plus the operator behind it.
         const canConsole = can(auth.principal, 'kit.status', policies);
         const canCapture = url.pathname === '/kit/spk.js' && can(auth.principal, 'kit.captureMenus', policies);
-        if (!canConsole && !canCapture) {
+        // A third way to be handed this bundle: the OneBill menu entry rides it. `onebill.view` defaults
+        // to reseller — a wider audience than the console's — so the bundle must ship to them too, and
+        // the console flag is not in it (spkFeaturePolicyKeys filters each flag by `can`).
+        const canOnebill = url.pathname === '/kit/spk.js' && onebillEnabled(env) && can(auth.principal, 'onebill.view', policies);
+        if (!canConsole && !canCapture && !canOnebill) {
           // If nobody at all can reach the console (off, or no superadmin named), say so and name the
           // setting to fix — that's actionable. Otherwise this caller just isn't on a list that does
           // admit others, and the terse message is correct as-is (naming who IS admitted would leak it).
@@ -1645,7 +2055,20 @@ export default {
         // labels already rendered on the page in front of them and writes to their own browser. Running
         // the fleet gate on them would refuse the whole feature for exactly the case it is for, since a
         // masqueraded user is domain-locked by construction.
-        if (canConsole) requireFleetRead(auth.principal, env);
+        // The OneBill page discloses the fleet's domains exactly as the console document does, so a
+        // caller admitted only by `onebill.view` faces the same gate. A capture-only caller does not:
+        // their bundle reads the labels already on the page in front of them.
+        // Name the surface the caller actually asked for: a domain-locked account admitted by name to
+        // onebill.view alone meets this refusal on the speculative bundle fetch, before any console exists for it.
+        if (canConsole || canOnebill) {
+          // …and when that is the ONLY thing admitting them, the refusal is the same steady state as the
+          // one above: every authenticated user fetches this bundle on every page load, so it answers
+          // 204 rather than adding a permanent 403 rate. `canOnebill` is set on /kit/spk.js alone, so
+          // the three /kit/onebill* routes keep the loud 403 with the page's own wording — those are
+          // only ever requested by someone who clicked the menu item.
+          if (!canConsole && !fleetReadAllowed(auth.principal, env)) return new Response(null, { status: 204, headers: { ...cors } });
+          requireFleetRead(auth.principal, env, canConsole ? undefined : 'The OneBill Integration page');
+        }
         if (url.pathname === '/kit/spk.js') {
           // Both gates above already ran (kit.status + requireFleetRead) — this is the tier-cached bundle
           // response, same shape as /kit/portal.js and /kit/self.js below. Its own tier namespace (`spk`)

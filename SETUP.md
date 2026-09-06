@@ -140,6 +140,27 @@ extension that has since been reassigned.
 *This is the one feature that holds a stored NetSapiens credential, because an event arrives with no
 caller. It is inert until fully configured. See [Change events](./CONFIG.md#group-events).*
 
+<a id="onebill-links"></a>
+
+### Billing reconciliation against OneBill
+
+An unofficial [OneBill](https://www.onebillsoftware.com/) integration on the Management menu, in two
+layers. The **links page** lines up OneBill billing accounts against NetSapiens domains: each account's
+current link or the absence of one, a proposed link where a usage subscription's identifier names the
+domain, closed accounts whose domain is still live, and a one-account-at-a-time control to set, edit or
+clear a link. A domain billed per site reads as `SPLIT BY SITE` rather than as unlinked.
+
+Open a linked row and the **account panel** compares what that account is billed for against what
+NetSapiens actually holds: seats, transcription, numbers split local, toll-free and fax, E911 addresses,
+SMS numbers and devices by model. Every row expands into the actual items behind its count, and an
+operator accepts them one at a time — so a gap that is normal is recorded once and stops being reported.
+
+**Why?** Because the two systems drift, and nobody notices until a customer is billed for a seat they gave
+back or uses one nobody billed. Counting both sides by hand is the job this replaces.
+
+*Feature keys `onebill.view` (default `reseller`) and `onebill.write` (default `superadmin`). Off unless
+all four `ONEBILL_*` credentials are set — see [Each integration, separately](#prerequisites) below.*
+
 ### The integration console
 
 A bold **Super Portal Kit** entry in the portal opens a read-only page reporting how this deployment is
@@ -257,6 +278,9 @@ its own minimum is met.
 | **Menu customization** | [`PORTAL_MENUS`](./CONFIG.md#PORTAL_MENUS) alone | No other integration required. With no app configured, static add, hide and rename still work. |
 | **Status banner** | [`STATUS_BANNER_WEBHOOK`](./CONFIG.md#STATUS_BANNER_WEBHOOK) — an `https` endpoint **you host** | ⚠️ It receives the signed-in user's live `ns_t` on every page load. Name only something you control. |
 | **Change events** | [`NS_EVENTS_BASE_URL`](./CONFIG.md#NS_EVENTS_BASE_URL) + [`NS_EVENTS_DOMAINS`](./CONFIG.md#NS_EVENTS_DOMAINS) + [`NS_EVENTS_PATH_SECRET`](./CONFIG.md#NS_EVENTS_PATH_SECRET) + [`NS_API_KEY`](./CONFIG.md#NS_API_KEY) (or admin credentials) + a cron trigger | Also needs a NetSapiens release with the flat `/subscriptions` endpoints. Read [the depth notes](./CONFIG.md#events-reference) before enabling — retiring it has an order. |
+| **OneBill links and the account panel** | [`ONEBILL_TENANT_ID`](./CONFIG.md#ONEBILL_TENANT_ID) + [`ONEBILL_CLIENT_SECRET`](./CONFIG.md#ONEBILL_CLIENT_SECRET) + [`ONEBILL_USERNAME`](./CONFIG.md#ONEBILL_USERNAME) + [`ONEBILL_PASSWORD`](./CONFIG.md#ONEBILL_PASSWORD) | All four are the gate: any one missing and there are no OneBill calls, no menu entry and no routes. The custom-field group named by [`ONEBILL_LINK_GROUP`](./CONFIG.md#ONEBILL_LINK_GROUP) must already exist in OneBill — [declare it first](#onebill-group), or the page shows a setup card instead of the table. |
+| **The billing comparison** | the four above **+** [`ONEBILL_RECURRING_RULES`](./CONFIG.md#ONEBILL_RECURRING_RULES) | Unset, the panel is a fact sheet: it shows the inventory and lists every offer as unmapped. Add [`NS_FAX_SERVER_HOSTS`](./CONFIG.md#NS_FAX_SERVER_HOSTS) if you bill fax lines apart from DIDs. |
+| **Accepting a gap** | the four above **+** the [`ONEBILL_DB`](./CONFIG.md#ONEBILL_DB) D1 binding, migrated | Apply `migrations/` **before** you deploy this version. Without the binding the panel still shows every gap; it just cannot record that one of them is normal. |
 | **Your own gated scripts** | [`PORTAL_SECONDARIES`](./CONFIG.md#PORTAL_SECONDARIES), plus the [`ASSETS`](./CONFIG.md#ASSETS) R2 binding for `r2:` entries | The advanced path. Most deployments start with the built-in bundles and add these later. |
 | **Rate limiting the token checks** | the [`JWT_RATE_LIMITER`](./CONFIG.md#JWT_RATE_LIMITER) binding | Optional and worth having. Without it an in-isolate limiter still applies, just per edge location. |
 
@@ -268,8 +292,9 @@ its own minimum is met.
 
 ### 1. Get it onto Cloudflare
 
-**No bindings to provision** — no KV, D1, or Durable Objects, and R2 only if you add your own `r2:`
-secondaries. Pick whichever route suits you:
+**No bindings required to provision** — no KV or Durable Objects, and R2 only if you add your own `r2:`
+secondaries. A D1 binding is optional, for the OneBill account panel's baseline store (below). Pick
+whichever route suits you:
 
 **The deploy button** (no terminal). It clones this repo into your own GitHub account, deploys to your own
 Cloudflare, and asks for the values on a form. Fastest start.
@@ -287,10 +312,319 @@ cd ns-portal-kit
 pnpm install          # or: npm install
 npx wrangler login    # opens a browser; no API token to create
 
-# put your values in wrangler.jsonc vars, then:
+# put your values in wrangler.jsonc vars (including ONEBILL_TENANT_ID, if you use OneBill links), then:
 npx wrangler secret put PORTAL_SUPERADMINS
+npx wrangler secret put ONEBILL_CLIENT_SECRET   # optional — OneBill links
+npx wrangler secret put ONEBILL_USERNAME        # optional — OneBill links
+npx wrangler secret put ONEBILL_PASSWORD        # optional — OneBill links
 npx wrangler deploy
 ```
+
+The three `ONEBILL_*` secrets are optional and the deploy button does not prompt for them: without all
+four OneBill settings the integration reports itself off and its routes do not exist, so a deployment
+that does not use OneBill should leave them unset rather than be asked for them.
+
+<a id="onebill-group"></a>
+
+### Set up the OneBill custom-field group first
+
+The links page reads and writes each account's NetSapiens link from a **custom-field group** on the
+OneBill subscriber record. Setting [`ONEBILL_LINK_GROUP`](./CONFIG.md#ONEBILL_LINK_GROUP) does not create
+that group — it only tells this deployment where to look — so declare it in OneBill before you open the
+page. Until you do, the page shows a setup card headed **"OneBill needs a custom-field group before links
+can be stored"** in place of the table, and refuses every write with the same message.
+
+The default [`ONEBILL_LINK_GROUP`](./CONFIG.md#ONEBILL_LINK_GROUP) is
+`{"group":"PBX","ns":"NS","valueField":"Domain","qualifierField":"Site"}`, which is what the names below
+assume. If you use different names, substitute them everywhere — the page's setup card quotes your own
+values back to you.
+
+To declare the group in OneBill:
+
+1. Sign in to OneBill as an administrator and open the custom-field (account attribute) configuration for
+   the **subscriber** record. Custom fields are configured per record type, and an account-level group is
+   the only kind this integration reads.
+2. Create a group whose **key** is `PBX` — the value of `group` in `ONEBILL_LINK_GROUP`. The key is what is
+   matched, not the display label, so a group labelled "Phone System" with the key `PBX` is correct.
+3. Allow the group to hold **more than one instance**. One instance carries one link, and an account
+   billing several sites of a domain — or sites across several domains — needs one instance per link. A
+   single-instance group caps every account at one link.
+4. Add a **text** field named `Domain` — the value of `valueField`. It holds the NetSapiens domain, and it
+   is the only field the integration requires.
+5. Add a second **text** field named `Site` — the value of `qualifierField` — if you bill any domain per
+   site. Leave `Site` empty on an instance that bills the whole domain. If you never bill per site, drop
+   `qualifierField` from `ONEBILL_LINK_GROUP` and do not create the field.
+6. Save the group. **OneBill materialises a blank instance of every declared group onto every subscriber**,
+   so the declaration alone is enough for the check below — no account needs a value in it yet.
+7. Open the links page in the portal and choose **Refresh and fully verify**. The setup card disappears
+   and the table renders. If it does not, the card names which of the three is missing — the group itself,
+   the `Domain` field, or the `Site` field — and the integration console's OneBill probe reports the same
+   thing as a failing check.
+
+**Other fields on the group are yours.** A write names only `Domain` and `Site`, and OneBill merges child
+updates rather than replacing them, so a `Description` or a link field somebody set by hand survives every
+write this kit makes.
+
+**Do not edit the derived identifier by hand.** The links an account holds are also encoded into the
+subscriber's `externalId` under the namespace `ns` names (`NS` by default), which is how an account is
+found by domain without reading every record. That field is derived from the group instances; edit the
+instances and let the page rewrite it.
+
+<a id="recurring-comparison"></a>
+
+### The recurring comparison (optional)
+
+`ONEBILL_RECURRING_RULES` says which OneBill subscription lines count toward which NetSapiens inventory
+dimension. Unset, the account panel still shows the inventory and lists every recurring offer as
+unmapped — a fact sheet with no comparison, which is a useful place to start while you work out your own
+rules. This is our own production rulebook, real product names and all — there is no customer data in a
+rulebook, only what we sell:
+
+```json
+[
+  {"offer":"Standard Hosted Phone Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats"},
+  {"offer":"Annual Standard Hosted Phone Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats"},
+  {"offer":"Premium Hosted Phone Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats",
+   "entitles":{"transcriptionEnabled":1,"smsNumbers":1,"teamsConnected":1,"Fax Lines":1}},
+  {"offer":"Call Center Hosted Phone Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats",
+   "alsoCounts":{"Call Center Seats":1}},
+  {"group":"Call Center Seats",
+   "counts":["extensions.byScope.Call Center Agent","extensions.byScope.Call Center Supervisor"]},
+  {"offer":"General Extension","counts":"extensions.withAnyDevice","group":"Hosted Seats"},
+  {"offer":"Classroom Hosted Extension","counts":"extensions.withAnyDevice","group":"Hosted Seats"},
+  {"offer":"Restaurant Advanced Hosted Phone Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats"},
+  {"offer":"MS Teams Integration","counts":"teamsConnected"},
+  {"productCode":"SVSEAT","counts":"extensions.withAnyDevice","group":"Hosted Seats"},
+
+  {"offer":"Bundled Seat - 24M","counts":"extensions.withAnyDevice","group":"Hosted Seats"},
+  {"offer":"Bundled Premium Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats",
+   "entitles":{"transcriptionEnabled":1,"smsNumbers":1,"teamsConnected":1,"Fax Lines":1}},
+  {"offer":"Bundled Call Center Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats",
+   "alsoCounts":{"Call Center Seats":1}},
+
+  {"offer":"E911 Physical Location and Phone Number","counts":"e911Addresses","group":"E911 and Number",
+   "alsoCounts":{"dids.total":1}},
+  {"offer":"Single Voice Phone Number (DID)","counts":"dids.total","group":"Phone Number (DID)"},
+  {"offer":"Toll Free Phone Number (DID)","counts":"dids.tollFree"},
+  {"offer":"Phone Numbers - Pack of 10","counts":"dids.total","group":"Phone Number (DID)","perUnit":10},
+  {"offer":"Block of 10 Voice Phone Numbers (DIDs)","counts":"dids.total","group":"Phone Number (DID)","perUnit":10},
+
+  {"productCode":"e911","counts":"e911Addresses","group":"E911 and Number","alsoCounts":{"dids.total":1}},
+  {"productCode":"DID","counts":"dids.total","group":"Phone Number (DID)"},
+
+  {"offer":"Native Fax - Analog (requires MP202B Fax ATA)","counts":"dids.fax","group":"Fax Lines"},
+  {"offer":"Native Fax - Digital","counts":"dids.fax","group":"Fax Lines"},
+  {"offer":"Native Fax - Toll Free","counts":"dids.fax","group":"Fax Lines"},
+  {"offer":"Native Fax Line - Analog","counts":"dids.fax","group":"Fax Lines"},
+  {"offer":"Native Fax Line - Digital Only Seat","counts":"dids.fax","group":"Fax Lines"},
+  {"offer":"Webfax","counts":"dids.fax","group":"Fax Lines",
+   "why":"retail name for the digital fax plan, same price as Native Fax - Digital"},
+
+  {"offer":"MFAX","ignore":true,
+   "why":"Documo fax, not a NetSapiens line; counted when the Documo integration lands"},
+  {"offer":"MFAX Additional User","ignore":true,
+   "why":"Documo fax, not a NetSapiens line; counted when the Documo integration lands"},
+  {"offer":"MFAX User and DID w/Voice Services","ignore":true,
+   "why":"Documo fax, not a NetSapiens line; counted when the Documo integration lands"},
+  {"offer":"MFAX Line","ignore":true,
+   "why":"Documo fax, not a NetSapiens line; counted when the Documo integration lands"},
+  {"offer":"AudioCodes MP202B Fax ATA","ignore":true,
+   "why":"hardware sold beside an analog fax line, not a line of its own"},
+  {"offer":"AudioCodes MP202B FaxBridge ATA","ignore":true,
+   "why":"hardware sold beside an analog fax line, not a line of its own"},
+
+  {"productCode":"INTEG","ignore":true,"why":"integration fee, not a countable thing"}
+]
+```
+
+**Rows sharing a `group` are summed**, both for the comparison's `billed` side and for the item list
+underneath it. Every seat plan above pools into one `seats` row because the PBX cannot yet tell a Premium
+extension from a Standard one — the tier is a billing decision, not a provisioning one. When seat type is
+tagged into `service-code`, each plan's rule can move to its own `extensions.byServiceCode.<type>` bucket
+and the bundle becomes checkable per extension; until then, one pooled row is the honest picture.
+
+**A rule is keyed by exactly one of `offer`, `planCode` or `productCode` — or by none of the three**, in
+which case it must name a `group` and is a comparison-only row: its `billed` comes entirely from other
+rules' `alsoCounts` credits, never from a subscription line of its own. The `Call Center Seats` row above is
+one — Call Center Agent and Call Center Supervisor are NetSapiens user *roles*, not seat types, so they
+are counted directly by scope, and the seat rules that credit `alsoCounts: { "Call Center Seats": 1 }` are what
+give that row something to compare against.
+
+`offer` matches the price plan's **name**, the one thing every subscription line always carries.
+`planCode` and `productCode` match OneBill's catalogue codes instead, resolved through a catalogue index
+this Worker builds from `ProductService/v1/products` and `/products/{code}` and caches for 24 hours — a
+rulebook that only uses `offer` never makes that catalogue call. **A price plan can carry a blank plan
+code:** this rulebook's own retail-catalogue "Bundled Seat", "Bundled Premium Seat" and "Bundled Call
+Center Seat" plans all do, so a `planCode` rule can never match one — key it by name or by `productCode`
+instead. When a line matches more than one rule, `planCode` wins, then `offer`, then `productCode`: a
+named plan always beats the product-level fallback under it.
+
+**Fax lines are counted, not ignored** — but only if you tell the Worker where your fax server is. Set
+[`NS_FAX_SERVER_HOSTS`](./CONFIG.md#NS_FAX_SERVER_HOSTS) and a number whose dial rule hands it to that host
+leaves `dids.total` and lands in `dids.fax`, which is what the six `Fax Lines` rules above compare
+against. Leave it unset and `dids.fax` is 0 while those numbers stay in `dids.total`, so the fax rows read
+as a shortfall and the DID row as an excess — either configure the host or go back to `ignore: true` on
+the fax offers, but do not do neither.
+
+All six count the SAME dimension and pool into one `Fax Lines` row, because NetSapiens cannot tell one
+fax line from another: there is no fax endpoint, the ATA is not a device on the user, and nothing on the
+number says analog, digital or toll-free. Which product was sold is recorded by the billed-as tag on each
+acceptance, not by the count.
+
+**Give every `ignore` rule a `why`.** It is free text, at most 120 characters, and the comparison engine
+never reads it — this setting is a JSON string inside a JSONC file, so a `//` comment cannot reach inside
+it and the note has to be a field. An offer name alone does not say whether the offer is unbilled,
+counted somewhere else, or not a line at all. The seven above are three different reasons: the `MFAX`
+plans are Documo fax rather than NetSapiens lines, and will be counted when that integration lands; the
+two `AudioCodes MP202B` ATAs are hardware sold beside an analog fax line, not a line of their own; and
+`INTEG` is an integration fee, which is not a countable thing.
+
+`counts` is one dotted path, or an array of several — an array sums them for the comparison and unions
+their items, which is how the seat rules above stay one row even though a domain mixes Standard, Premium
+and Call Center extensions. `ignore: true` takes the place of `counts` on a keyed rule: it marks an offer
+as known and deliberately not compared (an unrouted integration) instead of leaving it to fall
+through as unmapped, and it lists under "Ignored by rule" in the panel rather than the unmapped list.
+Exactly one of `counts` or `ignore` is required on every rule that has a key.
+
+`alsoCounts` keys are a dotted path, or another rule's `group` name — a Call Center seat crediting the
+`Call Center Seats` group so the standalone row above has something to compare against, or an E911
+product crediting the phone number that comes with it.
+
+`entitles` takes the same keys and scales the same way, and says something different: each unit of the
+line ENTITLES the customer to that many at no charge. A Premium seat entitles one transcription, one SMS
+number and one Teams connector, so those rows read `billed 0, entitled <seats>` — anything up to the
+entitlement is a `match`, and using none of it is not a finding. Use `alsoCounts` where the line PAYS for
+the thing and fewer live than billed is a shortfall; use `entitles` where the line PERMITS it.
+
+The paths available to `counts`, `alsoCounts` and `entitles`: `extensions.total`, `extensions.withAnyDevice`,
+`extensions.withNoDevice`, `extensions.byScope.<scope>`, `extensions.byServiceCode.<code>`,
+`extensions.byDeviceCount.<0|1|2|3+>`, `systemUsers.total`, `transcriptionEnabled`, `teamsConnected`,
+`dids.total`, `dids.tollFree`, `dids.local`, `e911Addresses`, `smsNumbers`, `devices.total` and
+`devices.byModel.<model>`. Two of those deserve a callout. **`extensions.withAnyDevice`**, not
+`extensions.total`, is what a seat rule should usually count: an extension carrying no device — no
+handset, no softphone, no Teams connector — is not in service yet, and billing on `total` counts seats
+nobody has picked up. **`extensions.byScope.<scope>`** is how a user *role* is counted rather than a
+device, which is what makes the Call Center row above possible without any NetSapiens field dedicated to
+"this is a Call Center seat."
+
+**Retail (OIT-supplied) product fallbacks.** Six legacy retail products carry no plan code at all, and
+their product codes are stable, so a `productCode` rule catches whatever their plans are named without
+enumerating every one:
+
+| retail product | code | rule |
+|---|---|---|
+| Hosted Seat | `SEAT` | `counts: extensions.withAnyDevice, group: seats` — a fallback; the JSON above instead names the three retail seat plans directly, so Premium's entitlements still apply |
+| E911 | `e911` | `counts: e911Addresses, group: e911, alsoCounts: { dids.total: 1 }` — it PAYS for the number, so a missing one is a shortfall |
+| DID | `DID` | `counts: dids.total, group: numbers` |
+| Fax | `FAX` | `ignore` — until a fax system is a count source |
+| Integrations | `INTEG` | `ignore` — until its plans are mapped individually |
+| Domain Usage | `PROD3102` | no rule — a usage charge, never a recurring line |
+
+**What acceptance means.** Expanding a comparison row lists the actual NetSapiens items behind its
+count and each is **Accept**ed or left unknown, one at a time, by whoever holds `onebill.write`. Each
+item's own Accept sits at the left of its line, beside a checkbox; **Accept all** takes every listed item
+in the group at once, and ticking boxes replaces that with **Accept selected (N)** for the ones you
+chose. **Accept shortfall** is for a row with fewer live items than billed, or one with no item list at
+all (`devices.*`), where there is nothing to click per item. Any acceptance can be **Clear**ed, one item
+or the whole group, and the history keeps both the accept and the clear — nothing is overwritten. A group
+reads `accepted` only once its very last item has been judged; "11 of 12 seats verified, one still
+unreviewed" stays on screen until then.
+
+**Billed as.** Where a row is billed under more than one plan, accepting shows a **Billed as** picker
+listing that row's own plans, and the acceptance records which one — so each plan's line under the group
+name can say how many items are tagged to it, and how many more than it bills. It is a note on the
+decision, not an input to the verdict: the comparison counts things, and nine seats tagged to a tier that
+bills eight is something for a person to act on rather than something this can adjudicate.
+
+**What each line actually is.** An item's line says more than its number: a DID reads local or toll-free,
+then where it routes (`to user 100 — Ann Lee`, `to queue 701 — Sales`), then the note the portal wrote on
+it; an extension lists the devices actually on it, with a Teams connector marked. Under the inventory, a
+closed **Extensions without a device (N)** block lists the extensions that count toward
+`extensions.total` but not toward the `extensions.withAnyDevice` a seat rule usually counts — which is
+the gap between those two numbers, explained on the page.
+
+**Rows nothing bills.** A rule's `entitles` produces rows with a billed count of 0 and an entitlement
+above it — a Premium seat's included transcription, SMS number and Teams connector. Those read
+`optional, unused` while nobody is using them and take the engine's verdict once somebody is; the Billed
+column carries a small `+N entitled`, and the line under the group name says what includes it. Nothing
+there is ever a shortfall, which is the whole difference between `entitles` and `alsoCounts`.
+
+**Accounts that hold several sites or domains.** The panel opens per OneBill *account*, not per domain:
+a linked domain row, a site row, and a split-domain parent whose sites all bill to one account are all
+clickable — only a split parent billed to several accounts, and a domain in `conflict`, are not. The
+header names the account, then everything it holds (`branch.example / North · other.example (whole
+domain)`), and an item's line names its own domain and site too, once the account spans more than one
+domain. Every line opens with what KIND of thing it is — `extension`, `number`, `E911 address`,
+`SMS number` — because a column of "100", "+15550100" and "North dock" reads as one list until something
+says otherwise. Every item lands on exactly one account or on that domain's **Unassigned** list, each
+with the reason it has nowhere to go (a site nobody has linked, a number routed to a
+queue) and a picker naming that domain's holders to hand it to. An Unassigned line carries the same
+detail an item line does, because "is this number billable or is it plumbing" is exactly the question
+that row is asking — reassigning an already-accepted item
+clears its acceptance on the account it leaves, since the judgement was made against the wrong scope. A
+hand-assigned item carries a `manual` chip; **Clear assignment** returns it to the automatic rule. This
+needs migration `0003_billing_item_assignment.sql` applied — see "Upgrading from an earlier version of
+this kit?" below for what it does to existing acceptances.
+
+**An E911 address can be on more than one account, and that is not a double-bill.** An address is a fact
+about a *place*, not about a user: on a domain split by site, users at four sites can all reference one
+address, and two of those sites' accounts can each legitimately buy an E911 bundle for it. So an address
+is placed on **every** account holding one of the sites that reference it — each counting it once,
+because the bundle is per place and not per user — and on the whole-domain account as well when one of
+those sites is unlinked or the referencing users have no site at all. It is Unassigned only when nothing
+holds any of its sites and there is no whole-domain link, and the reason then names every unlinked site
+rather than the first.
+
+A shared address's line says `also on <account> (<group> x<billed>)` for each of the other holders, read
+from *their* subscriptions — so the duplicated count does not read as a mistake, and the case worth
+finding, a co-holder billing nothing for a place it shares, is on the page. `(could not read)` there
+means their subscription read failed, which is a different fact from a zero.
+
+Assignment on an address is therefore **additive**: **Assign** adds an account to the set (the picker
+offers only holders not already on it), and **Remove from this account** takes one out, in place of the
+**Move** every other kind gets. Moving a shared address would take an E911 bundle off an account that
+really does bill for the place. Remove appears only where *this* account was added by hand — an
+automatic placement belongs to the site link, which would put it straight back. This needs migration
+`0005_billing_item_assignment_multi.sql`.
+
+**Accepting a gap needs a database.** Bind a D1 database as `ONEBILL_DB` and apply the migrations:
+
+```bash
+npx wrangler d1 create <your-db-name>
+# add the d1_databases block to wrangler.jsonc, then:
+npx wrangler d1 migrations apply <your-db-name> --remote
+```
+
+Without it the panel works and shows every gap; it just cannot record that one of them is normal.
+
+**Five migrations ship in `migrations/`**, and `wrangler d1 migrations apply` runs whichever of them
+your database has not seen. `0001_billing_baseline.sql` creates the store on a fresh database and is
+all a first-time deployment needs to read; the four below matter if you ran an earlier version.
+
+**Upgrading from an earlier version of this kit?** Migration `0002_billing_baseline_items.sql` replaces
+the count-based baseline with per-item acceptance, and it **deletes every existing `billing_baseline`
+row** to do it — an accepted count against twelve unknown items is not the same fact as twelve item
+acceptances, so the two are not converted, they are retired. Run
+`npx wrangler d1 migrations apply <your-db-name> --remote` again to pick it up, and expect to re-accept
+anything you had accepted before, item by item. `0003_billing_item_assignment.sql` adds the manual
+assignment tables and does the same thing again for the same reason: an account's comparison now spans
+more than one domain, so item keys inside it became domain-qualified, and every existing
+`billing_baseline`/`billing_baseline_item` row is deleted rather than reinterpreted. Apply it and
+re-accept, item by item, once more.
+
+`0004_billing_baseline_item_offer.sql` is the exception on data and the one to be careful about on
+order. It is purely additive — `offer` on the two item tables, `entitled` on the two group tables — and
+deletes nothing: existing acceptances read as untagged and existing group rows as "entitlement not
+recorded", which keeps them on the pre-entitlement behaviour instead of invalidating every decision at
+once. **Apply it before you deploy this version.** The baseline reads name the new columns by hand, so
+against an unmigrated database they fail outright and the account panel answers an error rather than
+degrading — which is the opposite order from the earlier migrations, where a late apply only meant the
+Accept controls did nothing yet.
+
+`0005_billing_item_assignment_multi.sql` rebuilds `billing_item_assignment` with the account in its
+primary key, so one E911 address can be assigned to several accounts (above). It copies every existing
+row across and deletes nothing — SQLite cannot alter a primary key, so the table is recreated rather
+than altered, and existing assignments keep working exactly as they did.
 
 **If you run more than one deployment** — a dev alongside prod, say — use a `wrangler.jsonc` `env` block
 per Worker. Two rules bite everyone: **environments do not inherit top-level `vars`**, so each `env` needs
@@ -401,6 +735,9 @@ In the order that finds problems fastest.
 
 ```bash
 wrangler secret put PORTAL_SUPERADMINS    # you@yourdomain.example
+wrangler secret put ONEBILL_CLIENT_SECRET # optional — OneBill links
+wrangler secret put ONEBILL_USERNAME      # optional — OneBill links
+wrangler secret put ONEBILL_PASSWORD      # optional — OneBill links
 ```
 
 Setting a secret does not require a redeploy — but doing it first means you never have a console you

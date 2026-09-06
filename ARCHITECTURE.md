@@ -162,6 +162,90 @@ separate steps so a domain-wide change can be previewed. Its placeholders carry 
 because a record owning the `<ext><suffix>` SIP identity is precisely what collides when an extension is
 later reassigned.
 
+## OneBill account reconciliation
+
+The [OneBill](https://www.onebillsoftware.com/) integration lines up billing accounts against
+NetSapiens domains and, for a rulebook-mapped subset of a domain's inventory, compares what an account
+is billed for against what NetSapiens actually holds. It follows the integration-gate convention above:
+`onebillEnabled(env)` requires all four `ONEBILL_*` credentials, and every route, cache entry and menu
+item is conditioned on it.
+
+| File | Role |
+|---|---|
+| `onebill.ts` | config, the two OneBill clients, and `buildLinkReport` — the pure join of OneBill accounts against NetSapiens domains that both the links page and the account panel read. |
+| `onebillPage.ts` | the links page and the account panel, drawn twice (server TypeScript + an ES5 client string) and mirror-tested against each other, the same convention as `kit.ts`'s bundles. |
+| `onebillCatalog.ts` | the OneBill product catalogue as a cached plan-name → code index, for rulebook entries keyed by `planCode`/`productCode`. |
+| `onebillBaseline.ts` | the baseline store (migration `0002`): which billing-vs-inventory items and groups an operator has accepted, with append-only history. |
+| `onebillScope.ts` | the account graph over the link report, account resolution by domain or account number, item→account attribution, and the scoped inventory an account's panel is compared against. |
+| `onebillAssignment.ts` | the manual item→account assignment store (migrations `0003`, `0005`) — statement builders only, composed with `onebillBaseline.ts`'s into one batch by `onebillAccount.ts`. |
+| `onebillAccount.ts` | assembles one account's report: resolves its scope, reads and caches each domain it touches plus the account's own subscriptions, merges baselines and assignments, and applies a baseline or assignment write. |
+
+**Six routes, three of them writes.** All six require a delegated principal, then `onebill.view`, then
+`requireFleetRead` — the report names every domain in the fleet, so a principal locked to one domain is
+refused even with the feature. The three writes add `onebill.write` and a forced fresh `/jwt`
+re-validation: they call `requireFreshAuth` **unconditionally**, not behind `needsFreshAuth`, so a
+server-side logout cannot leave a cached verdict good enough to change a billing link.
+
+| Route | Method | What |
+|---|---|---|
+| `/kit/onebill` | GET | the links page itself (an iframe document) |
+| `/kit/onebill/links` | GET | the link report the page renders |
+| `/kit/onebill/account` | GET | one account's scoped report — inventory, comparison, items |
+| `/kit/onebill/apply` | POST | set, edit or clear an account's links (**write**) |
+| `/kit/onebill/baseline` | POST | accept or clear items, a whole group, or a shortfall (**write**) |
+| `/kit/onebill/assign` | POST | assign an item to an account, or hand it back (**write**) |
+
+The page runs in a sandboxed iframe and reaches those routes through four `spkBridge` message pairs —
+`onebill`/`onebill-result`, `account:load`/`account:report`, `baseline:accept`/`baseline:saved`,
+`assign:set`/`assign:saved` — rather than one pair with an `op` discriminator. A link report, an account
+report and a single comparison row are three documents with three shapes, and a reply rendered into the
+wrong surface empties the page rather than failing. Every reply can carry `unavailable`, which renders as
+a failed load or a failed write and **never** as an empty table: "OneBill has no links to show" is a
+confident answer to a question that was never asked.
+
+**A write never trusts what the page names.** `decidedBy` is taken from the caller's own `ns_t`, never from
+the payload — a page-supplied name is exactly the field an audit trail must not accept. An account number
+in a body is resolved through the *caller's own* link report and refused if the resulting scope touches a
+domain they cannot see, before a single per-domain read. And a write re-reads the account it is about to
+touch, so a link the cheap quick view never noticed cannot be deleted by a "make this account match" write.
+
+**A fax line is a DID with a dial rule.** NetSapiens has no fax endpoint, so `NS_FAX_SERVER_HOSTS` supplies
+the destination hosts that make a number `dids.fax` instead of `dids.total`; unset, nothing is a fax line
+and every count is what it was. Matching is on the dial rule's destination host alone — never on the
+description, which an operator can edit.
+
+**The unit of reconciliation is the account, not the domain.** An account can hold a whole domain,
+several sites of one domain, or sites across several domains; `onebillScope.ts` derives that graph from
+the same link report already cached for the links table, so the panel and the table can never disagree
+about who holds what. Every item on a domain is attributed to exactly one account or to a visible
+Unassigned list — first a manual assignment (`onebillAssignment.ts`, keyed by domain, the item's BARE
+key and the account, because the assignment is a fact about the item), then the item's site link,
+then the domain's whole-domain link, else Unassigned.
+
+**An E911 address is the one exception, because it is a fact about a place.** Users at several sites of a
+split domain can reference one address, and each of their accounts can legitimately buy an E911 bundle
+for it, so an address is placed on the SET of accounts holding its referencing sites — each once — plus
+the whole-domain holder when a referencing site is unheld or the users have no site. `attributeDomainInventory`
+in `@dszp/netsapiens-lib` 0.6.0 carries every such site in `ItemAttribution.sites`, and the old
+`unattributed:shared-across` reason is gone, because a multi-site address is placed rather than
+unplaceable. A manual assignment on an address JOINS that set — migration `0005` widens the primary key
+to include the account — and is removed per account; every other kind keeps the one-account rule, which
+the ROUTE now enforces rather than the schema. `AccountReport.coBilled` runs the same rulebook over each
+co-holder's own subscriptions with an EMPTY inventory — their bill is a thing this report may read, their
+inventory slice is not — so the page can say whether an account sharing an address bills for it too.
+
+Because one account's scope can span domains, an
+item inside its scoped comparison is re-keyed `<domain>/<bare key>` (`scopedKey`/`splitScopedKey` in
+`onebillScope.ts`); an `Assignment` stays keyed by the bare key plus its own `domain` column, since it
+names one domain's item, never the account-scoped view built over it.
+
+**Two cache kinds, because neither half belongs to the pair.** `onebillAccount.ts` caches a `domain`
+entry — one domain's inventory read and site attribution, shareable across every account that touches
+it — separately from a `subs` entry — one account's subscriptions, not tied to any domain. Keying either
+by "account + domain" would re-read a shared domain once per account holding it, and re-read an
+account's subscriptions once per domain it holds. Baselines and assignments are read fresh on every load
+and merged in after the cache, so an operator's own accept or assign is visible on the page they land on.
+
 ## NetSapiens event subscriptions — the inbound half
 
 `nsEvents.ts` receives NetSapiens change events and `worker.ts`'s `scheduled()` keeps the subscriptions

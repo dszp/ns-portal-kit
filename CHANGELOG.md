@@ -20,6 +20,294 @@ can land in one release. Every version is documented below, but only the ones th
 separately have a tag to link to — the entries between them describe changes that reached you in the next
 release. The version at `/health` always matches a heading here.
 
+## [Unreleased]
+
+### Changed
+
+- **A device chip says what the device IS when it has no model.** The account panel's device chips read
+  `<name> <model>` as before; where NetSapiens has no model for the device the chip now names its KIND
+  instead — `SNAPmobile Web`, `SNAPmobile`, `Teams`, or whatever you call your own app — and only where
+  there is neither does it read `(no model)`, in the dim style. The chip's tooltip carries the device name
+  and its kind. A Teams connector, which has no model to print, therefore reads `1001t Teams` rather than
+  going unlabelled.
+- **The domain inventory cache-key shape segment moved from `v2` to `v3`.** The suffix legend is baked
+  into a cached inventory read, so entries built before it are orphaned rather than served as current. The
+  first account panel after upgrading costs a fresh NetSapiens read per domain.
+
+### Fixed
+
+### Added
+
+- **[`NS_DEVICE_SUFFIXES`](./CONFIG.md#NS_DEVICE_SUFFIXES) names what a device-name suffix means on your
+  system.** A device's suffix is what its name carries after the extension number — `1001wp` on extension
+  `1001` has suffix `wp`. Unset, you get the three NetSapiens itself ships: `wp` SNAPmobile Web, `m`
+  SNAPmobile, `t` Teams. Set, your legend REPLACES that default rather than adding to it, which is how a
+  deployment without TeamMate omits `t` and turns Teams detection off — the `<ext>t` devices are then
+  handsets and are counted as such. Suffixes are 1–8 letters or digits, matched case-insensitively;
+  labels are 1–40 characters; a malformed value is reported on the status page with the setting named.
+- **An enabled Ringotel integration names itself on the chip.** Its activation suffix
+  ([`RINGOTEL_ACTIVATION_SUFFIX`](./CONFIG.md#RINGOTEL_ACTIVATION_SUFFIX), default `r`) joins the legend
+  labelled with [`RINGOTEL_LABEL_SHORT`](./CONFIG.md#RINGOTEL_LABEL_SHORT), so a white-labelled app needs
+  no second setting kept in step. A suffix you name yourself in `NS_DEVICE_SUFFIXES` is never overwritten.
+- **A rulebook rule takes a `why`** — free text, at most 120 characters, that the comparison never reads.
+  `ONEBILL_RECURRING_RULES` is a JSON string inside a JSONC file, so a `//` comment cannot reach inside it
+  and an `ignore` rule had no way to say whether the offer is unbilled, counted elsewhere, or not a line
+  at all. See [CONFIG.md](./CONFIG.md#ONEBILL_RECURRING_RULES).
+
+## [0.7.0] — 2026-09-05
+
+### Changed
+
+- **A fax line is counted apart from a DID.** On the portal's *Fax Server* treatment a fax line is an
+  ordinary phone number whose dial rule hands it to a fax server host, so nothing in NetSapiens says
+  "fax" except that host — which is why you supply it, in the new
+  [`NS_FAX_SERVER_HOSTS`](./CONFIG.md#NS_FAX_SERVER_HOSTS). Set it and those numbers leave
+  `dids.total`/`local`/`tollFree` and land in the new `dids.fax`, so a rulebook can bill each as what it
+  is instead of billing one number twice; leave it unset and nothing is a fax line and every count is
+  what it was. A fax line is chipped `fax line`, its detail reads `to fax server` (never the host), and
+  the inventory summary gains a `Fax lines` line beside Total / Toll-free / Local. **NetSapiens cannot
+  tell an analog fax from a digital one** — no fax endpoint, and the ATA is not a device on the user — so
+  point both fax offers at `dids.fax` and let the *billed as* tag on each acceptance record which was
+  sold. Cached inventory entries written before this are orphaned by a cache-key bump and re-read.
+
+- **An E911 address is billed by every account holding one of its sites.** An address is a fact about a
+  *place*: on a domain split by site, users at several sites can reference one address and each of their
+  accounts can legitimately buy an E911 bundle for it. It used to land in **Unassigned** as "shared", and
+  a manual assignment moved it to one account, leaving every other referencing account's E911 row short.
+  It is now placed on all of them — each counting it once — plus the whole-domain account when a
+  referencing site is unlinked. Assignment on an address is **additive** (**Assign** adds an account,
+  **Remove from this account** takes one out) in place of **Move**, and a shared line says
+  `also on <account> (<group> x<billed>)` read from the other account's own subscriptions. Needs
+  migration `0005_billing_item_assignment_multi.sql`, which is purely a key widening: every existing
+  assignment is copied across and nothing is deleted.
+
+- **The links table is filtered and sortable.** The filter box over domain, site and account narrows the
+  table as you type and says how many of how many rows are showing (Escape clears it). The rows arrive
+  sorted by **State** — conflict, then unlinked, then split, then linked, with domain A→Z breaking ties —
+  so the rows needing a decision are at the top. Click the **Domain / Site** or **State** header to sort
+  by it, and click again to reverse; the tie-break on domain is always A→Z whichever way the column runs.
+  Opening the page from a domain arrives **pre-filtered to that domain**, with a control saying so and
+  clearing it.
+
+- **A comparison row nothing has touched is greyed and carries no Details.** Billed 0, live 0, no items
+  present or stale, and no recorded group decision: there is nothing behind the count to open, and a row
+  of empty expanders reads as a page with more in it than it has. An accepted group row, any item, or any
+  nonzero count brings the row back, at 0/0 included.
+
+### Fixed
+
+- **An unreadable link list is refused, not read as empty.** A "make this account match" write sends the
+  full set of links the account should end with, so an empty set *clears* the account — which is what a
+  link list that failed to read looks like. The report now refuses such an account outright, and the page
+  draws no editor on a row whose account carries no link list at all, rather than offering a control whose
+  effect would be deletion.
+
+### Added
+
+- **Every item and Unassigned line says what KIND of thing it is** — `extension`, `number`, `fax line`,
+  `E911 address`, `SMS number` — because a column of "100", "+15550100" and "North dock" reads as one
+  list until something says otherwise, and they bill under different rules.
+
+- **A row whose Billed and Live disagree says the gap in words.** Under the verdict chip: `N unbilled`
+  where Live is above Billed *plus* any entitlement, `N billed, not live` where Live is under Billed,
+  and nothing at all inside that range. Three numbers in three columns left the reader subtracting, and
+  the subtraction is not the obvious one — an entitlement is headroom above Billed, not a second thing to
+  pay for, so a row using capacity somebody already granted is not a finding.
+
+- **Two rows counting the same items say so.** Where one row's items are all on a bigger row, it reads
+  `these 12 are among the 18 on Hosted Seats` and the bigger one reads `12 of these are also on Call
+  Center Seats`; rows that merely overlap each give the count. Hosted Seats at 18 beside Call Center
+  Seats at 12 otherwise reads as 30 things on a domain that has 18.
+
+- **A device with no model says `no model`.** NetSapiens leaves the model blank on some device records;
+  the chip used to print the library's `(unknown)` placeholder, which reads as a rendering fault rather
+  than as the missing field it is. Each device chip also carries its device name as a tooltip, so a chip
+  truncated in a narrow panel can still be identified.
+
+- **The OneBill links page** (Management → OneBill Integration) — an unofficial integration that lines
+  up [OneBill](https://www.onebillsoftware.com/) billing accounts against NetSapiens domains: each
+  account's current link (or absence of one), a proposed link when a usage-offer identifier names the
+  domain, and a one-account-at-a-time control to set or clear it.
+- Two feature keys gate it: `onebill.view` (default: reseller) shows the page and its report;
+  `onebill.write` (default: superadmin) enables setting or clearing a link. Both widen through
+  `PORTAL_FEATURES`, the same mechanism as every other feature gate.
+- Eight settings: `ONEBILL_TENANT_ID`, `ONEBILL_CLIENT_SECRET`, `ONEBILL_USERNAME`, `ONEBILL_PASSWORD`
+  (all four required — any one missing and the integration stays off), plus the optional
+  `ONEBILL_BASE_URL`, `ONEBILL_LINK_GROUP`, `ONEBILL_USAGE_OFFERS` and `ONEBILL_USAGE_IGNORE`.
+  See [CONFIG.md → OneBill](./CONFIG.md#group-onebill).
+- **Retired subscriptions are ignored.** `ONEBILL_USAGE_IGNORE` (default `_OLD`) lists case-insensitive
+  substrings; a subscription whose identifier contains one is not a usage match at all, so an account
+  whose old identifier was renamed rather than removed no longer reads as `ambiguous`.
+- **"Closed accounts whose domain is still live"** — a closed OneBill account whose domain NetSapiens
+  still has is called out on its own, above the usage list. Closed accounts no longer appear in the
+  usage list or under "Links pointing somewhere else": nothing on them is writable from the page, so the
+  only thing worth saying about one is whether its service is still running.
+- **A domain billed per site reads as `SPLIT BY SITE`, not as unlinked.** A domain with no whole-domain
+  link but at least one site linked is not missing a link — its billing is per site — so it gets its own
+  state and its site rows are listed directly under it rather than scattered through the table. Its
+  action adds the *next* site: the site picker defaults to the first site OneBill does not already bill,
+  and "whole domain" stays on offer without being what a distracted click sends.
+- **The account picker searches by client name.** Typing in it lists matching OneBill accounts by name
+  or account number — arrow keys and Enter to choose, Escape to dismiss — instead of the old list of bare
+  account numbers, which was only usable by someone who had them memorised.
+- **A link that already exists can be edited in place.** A linked row now offers **Edit**, which opens
+  three actions on that one link: move it to another site (or to the whole domain), add a second site
+  (on the same account, or on another one you search for), and unlink it. Each is a single write against
+  a single account that carries the account's other links along, so changing one link never disturbs the
+  rest — and each is confirmed in words naming the account and the change before anything is sent. An
+  account also holding a link this deployment hides shows a note instead: such a write is refused.
+- Links pointing at a domain your `ALLOWED_DOMAINS`/`BLOCKED_DOMAINS` settings hide are **counted, not
+  listed**: the page says how many there are and names none of them, and a "make this account match"
+  write is refused on any account holding one — the list it would match against is missing those links,
+  so the write would delete them silently.
+- **The page opens on a quick view, and verifies on demand.** Its first load — and its **Refresh**
+  button — read the links OneBill already carries on each subscriber row, which is one paged walk for
+  the whole tenant instead of a read per account, so the table appears in about a second. **Refresh and
+  fully verify** runs the thorough sweep: the custom-field group plus every account's subscriptions,
+  which is what judges usage subscriptions and what can notice an account's derived index disagreeing
+  with its group. The header says which one you are looking at and when usage was last really verified,
+  and the last verification's verdicts stay on screen (labelled) between full passes.
+  - Accounts whose index names more than one link are read in full even on a quick view — those are the
+    ones a derived index is most likely to be wrong about.
+  - **A write is never bounded by the quick view.** Before writing, the account is re-read and the
+    rules about what it already holds are built from that record, so a "make this account match" write
+    cannot delete a link the quick view had not noticed — and an account whose links all point at
+    domains your settings hide is refused there too, however the quick view described it.
+  - Usage verdicts carried over from the last full verification are re-checked against your CURRENT
+    `ALLOWED_DOMAINS`/`BLOCKED_DOMAINS` every time they are shown, so blocking a domain hides it at
+    once rather than when the day-old entry expires.
+- **A write no longer costs a second sweep.** After a successful apply only the accounts that changed
+  are re-read, and the cached report is updated with them — the page's reload right afterwards is
+  instant instead of repeating the whole pass.
+- Now depends on `@dszp/onebill-lib ^0.3.6` — 0.3.3/0.3.4 fixed in-band subscriber-write rejections that
+  an older, lower-pinned lockfile would ship without.
+- **A setup check runs before the page shows anything.** OneBill materialises a blank instance of every
+  custom-field group it has declared onto every subscriber, so one record is enough to tell whether
+  `ONEBILL_LINK_GROUP`'s group and fields actually exist. If they do not, the page shows a card naming
+  exactly what to add in OneBill instead of the table, and every write is refused with the same message
+  — so a misconfigured `ONEBILL_LINK_GROUP` reads as "not set up yet" rather than as an empty tenant. The
+  integration console's OneBill probe reports the same thing as a failing check. See
+  [CONFIG.md → `ONEBILL_LINK_GROUP`](./CONFIG.md#ONEBILL_LINK_GROUP).
+- **The OneBill account panel.** A linked domain in the links table opens a detail panel comparing the
+  account's active recurring lines against what the phone system actually has: seats, transcription,
+  numbers split local and toll-free, E911 addresses, SMS numbers and devices by model.
+  - **Every comparison row can expand into the actual items behind its count** — extensions by name and
+    site, numbers by kind, E911 addresses, SMS numbers — not just a count on each side.
+  - **Acceptance is per item, not per row.** An operator accepts a specific extension, number or address
+    as accounted for; **Accept all** takes every listed item at once; **Accept shortfall** covers a row
+    with fewer live items than billed, or a dimension with no item list at all (`devices.*`).
+  - **Any acceptance can be cleared**, one item or the whole group, by the same principal who could
+    accept it. Clearing never erases the record — the history keeps both the accept and the clear.
+  - **The verdict is computed from the items, so a swap is visible.** One extension deleted and another
+    added leaves a *count* unchanged, but the item model shows one stale acceptance and one unreviewed
+    item and reads `drift`, not `accepted` — which is what actually happened.
+  - **A rule can now say `ignore: true`** for an offer that is known and deliberately not compared (fax,
+    an unrouted integration). It leaves `unmapped` and lands in its own collapsed **Ignored by rule**
+    block instead of the "no rule accounts for this" list.
+  - **Two more rule keys, `planCode` and `productCode`,** key a rule by OneBill's catalogue codes instead
+    of the plan name — needed because a retail price plan can carry a blank code, so a `planCode` rule
+    alone can never reach it. Codes resolve through a catalogue index built from
+    `ProductService/v1/products` and `/products/{code}` and cached 24 hours; a rulebook that only uses
+    `offer` never makes that catalogue call. Precedence when a line matches more than one rule:
+    `planCode`, then `offer`, then `productCode`.
+  - **`teamsConnected`** is a new countable dimension — extensions with the Teams connector device —
+    and **`extensions.withAnyDevice`** / **`extensions.withNoDevice`** let a seat rule count devices
+    present rather than extensions provisioned, since a seat with no device on it is not in service yet.
+  - **A site-linked domain could not be opened**, because the panel compared a whole domain's inventory
+    and measuring that against one site's bill would overstate every dimension. **Superseded below** —
+    account-scoped reconciliation makes the unit of comparison the account's own scope, not the domain,
+    so a site row opens fine.
+  - **A fully accepted row records its baseline even when it already matched.** Previously only an
+    over-observed row did, so a matched row that was signed off and then billed differently came back
+    reading "nobody has reviewed this" instead of `drift`. A shortfall still records nothing on its own
+    — that acceptance is made deliberately with **Accept shortfall**.
+  - **A device-list read failure is named, not swallowed.** An extension whose per-device call fails is
+    still listed, with zero devices, and the report's existing failure surface names it — so a
+    device-count rule cannot silently undercount a domain it half-read.
+- **The account panel is scoped to the OneBill account, not the domain.** An account can hold a whole
+  domain, several sites of one domain, or sites across several domains; the panel now compares its
+  subscriptions against the union of everything it holds. A site row and a split-domain parent whose
+  sites all bill to one account open the panel exactly as a linked domain does — a split parent billed to
+  several accounts, and a domain still in `conflict`, still refuse.
+  - **Every item lands on exactly one account, or on that domain's Unassigned list.** Attribution tries a
+    manual assignment first, then the item's own site link, then the domain's whole-domain link; an item
+    nobody can place this way — a number routed to a queue, an E911 address shared by two sites, a site
+    nobody has linked — appears under **Unassigned on `<domain>`** with its reason and a picker naming
+    the accounts that hold that domain.
+  - **An operator can assign an item to an account by hand**, overriding or filling in for the automatic
+    rule. The item then carries a `manual` chip whose tooltip names what the automatic rule would have
+    chosen instead; **Clear assignment** hands it back. **Reassigning an already-accepted item clears its
+    acceptance** on the account it leaves, in the same write — the judgement was made against the wrong
+    scope and has to be made again.
+  - **The header now names the account, then everything it holds** (`branch.example / North ·
+    other.example (whole domain)`), and an item's line carries its own domain and site once the account
+    spans more than one domain. A "of `<domain>`: N extensions · N numbers · N E911 addresses · N SMS
+    numbers" line appears under the inventory whenever the account holds less than the whole domain.
+  - **One domain failing to read no longer blanks the whole panel.** The other domains still render, the
+    failed one is named in the failure list, and every Accept/Assign control is hidden — a decision made
+    against a half-read inventory would otherwise be recorded as though it had been made against all of
+    it. A per-user SMS read failure is handled the same way: the number stays listed, attributed as
+    unknown, and the extension is named.
+  - Requires `@dszp/netsapiens-lib ^0.4.0`, which adds `attributeDomainInventory` — which site an item
+    belongs to, and why — and the `includeUserSmsNumbers` snapshot option that attribution needs to place
+    an SMS number.
+  - **Migration `0003_billing_item_assignment.sql`** adds the manual assignment tables and, because item
+    keys inside an account-scoped comparison are now domain-qualified, **deletes every existing
+    `billing_baseline`/`billing_baseline_item` row** the same way `0002` did — dev-only data at the time,
+    re-accept item by item after applying it.
+- **A rule can `entitles` as well as `alsoCounts`, and the difference decides what a shortfall is.**
+  `alsoCounts` says each unit of a line PAYS FOR that many of another dimension, so the target row's
+  billed count rises and fewer live than billed is a shortfall to explain. `entitles` says each unit
+  PERMITS that many at no charge: it raises the row's *entitled* instead, which is headroom above
+  billed — anything from billed up to billed-plus-entitled reads `match`, and using none of it is not a
+  finding. A Premium seat entitling a transcription, an SMS number and a Teams connector was previously
+  reported as a shortfall on every domain that did not use all three. Both keys take the same keys (a
+  dotted path or another rule's group name) and both scale by the line's quantity. A key naming nothing
+  the rulebook tracks now gets a comparison-only row of its own rather than being dropped.
+- **A row nothing bills reads `optional, unused` rather than `match`.** Where billed is 0 and something
+  entitles the row, with nothing using it, the verdict chip says what the row IS: included, and unused.
+  In use, the engine's verdict stands. Billed cells carry a small `+N entitled` wherever a row has
+  headroom, and the offers under a group name are a list now — one line per plan, plus a line per credit
+  reading `via <plan>` (it pays) or `included with <plan>` (it permits).
+- **Item rows put the decision on the left, behind a checkbox.** Each item's own Accept/Clear sits in a
+  new first cell beside a tick box; Clear assignment and Move — the two that send an item somewhere else
+  — stay on the right. Ticking boxes swaps the group's **Accept all** / **Clear all** for **Accept
+  selected (N)** / **Clear selected (N)**, each acting on the half of the selection it applies to, and a
+  header box ticks every unreviewed row at once. A reader sees the cell empty and none of its code.
+- **An acceptance can record which plan it is billed as.** Where a row carries more than one offer, the
+  note field gains a **Billed as** picker listing that row's plans, defaulting to the last one chosen on
+  that row; a single-offer row records its one plan without asking. The offer is validated against the
+  row's own offer list, so a stale page cannot tag an acceptance with a plan the account no longer
+  carries, and each offer's line then shows how many items are tagged to it — and how many more than it
+  bills, if the operator has over-tagged. It is a note ON the decision, never an input to the verdict.
+- **The panel says what a thing IS, not just what it is called.** A number's line reads its kind, where
+  it routes (`to user 100 — Ann Lee`, `to queue 701 — Sales`) and the note the portal wrote on it; an
+  extension's line lists the devices actually on it, with the Teams connector marked, or `no device`.
+  Unassigned rows carry the same detail, and both pickers name each candidate account rather than
+  numbering it. A closed **Extensions without a device (N)** block under the inventory explains the gap
+  between `extensions.total` and the `extensions.withAnyDevice` a seat rule counts.
+  - Requires `@dszp/netsapiens-lib ^0.5.0` (a number's `destination` and `description`, an extension's
+    full `devices` list) and `@dszp/onebill-lib ^0.6.0` (`entitles`, per-row `entitled`, `credits`,
+    `optional`, and the per-offer tagged tally).
+  - **Migration `0004_billing_baseline_item_offer.sql`** adds `offer` to the two item tables and
+    `entitled` to the two group tables. Additive — nothing is deleted, unlike `0002` and `0003`; every
+    existing acceptance reads as untagged, and every existing group row as "entitlement not recorded",
+    which keeps those decisions on the pre-entitlement behaviour rather than invalidating them all.
+    **Apply it before deploying this version** — the baseline reads name the new columns.
+- **`ONEBILL_RECURRING_RULES`** — the rulebook mapping an offer, plan code or product code to an
+  inventory dimension, with grouping, a `perUnit` multiplier for packs, and `alsoCounts`/`entitles` for
+  a product that pays for or permits a second thing. Unset, the panel degrades to a fact sheet rather
+  than disappearing.
+- **`ONEBILL_DB`** — an optional D1 binding holding `billing_baseline` and, as of migration `0002`, the
+  per-item acceptance tables (`billing_baseline_item`, `billing_baseline_item_history`). With it, an
+  operator can accept a gap once — an item, a group, or a shortfall — and see `drift` afterwards only if
+  what changed since. Every accept and clear appends to its history table, so "what did we accept last
+  March" is a query. **Migration `0002_billing_baseline_items.sql` deletes every existing
+  `billing_baseline` row** when applied: those rows were the earlier count-based model, dev-only at the
+  time, and an accepted count against unknown items is not the same fact as item-level acceptances, so
+  the two are retired rather than converted. Run `wrangler d1 migrations apply` again to pick it up.
+  Without the binding nothing else changes.
+
 ## [0.6.1] — 2026-08-16
 
 ### Changed
@@ -2030,6 +2318,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.7.0]: https://github.com/dszp/ns-portal-kit/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/dszp/ns-portal-kit/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/dszp/ns-portal-kit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dszp/ns-portal-kit/compare/v0.4.0...v0.5.0

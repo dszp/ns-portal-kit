@@ -29,11 +29,13 @@
  */
 import { NsClient, NsApiError, assertBareServer, NsSubscriptionsClient } from '@dszp/netsapiens-lib';
 import { RingotelReadClient, RingotelApiError } from '@dszp/ringotel-lib';
+import { OneBillApiError } from '@dszp/onebill-lib';
 
 import { PROBE_CATALOG, probeCatalogFor } from './statusModel.js';
 import type { ProbeResult, ProbeCatalogEntry, ProbeTable } from './statusModel.js';
 import type { StatusEnv } from './status.js';
 import { ringotelEnabled } from './ringotel.js';
+import { onebillEnabled, makeReadClient, resolveOnebillConfig, groupSetup, setupChecklist } from './onebill.js';
 import { resolveWriteIdentity, parseNsEventsConfig, ownedPrefix, type NsEventsConfig } from './nsEvents.js';
 import { getServiceToken, NsIdentityError } from './nsIdentity.js';
 
@@ -97,6 +99,41 @@ async function ringotelProbe(env: StatusEnv): Promise<ProbeOutcome> {
     if (e instanceof RingotelApiError) return { state: 'fail', detail: `Ringotel rejected the request (HTTP ${e.status}).` };
     return { state: 'fail', detail: 'Could not reach the Ringotel AdminAPI.' };
   }
+}
+
+/** One OAuth grant plus one one-row `searchSubscribers` read — never `listAllSubscribers` or a
+ *  fleet-wide walk. `getSubscriber` is not an option here: it needs an account number, and this
+ *  probe has none to offer. */
+async function onebillProbe(env: StatusEnv): Promise<ProbeOutcome> {
+  if (!onebillEnabled(env)) return { state: 'skip', detail: 'OneBill credentials are not fully set.' };
+  try {
+    const client = makeReadClient(env, caches.default);
+    // resultCount is the cost claim in PROBE_CATALOG. Unverified against the live subscriber search: the
+    // products endpoint is known to ignore it (onebill-lib roadmap), so if this ever reads a full page the
+    // catalogue line is the thing to correct.
+    const page = await client.searchSubscribers({ resultCount: 1 });
+    const rows = page.subscriber ?? [];
+    const n = rows.length;
+    if (n > 0) {
+      // Custom fields never ride the search rows (onebill-lib roadmap, S5) — only the single-record
+      // read carries `accountAttribute` — so this almost always means one extra call, on the one
+      // account this probe already has in hand.
+      const row = rows[0]!;
+      const record = 'accountAttribute' in row ? row : await client.getSubscriber(row.accountNumber);
+      const setup = groupSetup(record, resolveOnebillConfig(env).mapping[0]!);
+      if (!setup.ok) return { state: 'fail', detail: setupChecklist(setup) };
+    }
+    return { state: 'pass', detail: `Reached the OneBill API (${n} subscriber row${n === 1 ? '' : 's'} read).` };
+  } catch (e) {
+    if (e instanceof OneBillApiError) return { state: 'fail', detail: `OneBill rejected the request (HTTP ${e.status}).` };
+    return { state: 'fail', detail: 'Could not reach the OneBill API.' };
+  }
+}
+
+/** Always `skip` — Documo is not integrated into this Worker. */
+function documoProbeResult(): ProbeResult {
+  const entry = CATALOG_BY_ID['documo']!;
+  return { id: entry.id, name: entry.name, cost: entry.cost, state: 'skip', detail: 'Documo is not integrated into this Worker — there is nothing to check.' };
 }
 
 /** Mint the background service identity via `nsIdentity.ts` — the same precedence (admin wins over
@@ -322,12 +359,6 @@ async function statusBannerProbe(env: StatusEnv, ctx: ProbeCtx): Promise<ProbeOu
   return { state: 'pass', detail: `Reachable, and returned a usable message: "${shown}"` };
 }
 
-/** Always `skip` — neither integration exists in this Worker. */
-function onebillDocumoProbeResult(): ProbeResult {
-  const entry = CATALOG_BY_ID['onebill-documo']!;
-  return { id: entry.id, name: entry.name, cost: entry.cost, state: 'skip', detail: 'OneBill and Documo are not integrated into this Worker — there is nothing to check.' };
-}
-
 /**
  * Run every probe, sequentially, and return one result per {@link PROBE_CATALOG} entry. Never rejects
  * (see the module doc comment) — every failure mode, upstream or internal, becomes a `fail` ProbeResult.
@@ -338,13 +369,14 @@ export async function runProbes(env: StatusEnv, ctx: ProbeCtx): Promise<ProbeRes
   const ringotel = await guarded('ringotel', () => ringotelProbe(env));
   const nsEvents = await guarded('ns-events', () => nsEventsProbe(env, nsIdentity.state === 'pass'));
   const banner = await guarded('status-banner', () => statusBannerProbe(env, ctx));
-  const onebillDocumo = onebillDocumoProbeResult();
+  const onebill = await guarded('onebill', () => onebillProbe(env));
+  const documo = documoProbeResult();
   // Access gates the STANDALONE deployment's stored token; a portal-mode Worker has no stored credential
   // for it to protect, and an Access gate in front of one would refuse the plain <script src> that loads
   // the injected primary. So the row is not merely inert here, it describes a control this deployment
   // could not adopt -- and a check for it implies otherwise. The Config tab already removed the Access
   // SETTINGS in portal mode for the same reason; this is the half that was missed.
   const wanted = new Set(probeCatalogFor().map((c) => c.id));
-  const all = [nsRead, nsIdentity, ringotel, nsEvents, banner, onebillDocumo];
+  const all = [nsRead, nsIdentity, ringotel, nsEvents, banner, onebill, documo];
   return all.filter((r) => wanted.has(r.id));
 }

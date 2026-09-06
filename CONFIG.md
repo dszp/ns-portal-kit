@@ -20,14 +20,17 @@ shows every setting *with the value yours currently has*, its real default, and 
 - [Portal injection](#group-injection) — `PRIMARY_BASENAME` · `PORTAL_HANDOFF_URL` · `PORTAL_SECONDARIES` · `PORTAL_FEATURES` · `PORTAL_SUPERADMINS` · `PORTAL_RELEASE_NOTES_URL` · `STATUS_BANNER_WEBHOOK` · `RINGOTEL_APP_BASE_URL`
 - [Portal menus](#group-menus) — `PORTAL_MENUS` · `PORTAL_APPS_HIDE`
 - [App integration](#group-ringotel) — `RINGOTEL_API_KEY` and its display settings
+- [OneBill](#group-onebill) — `ONEBILL_TENANT_ID` and its three secrets · `ONEBILL_LINK_GROUP` · `ONEBILL_USAGE_OFFERS` · `ONEBILL_USAGE_IGNORE` · `ONEBILL_RECURRING_RULES` · `NS_FAX_SERVER_HOSTS` · `NS_DEVICE_SUFFIXES`
 - [Activation rules](#group-eligibility) — the write rail and the exclusion lists
 - [Self-service app access](#group-appaccess) — `RINGOTEL_SSO_SERVICE` · `SSO_AUTO_ACTIVATE` · `PORTAL_APP_DOWNLOADS`
 - [Change events](#group-events) — the 15 `NS_EVENTS_*` settings
 - [Background service identity](#group-identity) — `NS_API_KEY`, or admin credentials + OAuth
 - [Branding](#group-branding) — `BRAND_NAME` · `BRAND_ACCENT`
-- [Worker bindings](#group-bindings) — `ASSETS` · `JWT_RATE_LIMITER`
+- [Worker bindings](#group-bindings) — `ASSETS` · `ONEBILL_DB` · `JWT_RATE_LIMITER`
 - **Reference sections**
   - [Features and gating](#features-and-gating) — the level vocabulary, the feature registry, `PORTAL_FEATURES`, resolution rules
+    - [Denying named accounts](#gate-users-deny) — `users.deny`: "everyone who has this today, except these people", and how to add one to a config you already have
+    - [The domain-record keys](#domain-record-keys) — `portal.domainCreate` · `portal.domainEdit` · `portal.domainDelete`
   - [Menu targeting](#menu-targeting) — the axes, precedence, variables, URL rules
   - [Secondary scripts](#secondaries-reference) — `url:` vs `r2:`, and the round-trip rule
   - [Event subscriptions in depth](#events-reference) — what a callback URL is, retiring the feature, cost
@@ -595,6 +598,255 @@ is best-effort: if it fails, activation still succeeds using the existing passwo
 
 ---
 
+<a id="group-onebill"></a>
+
+## OneBill
+
+The [OneBill](https://www.onebillsoftware.com/) billing link report. **All four of `ONEBILL_TENANT_ID`,
+`ONEBILL_CLIENT_SECRET`, `ONEBILL_USERNAME` and `ONEBILL_PASSWORD` are the gate**: any one missing, there
+are no OneBill calls, the Management-menu entry is absent, and its routes return 404. This is an
+unofficial integration.
+
+**One thing must exist in OneBill before any of it works:** the subscriber custom-field group named by
+[`ONEBILL_LINK_GROUP`](#ONEBILL_LINK_GROUP). See
+[SETUP.md → Set up the OneBill custom-field group first](./SETUP.md#onebill-group).
+
+**What the page costs upstream.** Opening it, and its **Refresh** button, read the subscriber list once
+— a handful of paged requests for the whole tenant, plus one extra read for each account holding more
+than one link. **Refresh and fully verify** reads every account's custom fields and subscriptions, which
+is roughly two requests per subscriber and takes appreciably longer; it is what checks usage
+subscriptions. Either result is cached for ten minutes per deployment, and the last full verification's
+usage verdicts are kept for a day so a quick view can show them.
+
+<a id="ONEBILL_TENANT_ID"></a>
+
+### `ONEBILL_TENANT_ID` · `vars`
+
+OneBill tenant identifier, from Config > Settings > Business Profile. Doubles as the OAuth client id. A
+var, not a secret — it identifies your tenant but does not authenticate against it — but nothing stops
+you setting it as a secret instead if you would rather keep it out of `wrangler.jsonc` entirely; either
+way works the same at runtime.
+
+- **Unset** The integration is off: no OneBill calls, the Management-menu entry is absent, its routes
+  answer 404.
+
+<a id="ONEBILL_CLIENT_SECRET"></a>
+
+### `ONEBILL_CLIENT_SECRET` · **secret**
+
+OneBill OAuth client secret, from the same Business Profile screen.
+
+- **Unset** The integration is off: no OneBill calls, the Management-menu entry is absent, its routes
+  answer 404.
+
+<a id="ONEBILL_USERNAME"></a>
+
+### `ONEBILL_USERNAME` · **secret**
+
+OneBill API username.
+
+- **Unset** The integration is off: no OneBill calls, the Management-menu entry is absent, its routes
+  answer 404.
+
+<a id="ONEBILL_PASSWORD"></a>
+
+### `ONEBILL_PASSWORD` · **secret**
+
+OneBill API password.
+
+- **Unset** The integration is off: no OneBill calls, the Management-menu entry is absent, its routes
+  answer 404.
+
+<a id="ONEBILL_BASE_URL"></a>
+
+### `ONEBILL_BASE_URL` · `vars` · gated by `ONEBILL_CLIENT_SECRET`
+
+Non-default OneBill API base URL. Must be `https://`.
+
+- **Example** `https://api.example.com`
+- **Unset** Uses OneBill's standard API base URL.
+
+<a id="ONEBILL_LINK_GROUP"></a>
+
+### `ONEBILL_LINK_GROUP` · `vars` · default `{"group":"PBX","ns":"NS","valueField":"Domain","qualifierField":"Site"}` · gated by `ONEBILL_CLIENT_SECRET`
+
+JSON describing which subscriber custom-field group carries the NetSapiens link: the group key, the
+namespace it maps to, the field holding the domain, and (optionally) the field holding the site.
+
+- **Unset** Uses the default above — group `PBX`, namespace `NS`, domain in `Domain`, site in `Site`.
+
+**Before you start:** setting this variable does not create anything in OneBill — it only tells this
+deployment where to look. In OneBill, create an account-level custom-field group whose key matches
+`group`, allow it to hold more than one instance, and add a text field whose name matches `valueField`
+(and, if you set one, a second optional text field matching `qualifierField`). Until that group exists
+with those fields declared, the links page shows a setup card instead of the table and refuses every
+write, naming exactly which of the three — the group itself, the value field, or the qualifier field —
+is missing.
+
+**The numbered procedure is in
+[SETUP.md → Set up the OneBill custom-field group first](./SETUP.md#onebill-group).** Follow it before you
+open the links page.
+
+`ns` is the namespace the links this group carries are encoded under in the subscriber's derived
+`externalId`, which is how an account is found by domain without reading every record. It must match
+`[A-Z][A-Z0-9]{0,7}`; a value that does not is refused when the configuration is parsed, with this setting
+named.
+
+<a id="ONEBILL_USAGE_OFFERS"></a>
+
+### `ONEBILL_USAGE_OFFERS` · `vars` · gated by `ONEBILL_CLIENT_SECRET`
+
+Comma-separated subscription offer names whose subscription identifier is the NetSapiens domain. The page
+uses them to propose a link for an account that has none.
+
+- **Example** `Domain Usage`
+- **Unset** No links are proposed; unlinked domains still list, and an account can be picked by hand.
+
+<a id="ONEBILL_USAGE_IGNORE"></a>
+
+### `ONEBILL_USAGE_IGNORE` · `vars` · default `_OLD` · gated by `ONEBILL_CLIENT_SECRET`
+
+Comma-separated substrings that mark a subscription identifier as retired, matched case-insensitively
+anywhere in the identifier. A subscription whose identifier contains one is not a usage match at all, so
+its account's verdict is worked out as though the subscription did not exist.
+
+Set this to whatever your team appends when it retires an identifier rather than deleting it. Without it,
+a renamed leftover reads as a second live subscription and the account reports `ambiguous` when nothing
+is actually wrong.
+
+- **Example** `_OLD,_RETIRED`
+- **Unset** Uses `_OLD`. A blank value is treated as unset, not as "ignore nothing" — an empty marker
+  would match every identifier and silence the usage section entirely.
+
+<a id="ONEBILL_RECURRING_RULES"></a>
+
+### `ONEBILL_RECURRING_RULES` · `vars` · gated by `ONEBILL_CLIENT_SECRET`
+
+JSON array of rules keyed by offer name, price plan code or product code (one per rule) saying which
+inventory dimension(s) each counts toward, which rules sum into one group, which lines are ignored on
+purpose, and which include another dimension. See
+[SETUP.md → The recurring comparison](./SETUP.md#recurring-comparison) for a worked rulebook.
+
+- **Example** `[{"offer":"Seat","counts":"extensions.total","group":"seats"}]`
+- **Unset** Every recurring offer is listed as unmapped and the account panel still shows the inventory —
+  the comparison degrades to a fact sheet rather than disappearing.
+
+**The keys a rule takes:**
+
+| Key | What it does |
+|---|---|
+| `offer` | Match the subscription's price plan **name**. The one identifier every line always carries. |
+| `planCode` | Match OneBill's price plan code. A retail plan can carry a blank plan code, and a rule keyed this way can never reach one. |
+| `productCode` | Match OneBill's product code — the product-level fallback under whatever the plans are named. |
+| `counts` | One dotted inventory path, or an array of several. An array sums them and unions their items. |
+| `ignore` | `true` marks the offer as known and deliberately not compared. It takes the place of `counts`. |
+| `group` | The row label these rules sum into. Rules sharing a `group` are one row. |
+| `perUnit` | Each unit of the line counts this many — a pack of ten numbers is `"perUnit": 10`. |
+| `alsoCounts` | Each unit **pays for** this many of another dimension: raises that row's *billed*, so fewer live than billed is a shortfall. |
+| `entitles` | Each unit **permits** this many at no charge: raises that row's *entitled*, which is headroom above billed and never a shortfall. |
+| `why` | A note for the next reader, at most 120 characters. The comparison never reads it. |
+
+A rule is keyed by exactly one of `offer`, `planCode` or `productCode`, or by none of the three. Every
+rule needs exactly one of `counts` or `ignore`, and `ignore` needs a key to ignore — so a keyless rule
+always carries `counts`.
+
+**A keyless rule is a comparison-only row.** It names a `group`, its `counts` gives the row's live side,
+and its billed side comes only from other rules' `alsoCounts` credits — it matches no subscription line
+of its own. (Another rule's `entitles` can reach the same row, but that raises `entitled`, which is
+headroom above billed rather than part of it.) Write
+`{ "group": "callcenter", "counts": "extensions.byScope.Call Center Agent" }` and the seat rules that
+credit `"alsoCounts": { "callcenter": 1 }` are what give that row something to compare against.
+
+**Precedence, when one line matches more than one rule:** `planCode`, then `offer`, then `productCode`. A
+named plan always beats the product-level fallback under it.
+
+**A `group` label is free text**, and may contain spaces, parentheses, `&`, `/` and `+` — write
+`"Native Fax (Analog)"` if that is what you call the row.
+
+**Give every `ignore` rule a `why`.** An offer name alone does not say whether the offer is unbilled,
+counted somewhere else, or not a line at all, and this setting is a JSON string inside a JSONC file, so a
+`//` comment cannot reach inside it. Write `{"offer":"MFAX Line","ignore":true,"why":"Documo fax, not a
+NetSapiens line"}`.
+
+**Catalogue codes cost one extra read.** `planCode` and `productCode` resolve through an index this Worker
+builds from OneBill's `ProductService/v1/products` and `/products/{code}` and caches for 24 hours. A
+rulebook that only uses `offer` never makes that call.
+
+**A rule credits other rows two ways, and the difference is what a shortfall means.** `alsoCounts` says
+each unit of this line PAYS FOR that many of another dimension, so it raises that row's billed count and
+fewer live than billed is a shortfall to explain. `entitles` says each unit PERMITS that many at no
+charge, so it raises the row's `entitled` instead — headroom above billed, where anything from billed up
+to billed-plus-entitled is a match and using none of it is not a finding. Both take the same keys (a
+dotted inventory path, or another rule's `group` name) and both scale by the line's quantity rather than
+its `perUnit`. A key naming neither a tracked path nor a declared group gets a comparison-only row of its
+own, named after the key.
+
+**Account-scoped reconciliation adds nothing to configure.** Which account holds which domain or site
+comes from the OneBill links you already set on the account panel itself, and manual per-item
+assignment writes to its own D1 tables — there is no new setting here for either.
+
+<a id="NS_FAX_SERVER_HOSTS"></a>
+
+### `NS_FAX_SERVER_HOSTS` · `vars` · gated by `ONEBILL_CLIENT_SECRET`
+
+Comma-separated fax server hosts. A phone number whose dial rule hands it to one of these is counted as a
+**fax line** (`dids.fax`) instead of as a DID, so a rulebook can bill it as what it is.
+
+- **Example** `203.0.113.7` (an IP or a hostname; several, comma-separated, is fine)
+- **Unset** No number is a fax line, and the DID counts include them — the numbers you got before this
+  setting existed.
+
+**Where the value comes from.** On the portal's *Fax Server* treatment a fax line is an ordinary phone
+number whose dial rule reads `to-connection` with the fax server as its destination host. Open one such
+number in the Manager Portal, or read a snapshot, and copy the
+`dial-rule-translation-destination-host` value verbatim. Matching is on that host alone, trimmed and
+case-insensitive — never on the `Portal Created: Phonenumber -> FaxServer` description, which is a note
+an operator can edit.
+
+**Analog and digital fax read identically here.** NetSapiens has no fax-account endpoint and the ATA is
+not a device on the user, so nothing in the API tells the two apart. Point every fax offer at `dids.fax`
+in `ONEBILL_RECURRING_RULES` and let the billed-as tag on each acceptance record which one was sold.
+
+<a id="NS_DEVICE_SUFFIXES"></a>
+
+### `NS_DEVICE_SUFFIXES` · `vars` · gated by `ONEBILL_CLIENT_SECRET`
+
+JSON object naming what a device-name **suffix** means on your system. A device's suffix is what its name
+carries after the extension number: `1001wp` on extension `1001` has suffix `wp`, and a bare `1001` has
+none. The account panel prints the label on the device chip, and the suffix marked `teams` is what
+identifies a Microsoft Teams connector — which is the device the seat counts deliberately exclude.
+
+- **Example** `{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"Teams","teams":true},"d":{"label":"Acme Desktop"}}`
+- **Unset** The three suffixes NetSapiens itself ships: `wp` SNAPmobile Web, `m` SNAPmobile, and `t` Teams
+  (`teams: true`).
+
+**Setting it REPLACES the default, it does not add to it.** Whatever you write is the whole legend, so
+the example above restates `wp`, `m` and `t` in order to keep them. That is deliberate: a deployment
+without TeamMate omits `t`, and Teams detection is then off entirely — every `<ext>t` device is a handset
+and is counted as one — which a merge could not express.
+
+**A suffix the legend does not carry has no label.** Its chip falls back to the device model, and to
+`(no model)` when NetSapiens has none. Nothing is guessed from an unlisted suffix.
+
+**Values.** A suffix is 1–8 letters or digits and is matched case-insensitively. A `label` is 1–40
+characters. `teams` is `true` or `false` and may be left out. A malformed value is reported with the
+setting named, the same way a malformed `ONEBILL_RECURRING_RULES` is.
+
+**Ringotel adds its own entry.** When `RINGOTEL_API_KEY` is set, the activation suffix
+([`RINGOTEL_ACTIVATION_SUFFIX`](#RINGOTEL_ACTIVATION_SUFFIX), default `r`) is added to the legend labelled
+with [`RINGOTEL_LABEL_SHORT`](#RINGOTEL_LABEL_SHORT) — so a white-labelled app names itself on the chip
+with no second setting to keep in step. It never overwrites a suffix you set here: name that suffix
+yourself and your label wins.
+
+**A change shows on each domain's next read.** The legend is applied when a domain's inventory is read
+and then cached with it, but it is **not** part of the cache key — so an entry written under the old
+legend keeps serving the old labels, and the old Teams count, until it lapses. That is within ten
+minutes; Refresh on the account panel does it now. (The one-off key bump that came with this setting
+covered the UPGRADE, where entries had no `suffix` or `kind` on any device at all. It does not fire again
+when you edit the value.)
+
+---
+
 <a id="group-eligibility"></a>
 
 ## Activation rules
@@ -1083,6 +1335,43 @@ The bucket an `r2:` secondary is served from.
   with a loud config error.
 - Details: [Secondary scripts](#secondaries-reference).
 
+<a id="ONEBILL_DB"></a>
+
+### `ONEBILL_DB` — billing baseline database
+
+Optional D1 database holding the account panel's **baseline** (which billing-vs-inventory items an
+operator has accepted, with append-only history) and its manual item→account **assignments**. Bind it,
+then apply `migrations/`:
+
+```jsonc
+"d1_databases": [
+  { "binding": "ONEBILL_DB", "database_name": "ns-portal-kit-billing", "database_id": "<id>" }
+]
+```
+
+```bash
+npx wrangler d1 create ns-portal-kit-billing
+# add the block above to wrangler.jsonc, then:
+npx wrangler d1 migrations apply ns-portal-kit-billing --remote
+```
+
+- **Unset** Not bound. The account panel renders the inventory and the comparison without the accepted
+  column, and the baseline and assign routes answer 404; nothing else is affected.
+
+**Apply the migrations before you deploy this version.** The baseline reads name the current columns by
+hand, so against a database still on an older migration they fail outright and the account panel answers
+an error rather than degrading.
+
+| Migration | What it does |
+|---|---|
+| `0001_billing_baseline.sql` | Creates the original count-based baseline table. |
+| `0002_billing_baseline_items.sql` | Moves to per-item acceptance. **Deletes every existing `billing_baseline` row** — an accepted count against unknown items is not the same fact as item acceptances. |
+| `0003_billing_item_assignment.sql` | Adds the manual assignment tables, and **deletes every existing row from `billing_baseline_item` and `billing_baseline`**: item keys inside an account-scoped comparison became domain-qualified, so the item acceptances and the group rows both had to go. |
+| `0004_billing_baseline_item_offer.sql` | Adds `offer` to the item tables and `entitled` to the group tables. Additive — deletes nothing. |
+| `0005_billing_item_assignment_multi.sql` | Rebuilds `billing_item_assignment` with the account in its primary key, so one E911 address can be assigned to several accounts. Copies every existing row across; deletes nothing. |
+
+Re-run `wrangler d1 migrations apply` after every update, not only the first time.
+
 <a id="JWT_RATE_LIMITER"></a>
 
 ### `JWT_RATE_LIMITER` — rate limiting
@@ -1168,9 +1457,9 @@ call-center is exact and orthogonal.
 | `ringotel.resetPassword` | Reset a user's app password from the profile page (**write**) | `office_manager` |
 | `ringotel.profileAppAccess` | The user-visible app sign-in message, on the profile page | `office_manager` |
 | `ringotel.prepop` | Preview/create inactive directory entries for a domain (**write**) | `reseller` |
-| `portal.domainCreate` | The portal's own **Add Domain** control (see below) | `reseller` |
-| `portal.domainEdit` | The portal's own **Edit** controls for a domain's configuration record (see below) | `reseller` |
-| `portal.domainDelete` | The portal's own **delete** control for a domain (see below) | `reseller` |
+| `portal.domainCreate` | The portal's own **Add Domain** control (see [below](#domain-record-keys)) | `reseller` |
+| `portal.domainEdit` | The portal's own **Edit** controls for a domain's configuration record (see [below](#domain-record-keys)) | `reseller` |
+| `portal.domainDelete` | The portal's own **delete** control for a domain (see [below](#domain-record-keys)) | `reseller` |
 | `portal.self` | Receive the **self-service** bundle | `all` |
 | `me.appStatus` | App-status indicator on the user's **own** home page | `all` |
 | `me.devices` | The user's **own** device list/status | `off` |
@@ -1179,7 +1468,15 @@ call-center is exact and orthogonal.
 | `me.menuConfig` | Portal menu customization | `all` |
 | `portal.versionLine` | This kit's name + version in the portal footer | `all` |
 | `portal.statusBanner` | The status banner across the top of the portal | `all` |
+| `onebill.view` | The OneBill links page and the account panel | `reseller` |
+| `onebill.write` | Set, edit or clear a link; accept or clear an item; assign an item to an account (**write**) | `superadmin` |
 | `kit.status` | The integration console (floored — see below) | `superadmin` |
+
+Widening who may write a link to a named biller, on top of the `superadmin` default:
+
+```jsonc
+{ "onebill.write": { "levels": ["superadmin"], "users": ["billing@acme.example"] } }
+```
 
 **Self-service is its own tier.** `portal.access` gates the admin bundle along the admin ladder;
 `portal.self` gates a separate, minimal bundle of **own-account** features that even a Basic or Simple user
@@ -1214,7 +1511,9 @@ silently allows.
 
 <a id="gate-users-deny"></a>
 
-#### Naming the exception instead of its complement
+#### Denying named accounts — `users.deny`
+
+*Naming the exception instead of its complement. This is the shape to reach for on `portal.domainCreate`, `portal.domainEdit` and `portal.domainDelete` — see [the domain-record keys](#domain-record-keys) for what those three do and do not prevent.*
 
 Inside shape 3, `users` may be a plain list (which means **allow**, and is unchanged) or an object naming a
 direction:
@@ -1239,6 +1538,47 @@ because the scope side is evaluated from each caller's own token rather than fro
 
 `allow` rather than `allowOnly`: the list still unions with `levels`, so "only" would be untrue whenever
 `levels` is present. Write no `levels` and the allow list is the whole gate, exactly as before.
+
+<a id="gate-add-to-existing"></a>
+
+##### Adding one to a config you already have
+
+`PORTAL_FEATURES` is **one JSON object**, so a gate is a top-level entry in it beside the ones already
+there. Adding a deny means adding a key — not nesting it under anything, and not replacing what is there.
+Starting from a config that re-levels two features:
+
+**Before:**
+
+```jsonc
+{ "ringotel.userStatus": "site_manager",
+  "callflow.view":       ["reseller", "office_manager"] }
+```
+
+**After** — two keys added, the existing two untouched:
+
+```jsonc
+{ "ringotel.userStatus": "site_manager",
+  "callflow.view":       ["reseller", "office_manager"],
+  "portal.domainEdit":   { "users": { "deny": ["junior@y.example"] } },
+  "portal.domainDelete": { "users": { "deny": ["junior@y.example"] } } }
+```
+
+Three things that catch people out here:
+
+- **Every key is independent.** Adding `portal.domainDelete` says nothing about `portal.domainEdit`; a key
+  you do not name keeps its registry default. That is why these are three keys rather than one — see
+  [the domain-record keys](#domain-record-keys).
+- **You are replacing the whole value, not editing it in place.** `PORTAL_FEATURES` is a single string in
+  `wrangler.jsonc` (or a single Dashboard variable), so "adding a key" means writing the whole object back
+  with the key in it. Do not retype it: the console's **Permissions** tab → *Copy the configuration* emits
+  your current overrides as paste-ready JSON, and *What else you can write* below it carries a deny example
+  validated against this deployment's own parser.
+- **The account is `user@domain`, exactly as it appears in the token** — the same address the person signs
+  in with, `100@customer.example` or `name@your-company.example` as your platform issues them. A deny entry
+  that cannot be an account at all is a loud config error, but one that is merely the *wrong* account is
+  not: it restricts nobody, silently. The Permissions tab grows a **Named** column as soon as any gate
+  names an account, and a misspelt address is sitting in it, spelled wrong — which is the only place that
+  particular mistake becomes visible at all.
 
 <a id="gate-resolution-rules"></a>
 
@@ -1291,13 +1631,55 @@ only thing that can prevent it.
 
 Three keys rather than one so that *"may adjust a customer's limits, may never delete the customer"* is
 expressible. The default is `reseller` on all three, which changes nothing anywhere: no lower scope is
-offered these controls by the portal, so the keys are inert until you configure one. The usual
-configuration is a deny:
+offered these controls by the portal, so the keys are inert until you configure one.
+
+#### What to write
+
+The usual configuration is a **deny**, because the ask behind these keys is almost always "everyone who has
+this today, except these people". A deny with no `allow` side reads as *this key's own default* — `reseller`
+— *minus the accounts named*, so it stays correct as staff are added. The full grammar is
+[Denying named accounts](#gate-users-deny); these are the four configurations worth having in front of you.
+
+**One person, kept out of the destructive one.** They keep the Add Domain button and the Edit controls:
 
 ```jsonc
-{ "portal.domainEdit":   { "users": { "deny": ["junior@y.example"] } },
-  "portal.domainDelete": { "users": { "deny": ["junior@y.example"] } } }
+{ "portal.domainDelete": { "users": { "deny": ["junior@y.example"] } } }
 ```
+
+**May adjust a customer's limits, may never delete the customer** — the split these three keys exist to
+express. Each key is independent, so naming two leaves the third at its default:
+
+```jsonc
+{ "portal.domainDelete": { "users": { "deny": ["junior@y.example"] } },
+  "portal.domainCreate": { "users": { "deny": ["junior@y.example"] } } }
+```
+
+**All three, for several accounts.** One list per key, repeated — there is no "all domain keys" shorthand,
+deliberately, since the three are meant to be set apart:
+
+```jsonc
+{ "portal.domainCreate": { "users": { "deny": ["junior@y.example", "temp@y.example"] } },
+  "portal.domainEdit":   { "users": { "deny": ["junior@y.example", "temp@y.example"] } },
+  "portal.domainDelete": { "users": { "deny": ["junior@y.example", "temp@y.example"] } } }
+```
+
+**Narrow the level as well.** The explicit form says both halves at once — which levels hold the key, and
+who is carved out of them. Use it when you are also changing the level; the short form above is better when
+you are not, because it does not pin a default:
+
+```jsonc
+{ "portal.domainDelete": { "levels": ["reseller"], "users": { "deny": ["junior@y.example"] } } }
+```
+
+Adding any of these to a `PORTAL_FEATURES` you already have is
+[a top-level key beside the ones already there](#gate-add-to-existing) — the whole object is rewritten with
+the key in it, and every key you do not name keeps its default.
+
+Two things that surprise people, both covered in full under [Resolution rules](#gate-resolution-rules):
+a deny **beats a `PORTAL_SUPERADMINS` account**, which no other gate value does short of `off`; and a deny
+**follows the person through a masquerade**, matching the operator behind the mask as well as the identity
+being worn. An empty `"levels": []` or `"allow": []` is a config error rather than a silent "everybody
+minus these" — name who keeps the feature, or write the deny on its own.
 
 Editing a domain's **record** is not the same as administering what is inside it. Users, call queues, auto
 attendants, time frames and inventory are untouched by these keys — someone denied domain editing can still
@@ -1557,14 +1939,17 @@ limit, but potentially over a free plan's. Size `NS_EVENTS_MAX_EVENTS` according
 `PORTAL_APP_DOWNLOADS`, `NS_EVENTS`, `NS_EVENTS_BASE_URL`, `NS_EVENTS_MODELS`,
 `NS_EVENTS_TARGET_LIFETIME`, `NS_EVENTS_RENEW_HORIZON`, `NS_EVENTS_GEO_SUPPORT`, `NS_EVENTS_MAX_EVENTS`,
 `NS_EVENTS_SWEEP_MAX`, `NS_EVENTS_DIAG_RAW`, `NS_EVENTS_OFFBOARD`, `NS_EVENTS_DEVICE_REPAIR`,
-`NS_EVENTS_ALLOW_IPS`, `NS_EVENTS_PREFERRED_SERVER`, `NS_OAUTH_SERVER`, `BRAND_ACCENT`.
+`NS_EVENTS_ALLOW_IPS`, `NS_EVENTS_PREFERRED_SERVER`, `NS_OAUTH_SERVER`, `BRAND_ACCENT`,
+`ONEBILL_TENANT_ID`, `ONEBILL_BASE_URL`, `ONEBILL_LINK_GROUP`, `ONEBILL_USAGE_OFFERS`,
+`ONEBILL_USAGE_IGNORE`, `ONEBILL_RECURRING_RULES`, `NS_FAX_SERVER_HOSTS`, `NS_DEVICE_SUFFIXES`.
 
 **Secrets** — `wrangler secret put <NAME>`, never committed:
 
 `RINGOTEL_API_KEY`, `NS_EVENTS_PATH_SECRET`, `NS_API_KEY` (or `NS_ADMIN_USER` / `NS_ADMIN_PASS` with
-`NS_OAUTH_CLIENT_ID` / `NS_OAUTH_CLIENT_SECRET`), `PORTAL_SUPERADMINS`.
+`NS_OAUTH_CLIENT_ID` / `NS_OAUTH_CLIENT_SECRET`), `PORTAL_SUPERADMINS`, `ONEBILL_CLIENT_SECRET`,
+`ONEBILL_USERNAME`, `ONEBILL_PASSWORD`.
 
-**Bindings** — structural entries in `wrangler.jsonc`: `ASSETS`, `JWT_RATE_LIMITER`.
+**Bindings** — structural entries in `wrangler.jsonc`: `ASSETS`, `ONEBILL_DB`, `JWT_RATE_LIMITER`.
 
 ⚠️ **Deployment-identifying values belong in secrets even though they are not credentials.**
 `RINGOTEL_WRITE_DOMAINS`, `NS_EVENTS_DOMAINS`, `ALLOWED_DOMAINS`, `BLOCKED_DOMAINS`, any

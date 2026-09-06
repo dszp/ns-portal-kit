@@ -1,10 +1,10 @@
 {
   "name": "ns-portal-kit",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.11.0",
-  "description": "A deployable toolkit of add-ons for the NetSapiens Manager Portal, running on Cloudflare Workers: call-flow diagrams, Ringotel app status, and device enrichment.",
+  "description": "A deployable toolkit of add-ons for the NetSapiens Manager Portal, running on Cloudflare Workers: call-flow diagrams, Ringotel app status, device enrichment, and OneBill billing reconciliation.",
   "license": "MIT",
   "author": {
     "name": "David Szpunar",
@@ -21,11 +21,7 @@
   "//test": "`test` runs every offline suite, credentials-free. test:worker IS included: it falls back to the fictional snapshot shipped in test/snapshots, so it needs no customer data. Pass your own snapshot path to run it against real config: pnpm test:worker <snapshot.json>",
   "scripts": {
     "flow": "tsx src/cli.ts",
-    "test": "pnpm run test:portal && pnpm run test:features && pnpm run test:menus && pnpm run test:kit && pnpm run test:eligibility && pnpm run test:appaccess && pnpm run test:status && pnpm run test:statusmodel && pnpm run test:statuspage && pnpm run test:statusprobes && pnpm run test:ringotel && pnpm run test:ringotelwrite && pnpm run test:nsdevices && pnpm run test:access && pnpm run test:worker",
-    "test:worker": "tsx src/worker.selftest.ts",
-    "test:ringotel": "tsx src/ringotel.selftest.ts",
-    "test:nsdevices": "tsx src/nsDevices.selftest.ts",
-    "test:access": "tsx src/access.selftest.ts",
+    "test": "pnpm run test:portal && pnpm run test:features && pnpm run test:menus && pnpm run test:kit && pnpm run test:eligibility && pnpm run test:appaccess && pnpm run test:status && pnpm run test:statusmodel && pnpm run test:statuspage && pnpm run test:statusprobes && pnpm run test:ringotel && pnpm run test:ringotelwrite && pnpm run test:prepop && pnpm run test:nsdevices && pnpm run test:nsevents && pnpm run test:offboard && pnpm run test:templates && pnpm run test:onebill && pnpm run test:onebillcatalog && pnpm run test:onebillbaseline && pnpm run test:onebillassignment && pnpm run test:onebillscope && pnpm run test:onebillaccount && pnpm run test:onebillpage && pnpm run test:worker",
     "test:portal": "tsx src/portal.selftest.ts",
     "test:features": "tsx src/features.selftest.ts",
     "test:menus": "tsx src/menus.selftest.ts",
@@ -36,15 +32,30 @@
     "test:statusmodel": "tsx src/statusModel.selftest.ts",
     "test:statuspage": "tsx src/statusPage.selftest.ts",
     "test:statusprobes": "tsx src/statusProbes.selftest.ts",
+    "test:ringotel": "tsx src/ringotel.selftest.ts",
     "test:ringotelwrite": "tsx src/ringotelActivation.selftest.ts",
+    "test:prepop": "tsx src/ringotelPrepop.selftest.ts",
+    "test:nsdevices": "tsx src/nsDevices.selftest.ts",
+    "test:nsevents": "tsx src/nsEvents.selftest.ts",
+    "test:offboard": "tsx src/nsOffboard.selftest.ts",
+    "test:templates": "tsx src/templates.selftest.ts",
+    "test:onebill": "tsx src/onebill.selftest.ts",
+    "test:onebillcatalog": "tsx src/onebillCatalog.selftest.ts",
+    "test:onebillbaseline": "tsx src/onebillBaseline.selftest.ts",
+    "test:onebillassignment": "tsx src/onebillAssignment.selftest.ts",
+    "test:onebillscope": "tsx src/onebillScope.selftest.ts",
+    "test:onebillaccount": "tsx src/onebillAccount.selftest.ts",
+    "test:onebillpage": "tsx src/onebillPage.selftest.ts",
+    "test:worker": "tsx src/worker.selftest.ts",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@dszp/netsapiens-lib": "^0.1.9",
-    "@dszp/ringotel-lib": "^0.1.8"
+    "@dszp/netsapiens-lib": "^0.8.0",
+    "@dszp/ringotel-lib": "^0.1.8",
+    "@dszp/onebill-lib": "^0.6.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5",

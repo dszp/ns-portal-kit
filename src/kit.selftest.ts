@@ -458,6 +458,21 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(fOk, '[fresh] bundle with the freshness control parses');
   }
 
+  // ── every bundle must PARSE, for every key set that changes its shape ─────────────────────────
+  // 2026-09-02: a reorder moved a line that carried the menu function's closing brace, the bundle became a
+  // syntax error, and the Management menu went empty on dev while 434 string assertions stayed green.
+  // `new Function` parses without running: a SyntaxError here is the whole feature failing to load.
+  {
+    const parses = (label: string, js: string) => { try { new Function(js); ok(true, `[parse] ${label} parses`); } catch (e) { ok(false, `[parse] ${label}: ${(e as Error).message}`); } };
+    for (const keys of [[], ['kit.status'], ['onebill.view'], ['kit.status', 'onebill.view'], ['kit.captureMenus'], ['kit.status', 'kit.captureMenus', 'onebill.view']]) {
+      parses(`spk bundle with [${keys.join(',')}]`, buildSpkBundle(keys, env as any));
+    }
+    parses('kit bundle, all keys', buildKitBundle(FEATURE_KEYS.map((f) => f.key), env as any));
+    parses('kit bundle, no keys', buildKitBundle([], env as any));
+    parses('self bundle, all keys', buildSelfBundle(SELF_FEATURE_KEYS.map((f) => f.key), env as any));
+    parses('self bundle, no keys', buildSelfBundle([], env as any));
+  }
+
   // ── the SPK bundle (2026-08-07) ──────────────────────────────────────────────────
   {
     const env = { RINGOTEL_LABEL: 'App', PORTAL_MODE: '1' };
@@ -489,6 +504,75 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     // Denied ⇒ inert bytes. The route should 403 before this, but the body must not act on its own.
     const denied = buildSpkBundle([], env as any);
     ok(/status:false/.test(denied), '[spk] with the key denied the flag is false');
+
+    // ── the OneBill entry, which rides this same bundle on a SEPARATE key ────────────────────────────
+    // onebill.view is the wider audience of the two, so the case that matters is a caller who holds it
+    // and NOT kit.status: they must still get their entry, and nothing else.
+    {
+      const ob = buildSpkBundle(['onebill.view'], env as any);
+      ok(ob.includes('OneBill Integration'), '[onebill] the bundle carries the entry label');
+      ok(/onebill:true/.test(ob) && /status:false/.test(ob), '[onebill] with only that flag on');
+      ok(ob.includes('function onebillOpen('), '[onebill] and the opener the entry calls');
+      // Task 14: opened pre-filtered to the current domain, when there is one. The route re-validates
+      // the value against the caller's own visible domains — this only has to offer it.
+      ok(/var d=dom\(\),u=B\+'\/kit\/onebill'\+\(d\?'\?domain='\+encodeURIComponent\(d\):''\)/.test(ob),
+        '[onebill] onebillOpen appends ?domain=<current domain> when dom() is non-empty, and nothing when it is not');
+      ok(ob.includes(`d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.onebillRequest}'`), '[onebill] and the handler branch the page talks to');
+      ok(ob.includes("jget('/kit/onebill/links?mode='"), '[onebill] which forwards a list to the read route');
+      ok(/oq\.mode==='full'\?'full':'quick'/.test(ob),
+        '[onebill] naming the sweep the page asked for — quick unless it said full, so a mangled value cannot buy the expensive one');
+      ok(ob.includes("jpost('/kit/onebill/apply'"), '[onebill] and an apply to the write one');
+      // The BASELINE pair's forwarded body, field by field. Read as an exact set out of the jpost call:
+      // a field the parent drops is a decision the route never sees, and a field it invents is one the
+      // page never made. `account` is the subject now — a domain would resolve to its whole-domain
+      // holder, which on a site-linked panel is a different account — and `decidedBy` is deliberately
+      // absent, since the Worker takes it from the caller's own ns_t.
+      const blBody = /jpost\('\/kit\/onebill\/baseline',\{([^}]*)\}\)/.exec(ob)?.[1] ?? '';
+      ok(blBody !== '', '[onebill] the baseline pair posts a literal body the test can read');
+      const blFields = blBody.split(',').map((kv) => kv.split(':')[0]!.trim()).sort().join(',');
+      ok(blFields === 'account,action,all,group,items,note,offer,shortfall',
+        `[onebill] forwarding exactly the fields the baseline route accepts (${blFields})`);
+      ok(/account:bq\.account/.test(ob), '[onebill] the account comes off the page message, unmodified');
+      ok(/offer:bq\.offer/.test(ob), '[onebill] and the billed-as offer likewise — bounded and validated by the route, never here');
+      ok(!/domain:bq\.domain[\s\S]{0,80}shortfall/.test(ob),
+        '[onebill] and no domain rides along beside it — the route takes exactly one subject');
+      // The early return is the gate that used to ignore this flag entirely: a onebill.view-only caller
+      // was handed the bundle and it returned before drawing anything.
+      ok(ob.includes('if(!_AF.status&&!_AF.capture&&!_AF.onebill)return;'),
+        '[onebill] and the body no longer returns before a onebill-only caller reaches the menu');
+      // The console's bytes are in every tier (one shared body), so what has to be true is that nothing
+      // DRAWS them: both entries are behind their own flag, in one pass over one <ul>.
+      ok(ob.includes('if(_AF.status||(CAP&&capOn()))ent('), '[onebill] the console entry stays behind its own flag');
+      let obOk = true; try { new Function(ob); } catch { obOk = false; }
+      ok(obOk, '[onebill] bundle parses');
+
+      // ── the refusal reason survives the wire ────────────────────────────────────────────────────
+      // Both helpers used to throw the STATUS and drop the body, so the apply route naming the exact link
+      // it would not write reached the operator as "400". The message is still the bare status (existing
+      // callers compare and render it); the reason rides as e.body.
+      ok(/function jerr\(x\)\{return x\.text\(\)/.test(ob), '[onebill] a non-2xx reads its body before throwing');
+      ok(/e\.body=JSON\.parse\(t\)/.test(ob) && /e\.body=t/.test(ob), '[onebill] attaching it parsed when it is JSON, raw when it is not');
+      ok(/var e=new Error\(x\.status\);e\.status=x\.status/.test(ob), '[onebill] while the message stays the status every other caller already compares');
+      ok(ob.includes('(e&&e.body&&e.body.error)?e.body.error:'), '[onebill] and the page is told what the route actually said');
+      ok(!/'The apply did not run: '\+\(\(e&&e\.message\)/.test(ob), '[onebill] not just the number');
+
+      // Not in a masked session: the report names every domain the CALLER can see, which the masked user
+      // is not.
+      ok(/var OB=!!_AF\.onebill&&!masq\(\)/.test(ob), '[onebill] the entry is suppressed inside a masquerade');
+
+      // A console caller gets the flag OFF — the two keys are granted separately.
+      ok(/onebill:false/.test(js), '[onebill] a kit.status-only caller has the flag off');
+      ok(/onebill:false/.test(denied), '[onebill] and a caller with neither key has it off too');
+      // BOTH KEYS AT ONCE. Capture prefers the account menu (a masked user has no Management menu) and
+      // OneBill prefers Management-first; with both live the OneBill rule wins, and neither capture guard
+      // may return before the OneBill entry is drawn.
+      ok(ob.includes('var ul=(CAP&&!OB)?acctUl():mgmtUl()'), '[onebill] with OneBill live the menu choice is Management-first');
+      ok(ob.includes('if(CAP&&!capOn()&&!OB)return;'), '[onebill] and disarmed capture no longer suppresses it');
+      ok(ob.includes('if(CAP&&!OB&&masqEnd())return;'), '[onebill] nor does a masquerade bar the capture pass would stand down for');
+
+      // The LABEL is in the bytes for every tier (one shared body), but nothing draws it with the flag off.
+      ok(denied.includes("if(OB)ent('OneBill Integration'"), '[onebill] the entry is drawn only behind the flag');
+    }
 
     // F4: the console bundle must be buildable while PORTAL_APP_DOWNLOADS is malformed. wrapBundle calls
     // parseDownloads, which THROWS — and /kit/spk.js is served ahead of the validator that would have caught
@@ -553,9 +637,19 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(JSON.stringify(selfKeys) === JSON.stringify(declaredSelf),
       `[delivery] the self bundle's flag list is exactly the keys declaring deliveredBy self (list: ${selfKeys.join(',')} | registry: ${declaredSelf.join(',')})`);
 
+    // The console bundle keeps the EQUALITY guard, with ONE named exemption: `onebill.write` gates a
+    // route, not a bundle flag — the route decides `canWrite` and the page is rendered accordingly, so
+    // a flag would be a second copy of an answer the server already gave.
+    const CONSOLE_KEYS_WITHOUT_FLAG = ['onebill.write'];
     const spkKeys = SPK_FEATURE_KEYS.map((f) => f.key).sort();
-    ok(JSON.stringify(spkKeys) === JSON.stringify(keysDeliveredBy('console').sort()),
-      '[delivery] and the console bundle\'s list is exactly the keys declaring console');
+    const declaredSpk = keysDeliveredBy('console').filter((k) => !CONSOLE_KEYS_WITHOUT_FLAG.includes(k)).sort();
+    ok(JSON.stringify(spkKeys) === JSON.stringify(declaredSpk),
+      `[delivery] and the console bundle's list is exactly the keys declaring console, less the named exemptions (list: ${spkKeys.join(',')} | registry: ${declaredSpk.join(',')})`);
+    // The exemption list is itself checked, so a key that quietly stops being console-delivered — or an
+    // exemption left behind after its flag lands — is a failure rather than a silently wider hole.
+    const staleExemptions = CONSOLE_KEYS_WITHOUT_FLAG.filter((k) => !keysDeliveredBy('console').includes(k));
+    ok(staleExemptions.length === 0,
+      `[delivery] every named exemption is still a console key${staleExemptions.length ? ` (stale: ${staleExemptions.join(', ')})` : ''}`);
 
     // The admin bundle is a SUBSET, not an equality: `ringotel.prepop` is gated by the registry and enforced
     // on its route, but has no `_AF` flag because nothing in the bundle self-hides on it. Asserting equality
@@ -891,8 +985,13 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
   // it needs no expiry: a mode whose worst failure is an unused button cannot go stale.
   ok(/if\(!\(!_AF\.status&&_AF\.capture\)\|\|!capOn\(\)\)return;/.test(cap),
     '[capbtn] the button appears only for a masked operator with capture armed');
-  ok(/if\(CAP&&!capOn\(\)\)return;/.test(cap),
+  // The OneBill entry rides this same pass on a different key, so the arming guard is qualified by it --
+  // capture being disarmed says nothing about whether THAT entry should be drawn. The capture entry itself
+  // is still behind capOn() either way, which the next assertion holds.
+  ok(/if\(CAP&&!capOn\(\)&&!OB\)return;/.test(cap),
     '[capbtn] and the menu fallback obeys the same arming, so one switch governs both');
+  ok(/if\(_AF\.status\|\|\(CAP&&capOn\(\)\)\)ent\(/.test(cap),
+    '[capbtn] the capture entry is drawn only while armed, now that the early return can be passed by another key');
   // ⚠️ THE FALLBACK ASKS WHETHER THE BAR EXISTS, not whether the button is in it yet. The first version
   // asked the latter — a question about ORDER — and the menu pass runs first, so it added its own copy
   // and the bar then added the button: both on screen at once (David's screenshot). Both passes re-run
@@ -902,7 +1001,7 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
   // pass stays idempotent across mutations. An unscoped search found it and tested the wrong function.
   const spkMenuFn = cap.slice(cap.indexOf('function spkMenu()'), cap.indexOf('var _spkF='));
   ok(spkMenuFn.length > 400 && spkMenuFn.length < 4000, '[capbtn] (sliced the right function)');
-  ok(/if\(CAP&&masqEnd\(\)\)return;/.test(spkMenuFn) && !/_svxcap/.test(spkMenuFn),
+  ok(/if\(CAP&&!OB&&masqEnd\(\)\)return;/.test(spkMenuFn) && !/_svxcap/.test(spkMenuFn),
     '[capbtn] the menu fallback stands down when a bar EXISTS, not when the button has already landed');
   ok(cap.indexOf('m:capBtn') < cap.indexOf('m:spkMenu'),
     '[capbtn] and the bar runs first, so the fallback is the pass that happens last');
@@ -1158,7 +1257,7 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     // The fallback must key on something NAME-independent, or it inherits the failure it exists to cover.
     ok(b.includes('hasSignOut') || /function acctUl/.test(b),
       '[entry] using the finder that keys on sign-out + profile rather than on a menu name');
-    ok(/if\(fallback\)a\.title=/.test(b), '[entry] and says why it is there when it lands in the account menu');
+    ok(/fallback\?'Operator console\./.test(b), '[entry] and says why it is there when it lands in the account menu');
   }
 
   // ── a secondary can be gated to named ACCOUNTS, like a feature ───────────────────────────────────────
@@ -1661,6 +1760,13 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     }
   }
 
-  console.log(`\n${pass} passed, ${fail} failed`);
+  // ── the modal iframe must allow confirm(): a sandbox without allow-modals answers false silently ─
+{
+  const js = buildSpkBundle(['kit.status', 'onebill.view'], env as any);
+  ok(js.includes("f.sandbox='allow-scripts allow-popups allow-modals'"), '[box] the modal sandbox allows modals, so the OneBill page\'s confirm() can say yes');
+  ok(!js.includes('allow-same-origin'), '[box] and still never allow-same-origin');
+}
+
+console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

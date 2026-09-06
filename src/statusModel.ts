@@ -11,7 +11,7 @@
 export type SettingKind = 'secret' | 'config';
 export type SettingGroup =
   | 'core' | 'branding' | 'domains' | 'ringotel' | 'eligibility'
-  | 'appaccess' | 'menus' | 'injection' | 'events' | 'identity' | 'bindings';
+  | 'appaccess' | 'menus' | 'injection' | 'events' | 'identity' | 'bindings' | 'onebill';
 
 /** How consequential this setting is. Absent ⇒ `normal`. It orders rows within a group and drives visual
  *  weight: a flat list of 64 equals implies `NS_SERVER` and `RINGOTEL_LABEL_SHORT` matter the same amount,
@@ -43,13 +43,13 @@ export interface SettingDef {
  *  `interface Env` (so a reviewer can read the two side by side) — which is the right order for auditing
  *  the table and the wrong one for reading the page. */
 export const GROUP_ORDER: SettingGroup[] = [
-  'core', 'domains', 'injection', 'menus', 'ringotel', 'eligibility',
+  'core', 'domains', 'injection', 'menus', 'ringotel', 'onebill', 'eligibility',
   'appaccess', 'events', 'identity', 'branding', 'bindings',
 ];
 
 export const GROUP_LABEL: Record<SettingGroup, string> = {
   core: 'Core', domains: 'Domain limits', injection: 'Portal injection',
-  menus: 'Portal menus', ringotel: 'App integration', eligibility: 'Activation rules',
+  menus: 'Portal menus', ringotel: 'App integration', onebill: 'OneBill', eligibility: 'Activation rules',
   appaccess: 'Self-service app access', events: 'Change events', identity: 'Background service identity',
   branding: 'Branding', bindings: 'Worker bindings',
 };
@@ -60,6 +60,7 @@ export const GROUP_BLURB: Record<SettingGroup, string> = {
   injection: 'What gets served to the Manager Portal, and who may receive it.',
   menus: 'Adding and hiding entries in the portal\'s stock menus. Two settings can hide an Apps entry; setting both merges them.',
   ringotel: 'The softphone app integration. Everything below it is inert without an API key.',
+  onebill: 'The NS↔OneBill billing link report. Everything below it is inert without all four credentials.',
   eligibility: 'Which extensions are treated as real people when the app is activated.',
   appaccess: 'What a signed-in user is told about their own app access.',
   events: 'Keeping the app directory in sync with changes made directly in NetSapiens.',
@@ -385,8 +386,13 @@ export const PROBE_CATALOG: ProbeCatalogEntry[] = [
   },
 
   {
-    id: 'onebill-documo', name: 'OneBill / Documo',
-    what: 'Nothing to check — neither integration is wired into this Worker.',
+    id: 'onebill', name: 'OneBill API',
+    what: 'Obtains an OAuth token with the configured OneBill credentials and reads one page of subscribers (page size 1). Skipped when OneBill is not configured.',
+    cost: 'One OAuth grant plus one one-row subscriber read.',
+  },
+  {
+    id: 'documo', name: 'Documo',
+    what: 'Nothing to check — not wired into this Worker.',
     cost: 'No network call — not integrated.',
   },
 ];
@@ -601,9 +607,12 @@ export const SUBSYSTEM_DETAIL: Record<string, string[]> = {
     'Without it an in-isolate limiter still applies, but only per isolate, so a distributed flood is bounded once per edge location rather than once overall. A fork with no binding is safe, just less effective — which is why it is not a startup requirement.',
   ],
   onebill: [
-    'Coming soon — not wired into this Worker yet. Intended to provide a link between [OneBill](https://www.onebillsoftware.com/) customers and portal domains, sites, and extensions for billing and reconciliation purposes. This is an unofficial integration.',
-    'There is nothing to configure yet.',
+    'A Management-menu page that lines up [OneBill](https://www.onebillsoftware.com/) billing accounts against NetSapiens domains: each account\'s current link (or absence of one), a proposed link when a usage-offer identifier names the domain, and a one-account-at-a-time control to set or clear it. This is an unofficial integration.',
     'The problem it addresses is the one that arrives the moment activation and deactivation are automated: who is billable stops matching who actually has an account. A seat that is never deactivated keeps costing money, and a seat activated outside the portal never starts — and neither is visible from either system alone.',
+    '### Who can see it',
+    '`onebill.view` (default: reseller) shows the page; `onebill.write` (default: superadmin) enables setting or clearing a link. Both widen via `PORTAL_FEATURES`, the same mechanism as every other feature gate.',
+    '### What it writes',
+    'Only the custom-field group this deployment maps (`ONEBILL_LINK_GROUP`) and the externalId derived from it — one OneBill account at a time, and every write is verified by re-reading the account afterward. It never creates a subscription, an order, or a billing account; it only links or unlinks an existing one to an existing NS domain.',
   ],
   documo: [
     'Coming soon — not wired into this Worker yet. Intended to provide an integration link between the [Documo](https://www.documo.com/) fax service and the portal, to display fax numbers alongside other numbers and to provide portal links and other useful information, more closely integrating Documo into the Manager Portal. This is an unofficial integration.',
@@ -707,6 +716,73 @@ export const SETTINGS: SettingDef[] = [
     what: 'JSON `{ "<nsDomain>": "<branchAddressToMatch>" }` for the rare case a Ringotel org\'s branch address does not match the NS domain automatically.',
     whenUnset: 'No overrides — the NS domain is matched to the Ringotel branch address automatically.',
     affects: ['ringotel.orgStatus'] },
+
+  // ── onebill: NS↔OneBill link report — fully gated on all four credentials (src/onebill.ts) ────────
+  { name: 'ONEBILL_TENANT_ID', group: 'onebill', kind: 'config',
+    importance: 'critical',
+    what: 'OneBill tenant identifier (Config > Settings > Business Profile). With the three secrets below, its presence turns the integration on.',
+    whenUnset: 'The integration is off: no OneBill calls, the Management-menu entry is absent, its routes answer 404.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_CLIENT_SECRET', group: 'onebill', kind: 'secret',
+    importance: 'critical',
+    what: 'OneBill OAuth client secret.',
+    whenUnset: 'The integration is off: no OneBill calls, the Management-menu entry is absent, its routes answer 404.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_USERNAME', group: 'onebill', kind: 'secret',
+    importance: 'critical',
+    what: 'OneBill API username.',
+    whenUnset: 'The integration is off: no OneBill calls, the Management-menu entry is absent, its routes answer 404.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_PASSWORD', group: 'onebill', kind: 'secret',
+    importance: 'critical',
+    what: 'OneBill API password.',
+    whenUnset: 'The integration is off: no OneBill calls, the Management-menu entry is absent, its routes answer 404.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_BASE_URL', group: 'onebill', kind: 'config',
+    importance: 'minor', gatedBy: 'ONEBILL_CLIENT_SECRET', example: 'https://api.example.com',
+    what: 'Non-default OneBill API base URL (https only).',
+    whenUnset: 'Uses the standard OneBill API base URL.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_LINK_GROUP', group: 'onebill', kind: 'config',
+    defaultValue: '{"group":"PBX","ns":"NS","valueField":"Domain","qualifierField":"Site"}', gatedBy: 'ONEBILL_CLIENT_SECRET',
+    what: 'Which subscriber custom-field group carries the NetSapiens link: the group key, the namespace it maps to, the field holding the domain, and (optionally) the field holding the site.',
+    whenUnset: 'Defaults to {"group":"PBX","ns":"NS","valueField":"Domain","qualifierField":"Site"}.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_USAGE_OFFERS', group: 'onebill', kind: 'config',
+    gatedBy: 'ONEBILL_CLIENT_SECRET', example: 'Domain Usage',
+    what: 'Comma-separated subscription offer names whose subscription identifier is the NetSapiens domain. The page uses them to propose a link for an account that has none.',
+    whenUnset: 'No links are proposed; unlinked domains still list, and an account can be picked by hand.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_USAGE_IGNORE', group: 'onebill', kind: 'config',
+    defaultValue: '_OLD', gatedBy: 'ONEBILL_CLIENT_SECRET', example: '_OLD,_RETIRED',
+    what: 'Comma-separated, case-insensitive substrings that mark a subscription identifier as retired. A subscription whose identifier contains one is not a usage match at all, so a renamed leftover does not read as a second active subscription.',
+    whenUnset: 'Defaults to "_OLD". A blank value is treated as unset — an empty marker would match every identifier.',
+    affects: ['onebill.view', 'onebill.write'] },
+
+  { name: 'ONEBILL_RECURRING_RULES', group: 'onebill', kind: 'config',
+    gatedBy: 'ONEBILL_CLIENT_SECRET', example: '[{"offer":"Seat","counts":"extensions.total","group":"seats"}]',
+    what: 'JSON array of rules keyed by offer name, price plan code or product code (one per rule) saying which inventory dimension(s) each counts toward, which rules sum into one group, which lines are ignored on purpose, and which include another dimension.',
+    whenUnset: 'Every recurring offer is listed as unmapped and the account panel still shows the inventory - the comparison degrades to a fact sheet rather than disappearing.',
+    affects: ['onebill.view'] },
+
+  { name: 'NS_FAX_SERVER_HOSTS', group: 'onebill', kind: 'config',
+    gatedBy: 'ONEBILL_CLIENT_SECRET', example: '203.0.113.7',
+    what: 'Comma-separated fax server hosts. A phone number whose dial rule hands it to one of these is counted as a fax line (dids.fax) instead of as a DID, so a rulebook can bill it as what it is.',
+    whenUnset: 'No number is a fax line and the DID counts include them - NetSapiens has no fax endpoint, so the host is the only thing that identifies one and there is no sensible default to guess.',
+    affects: ['onebill.view'] },
+
+  { name: 'NS_DEVICE_SUFFIXES', group: 'onebill', kind: 'config',
+    gatedBy: 'ONEBILL_CLIENT_SECRET', example: '{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"Teams","teams":true}}',
+    what: 'JSON object naming what a device-name suffix means here - the part of a device name after the extension number, so "1001wp" has suffix "wp". The label is printed on the device chip, and the suffix marked "teams" is what identifies a Microsoft Teams connector. Setting it replaces the default legend rather than adding to it.',
+    whenUnset: 'The three suffixes NetSapiens itself ships: wp SNAPmobile Web, m SNAPmobile, t Teams. Ringotel adds its activation suffix on top whenever that integration is enabled.',
+    affects: ['onebill.view'] },
 
   // ── eligibility: who gets an app device on activation, and the write safety rail ──────────────────
   { name: 'RINGOTEL_ACTIVATION_SUFFIX', group: 'eligibility', kind: 'config',
@@ -834,12 +910,14 @@ export const SETTINGS: SettingDef[] = [
   { name: 'PORTAL_FEATURES', group: 'injection', kind: 'config',
     importance: 'important', example: '{"callflow.view": "office_manager", "ringotel.orgList": "off"}',
     what: 'JSON `{ "<feature.key>": <gate> }` overriding the built-in default gate for one or more features. '
-      + 'The keys come from five families: `portal.*` is the portal itself — bundle entry, the self-service tier, '
+      + 'The keys come from six families: `portal.*` is the portal itself — bundle entry, the self-service tier, '
       + 'the status banner, the footer version line, and the three that hide the portal\'s own domain controls '
       + '(`portal.domainCreate`, `portal.domainEdit`, `portal.domainDelete`). `callflow.view` is the call-flow diagram. '
       + '`ringotel.*` is the app integration — status surfaces, activation, password reset, directory pre-population. '
       + '`me.*` is a user\'s own account — their app status, devices, sign-in details, their own password reset. '
       + '`kit.*` is this console and its capture button. '
+      + '`onebill.*` is the billing-link page — `onebill.view` reads which OneBill account bills each domain, '
+      + '`onebill.write` changes it. '
       + '⚠️ The three `portal.domain*` keys are unlike the rest: no route of this kit sits behind them, so denying one '
       + 'removes the control, not the ability. The Permissions tab lists every key with its default and who it admits — '
       + 'this row is the orientation, that tab is the reference.',
@@ -877,6 +955,13 @@ export const SETTINGS: SettingDef[] = [
     what: 'Optional private R2 bucket binding that serves any r2: entry in the injection manifest.',
     whenUnset: 'Not bound. Harmless unless PORTAL_SECONDARIES lists an r2: entry, in which case every request fails with a loud config error.',
     affects: ['injection'] },
+
+  { name: 'ONEBILL_DB', group: 'bindings', kind: 'config',
+    importance: 'minor',
+    example: '"d1_databases": [{ "binding": "ONEBILL_DB", "database_name": "ns-portal-kit-billing", "database_id": "<id>" }]',
+    what: 'Optional D1 database holding the billing_baseline tables - the per-account record of which billing-vs-inventory gaps an operator has accepted. Apply migrations/ with `wrangler d1 migrations apply` after binding it.',
+    whenUnset: 'Not bound. The account panel renders without the accepted column and the baseline route answers 404; nothing else is affected.',
+    affects: ['onebill.view', 'onebill.write'] },
 
   { name: 'JWT_RATE_LIMITER', group: 'bindings', kind: 'config',
     importance: 'important',

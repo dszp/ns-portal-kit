@@ -187,6 +187,24 @@ export function shortLabelOf(env: RingotelEnv): string {
   return s || labelOf(env);
 }
 
+/**
+ * What this deployment's Ringotel app is called in a device-suffix legend, or `null` when the
+ * integration is off.
+ *
+ * The suffix is the one the rest of this module already uses — `RINGOTEL_ACTIVATION_SUFFIX`, default
+ * `'r'` — because it is the same device: a legend entry that named a different one would label the wrong
+ * chip. The label is the SHORT one, since a device chip is the tightest surface on the page.
+ *
+ * Read here rather than assembled at the call site so the suffix and its default live in one file.
+ * netsapiens-lib knows nothing of Ringotel and never will; this is the operator's own suffix, supplied
+ * the way the library asks for one.
+ */
+export function ringotelSuffixEntry(env: RingotelEnv): { suffix: string; label: string } | null {
+  if (!ringotelEnabled(env)) return null;
+  const suffix = (env.RINGOTEL_ACTIVATION_SUFFIX ?? '').trim() || 'r';
+  return { suffix: suffix.toLowerCase(), label: shortLabelOf(env) };
+}
+
 function presenceEnabled(env: RingotelEnv): boolean {
   const v = (env.RINGOTEL_PRESENCE ?? '').trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
