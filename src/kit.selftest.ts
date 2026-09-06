@@ -937,6 +937,90 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(nullOk, '[item37] and a pass before the plan arrives does nothing rather than throwing');
   }
 
+  // ── a `handoff` entry is a FORM POST, and the token leaves only at submit ─────────────────────────
+  // The session token must never be in a URL, so an entry that hands it to another tool is drawn as a
+  // form with one hidden field, filled inside the submit handler and never at render. The text facts
+  // below pin the shape the receiver documents (call-popup-bulk SETUP § "Wire up the portal handoff");
+  // the vm run pins the behaviour a grep cannot see: the field is empty until submit, and a page with no
+  // token submits nothing.
+  {
+    const b = buildSelfBundle(selfFeaturePolicyKeys(), { PORTAL_HANDOFF_URL: '' } as any);
+    const ho = b.slice(b.indexOf('function menuHandoff('), b.indexOf('function menuRename('));
+    ok(ho.length > 0 && ho.length < 2500, '[handoff] the self bundle carries menuHandoff, beside the applier that calls it');
+    ok(/document\.createElement\('form'\)/.test(ho) && /\.method='POST'/.test(ho), '[handoff] it builds a form whose method is POST');
+    ok(/\.target='_blank'/.test(ho), '[handoff] the receiver is a separate top-level navigation');
+    // noopener ONLY. noreferrer sets referrer policy no-referrer, under which a non-GET request carries
+    // `Origin: null` — and the receiver exact-matches Origin, so every click would 403.
+    ok(/setAttribute\('rel','noopener'\)/.test(ho) && !/noreferrer/.test(ho),
+      '[handoff] rel="noopener" on the form, and never noreferrer — that would send Origin: null and the receiver would refuse it');
+    ok(/\.type='hidden'/.test(ho) && /\.name='ns_t'/.test(ho), '[handoff] one hidden input named ns_t');
+    ok(/\.type='submit'/.test(ho), '[handoff] and a submit control carrying the label');
+    const listenAt = ho.indexOf("addEventListener('submit'");
+    const tokAt = ho.indexOf('tok()');
+    ok(listenAt > -1 && tokAt > listenAt,
+      `[handoff] the token is read INSIDE the submit handler, never at render (listener@${listenAt}, tok@${tokAt})`);
+    ok(!/\.href/.test(ho), '[handoff] nothing in it writes an href — the token has no URL to ride');
+    const applier = b.slice(b.indexOf('function menuApply('), b.indexOf('function menuHandoff('));
+    ok(/m\.handoff==='ns_t'/.test(applier) && /menuHandoff\(/.test(applier), '[handoff] menuApply branches on the literal and delegates');
+    ok(/a\.href=fill\(m\.url\);a\.target='_blank';a\.rel='noopener noreferrer'/.test(applier), '[handoff] and a plain item still renders as the anchor it always was');
+    ok(!/ns_t/.test(applier.replace(/m\.handoff==='ns_t'/g, '')), '[handoff] the applier itself never touches the token');
+
+    // Behaviour, on a DOM stub small enough to be obviously honest: elements are bags of properties with
+    // the four methods the code calls, and `tok` is a variable the test flips between runs.
+    const helpers = b.slice(b.indexOf('function labelText('), b.indexOf('function menuRename('));
+    type El = { tagName: string; children: El[]; parentNode?: El; attrs: Record<string, string>; on: Record<string, (e: unknown) => void>;
+      style: Record<string, string>; className: string; textContent?: string; [k: string]: unknown };
+    const mk = (tag: string): El => {
+      const el: El = { tagName: tag.toUpperCase(), children: [], attrs: {}, on: {}, style: {}, className: '' };
+      el.appendChild = (c: El) => { c.parentNode = el; el.children.push(c); };
+      el.insertBefore = (c: El, ref: El) => { c.parentNode = el; el.children.splice(el.children.indexOf(ref), 0, c); };
+      el.setAttribute = (k: string, v: string) => { el.attrs[k] = v; };
+      el.getAttribute = (k: string) => el.attrs[k] ?? null;
+      el.hasAttribute = (k: string) => k in el.attrs;
+      el.addEventListener = (t: string, f: (e: unknown) => void) => { el.on[t] = f; };
+      return el;
+    };
+    const timers: (() => void)[] = [];
+    const warned: string[] = [];
+    const sandbox: Record<string, unknown> = {
+      document: { createElement: mk },
+      location: { pathname: '/portal/users' },
+      console: { warn: (m: string) => warned.push(m) },
+      setTimeout: (f: () => void) => { timers.push(f); return 1; },
+      TOKEN: 'tok.value.here',
+    };
+    const menuApply = runInNewContext(`function tok(){return TOKEN}; ${helpers}; menuApply`, sandbox) as (ul: El, plan: unknown, before: null) => void;
+    const ul = mk('ul');
+    menuApply(ul, { hide: [], add: [
+      { label: 'Bulk tool', url: 'https://tools.example.com/launch?from={page}', title: 'Opens the tool', handoff: 'ns_t' },
+      { label: 'Docs', url: 'https://docs.example.com/x' },
+    ] }, null);
+    ok(ul.children.length === 2, '[handoff] both entries drawn, one row each');
+    const form = ul.children[0]!.children[0]!;
+    const link = ul.children[1]!.children[0]!;
+    ok(form.tagName === 'FORM' && link.tagName === 'A', '[handoff] the handoff row holds a form, the plain row an anchor');
+    ok(form.method === 'POST' && form.action === 'https://tools.example.com/launch?from=%2Fportal%2Fusers' && form.target === '_blank',
+      '[handoff] POST to the entry url with {page} filled, in a new tab');
+    const hidden = form.children.find((c) => c.tagName === 'INPUT')!;
+    const button = form.children.find((c) => c.tagName === 'BUTTON')!;
+    ok(!!hidden && hidden.type === 'hidden' && hidden.name === 'ns_t' && hidden.value === '',
+      '[handoff] the hidden field is named ns_t and is EMPTY at render');
+    ok(!!button && button.type === 'submit' && button.textContent === 'Bulk tool' && button.title === 'Opens the tool',
+      '[handoff] the submit control carries the label and tooltip');
+    ok(link.href === 'https://docs.example.com/x' && link.textContent === 'Docs', '[handoff] the plain entry is untouched');
+
+    // Submit with a token: the field is filled for the navigation, then cleared behind it.
+    let prevented = 0;
+    form.on.submit!({ preventDefault: () => { prevented++; } });
+    ok(hidden.value === 'tok.value.here' && prevented === 0, '[handoff] at submit the field holds the token and the submit proceeds');
+    timers.splice(0).forEach((f) => f());
+    ok(hidden.value === '', '[handoff] and it is cleared again once the navigation has read it');
+    // No token: nothing leaves.
+    sandbox.TOKEN = '';
+    form.on.submit!({ preventDefault: () => { prevented++; } });
+    ok(prevented === 1 && hidden.value === '' && warned.length === 1, '[handoff] with no token in the page the submit is cancelled, field still empty, one warning');
+  }
+
   // ── the capture BUTTON sits where the operator already is, and only when armed ───────────────────────
 // David: "Masq, capture, exit masq is not much harder than wait-exit and is under operator control."
 // The bar region exists only while masquerading, so a control there cannot appear where it would be

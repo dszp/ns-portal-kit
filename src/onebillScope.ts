@@ -35,15 +35,20 @@
  * not Unassigned: the Unassigned list exists to prompt a billing decision, and there is no bill to make.
  * A manual assignment naming one is honoured exactly as it is for any other item.
  *
- * ## An ADDRESS can be on several accounts; nothing else can
+ * ## The three E911 kinds can be on several accounts; nothing else can
  *
  * Every other item is a fact about one thing — a user, a number, a route — and belongs to one account.
- * An address is a fact about a PLACE. Users on four sites can reference one address, and two of those
- * sites' accounts can each legitimately bill an E911 bundle for it, so an address is placed on EVERY
- * account holding one of its referencing sites (each counting it once) and on the whole-domain holder
- * as well when a referencing site is unheld or the referencing users have no site. A manual assignment
- * on an address is therefore ADDITIVE — it adds an account, with a per-account remove — where on every
- * other kind it still replaces. `ScopedItemMeta.sharedWith` names the other holders on a placed item.
+ * An E911 address, an E911 ENDPOINT and a LEGACY emergency number are each a fact about a PLACE. Users
+ * on four sites can reference one, and two of those sites' accounts can each legitimately bill an E911
+ * line for it, so one is placed on EVERY account holding one of its referencing sites (each counting it
+ * once) and on the whole-domain holder as well when a referencing site is unheld or the referencing
+ * users have no site. A manual assignment on one is therefore ADDITIVE — it adds an account, with a
+ * per-account remove — where on every other kind it still replaces. `ScopedItemMeta.sharedWith` names
+ * the other holders on a placed item.
+ *
+ * {@link isSharedKind} is the one test for "is this that kind of item", read by this module, by
+ * `applyAssignment`, by the assign route and by the page's controls — four places that must agree, and
+ * did not while each carried its own `startsWith('addr:')`.
  *
  * ## `automatic` names a disagreement, not a fact about the item
  *
@@ -243,7 +248,9 @@ export function reasonText(how: string, sites: string[]): string {
   const r = how.replace(/^unattributed:/, '');
   if (r === 'no-site') return 'no site set';
   if (r.startsWith('routed-to:')) return `routed to ${r.slice('routed-to:'.length)}`;
-  if (r === 'unreferenced') return 'no user references this address';
+  // "this address" no longer: `unreferenced` now reaches an endpoint and a legacy number too, and the
+  // row's own kind chip already says which of the three the reader is looking at.
+  if (r === 'unreferenced') return 'no user references this';
   if (r === 'sms-user-unknown') return "SMS number's user is unknown";
   return r;
 }
@@ -266,8 +273,22 @@ interface At { sites: string[]; how: string }
 /** One account that holds an item, and how it got there. `site` is set only on a `site` placement. */
 interface Owner { account: string; attribution: Attribution; site?: string }
 
-/** Only an ADDRESS gets the set rule. The prefix is `listDomainInventory`'s, and the one place it is read. */
-const isAddress = (bareKey: string): boolean => bareKey.startsWith('addr:');
+/**
+ * Does this item get the SET rule — placed on every account that holds one of its sites, with additive
+ * manual assignment — rather than the one-account rule?
+ *
+ * True for the three E911 kinds and nothing else, because each is a fact about a PLACE that more than
+ * one account can legitimately bill a line for: `addr:` (a dispatchable location), `e911:` (the
+ * endpoint the carrier bills per) and `e911legacy:` (the same thing on a domain that predates
+ * endpoints). The prefixes are `listDomainInventory`'s, and this is the one place they are read —
+ * scope, `applyAssignment`, the route and the page's controls all call it, and a fourth private copy is
+ * how the endpoint would have got the extension's rule.
+ *
+ * NB the order: `e911legacy:` is checked as its own prefix rather than left to `e911:`, which does not
+ * match it — `e911legacy` has no colon at that position.
+ */
+export const isSharedKind = (bareKey: string): boolean =>
+  bareKey.startsWith('addr:') || bareKey.startsWith('e911:') || bareKey.startsWith('e911legacy:');
 
 /** The holder record behind an account number, so `sharedWith` carries the NAME an operator recognises. */
 function refOf(accountNumber: string, holders: DomainHolders): AccountRef {
@@ -278,21 +299,22 @@ function refOf(accountNumber: string, holders: DomainHolders): AccountRef {
 /**
  * What the AUTOMATIC rule chooses — site link, else whole-domain link — with no assignment in it.
  *
- * One account for every kind but an address, where it is a SET: an address is a fact about a place,
- * four sites can reference one, each of their accounts can legitimately bill an E911 bundle for it,
- * and a rule that picks one leaves the others short. Each holding account counts it ONCE however many
- * of its sites reference it — the bundle is per place, not per user.
+ * One account for every kind but a SHARED one ({@link isSharedKind}), where it is a SET: an E911
+ * address, endpoint or legacy number is a fact about a place, four sites can reference one, each of
+ * their accounts can legitimately bill an E911 line for it, and a rule that picks one leaves the others
+ * short. Each holding account counts it ONCE however many of its sites reference it — the line is per
+ * place, not per user.
  *
- * The whole-domain holder is in the address set when the address has no site at all, or when ANY
+ * The whole-domain holder is in the shared set when the item has no site at all, or when ANY
  * referencing site is unheld: those users are the remainder, which is exactly what a whole-domain link
  * covers. For every other kind the whole-domain holder is the fallback it has always been.
  */
-function autoOwners(at: At, holders: DomainHolders, address: boolean): Owner[] {
+function autoOwners(at: At, holders: DomainHolders, shared: boolean): Owner[] {
   // A site name is caller-supplied NetSapiens data — Object.hasOwn (not bracket-truthiness) keeps a site
   // literally named `constructor` or `toString` from resolving through the prototype chain to a function
   // and reading as "held".
   const held = (site: string): boolean => Object.hasOwn(holders.bySite, site);
-  if (!address) {
+  if (!shared) {
     const site = at.sites.find(held);
     if (site) return [{ account: holders.bySite[site]!.accountNumber, attribution: 'site', site }];
     return holders.whole ? [{ account: holders.whole.accountNumber, attribution: 'domain' }] : [];
@@ -313,13 +335,13 @@ function autoOwners(at: At, holders: DomainHolders, address: boolean): Owner[] {
 /**
  * The automatic owners and the manual ones, resolved into who actually holds the item.
  *
- * For an address the two are UNIONED — a manual assignment ADDS an account, because the automatic
- * placements it sits beside are each a real E911 bundle somebody bills. For every other kind a manual
+ * For a SHARED kind the two are UNIONED — a manual assignment ADDS an account, because the automatic
+ * placements it sits beside are each a real E911 line somebody bills. For every other kind a manual
  * assignment REPLACES the automatic one, which is the one-account rule unchanged. An account in both
  * reads as `manual`: the operator's decision is the more specific fact about that account.
  */
-function ownersOf(auto: Owner[], manual: Assignment[], address: boolean): Owner[] {
-  if (!address) return manual.length ? [{ account: manual[0]!.accountNumber, attribution: 'manual' }] : auto;
+function ownersOf(auto: Owner[], manual: Assignment[], shared: boolean): Owner[] {
+  if (!shared) return manual.length ? [{ account: manual[0]!.accountNumber, attribution: 'manual' }] : auto;
   const byAccount = new Map(auto.map((o) => [o.account, o] as const));
   for (const a of manual) byAccount.set(a.accountNumber, { account: a.accountNumber, attribution: 'manual' });
   return [...byAccount.values()].sort((x, y) => x.account.localeCompare(y.account));
@@ -338,7 +360,7 @@ export function scopeInventory(account: ResolvedAccountScope, reads: DomainRead[
     if (!domainsSeen.has(d)) throw new Error(`scopeInventory: reads is missing ${d}, which ${account.accountNumber} holds`);
   }
 
-  const detail: DomainInventoryDetail = { extensions: [], systemUsers: [], dids: [], e911Addresses: [], smsNumbers: [] };
+  const detail: DomainInventoryDetail = { extensions: [], systemUsers: [], dids: [], e911Addresses: [], e911Endpoints: [], e911Legacy: [], smsNumbers: [] };
   const meta: Record<string, ScopedItemMeta> = {};
   const unassigned: UnassignedItem[] = [];
   const domainTotals: Record<string, DomainInventory> = {};
@@ -347,8 +369,8 @@ export function scopeInventory(account: ResolvedAccountScope, reads: DomainRead[
     const holders = holdersByDomain[r.domain]!;
     const candidates = holdersOf(holders);
     const holderSet = new Set(candidates.map((a) => a.accountNumber));
-    // MANY assignments can share one key now: an address is placed on a set of accounts, so its manual
-    // half is a set too. Every other kind still has at most one — the ROUTE is what enforces that.
+    // MANY assignments can share one key now: a shared kind is placed on a set of accounts, so its
+    // manual half is a set too. Every other kind still has at most one — the ROUTE is what enforces that.
     const byKey = new Map<string, Assignment[]>();
     for (const a of r.assignments) { const l = byKey.get(a.key) ?? []; l.push(a); byKey.set(a.key, l); }
     domainTotals[r.domain] = countInventoryDetail(r.detail);
@@ -374,35 +396,35 @@ export function scopeInventory(account: ResolvedAccountScope, reads: DomainRead[
         // Manual assignments naming an account that no longer holds any of this domain are ignored for
         // PLACEMENT and only resurface as `staleAssignment` on an item that ends up Unassigned anyway.
         const manual = asgs.filter((a) => holderSet.has(a.accountNumber));
-        // ADDRESSES ARE A SET, everything else is one account. An address is a fact about a place: four
-        // sites can reference one, each of their accounts can legitimately bill an E911 bundle for it,
+        // THE E911 KINDS ARE A SET, everything else is one account. Each is a fact about a place: four
+        // sites can reference one, each of their accounts can legitimately bill an E911 line for it,
         // and a rule that picks one leaves the others short. A user, a number and an SMS number are each
         // a fact about ONE thing, so the one-account rule is right for them and unchanged.
-        const address = isAddress(item.key);
-        const auto = autoOwners(at, holders, address);
-        const owners = ownersOf(auto, manual, address);
+        const shared = isSharedKind(item.key);
+        const auto = autoOwners(at, holders, shared);
+        const owners = ownersOf(auto, manual, shared);
         const mine = owners.find((o) => o.account === me);
         const sk = scopedKey(r.domain, item.key);
         if (mine) {
           into.push({ ...item, key: sk });
-          // Who else holds the very same item. Only ever populated for an address, because only an
-          // address can have more than one owner — the page uses it to say "also on <acct>" beside the
+          // Who else holds the very same item. Only ever populated for a shared kind, because only one
+          // of those can have more than one owner — the page uses it to say "also on <acct>" beside the
           // line rather than leaving the duplicate count reading as a double-bill.
           const others = owners.filter((o) => o.account !== me).map((o) => refOf(o.account, holders));
-          // What the automatic rule would have chosen INSTEAD — a counterfactual, and only a non-address
-          // has one. An address assignment ADDS an account rather than replacing one, so there is no
+          // What the automatic rule would have chosen INSTEAD — a counterfactual, and only a non-shared
+          // kind has one. A shared assignment ADDS an account rather than replacing one, so there is no
           // "instead" to name even when the automatic set holds exactly one other account: that account
-          // still holds the address, right now, and `sharedWith` says so in the present tense. Naming it
+          // still holds the item, right now, and `sharedWith` says so in the present tense. Naming it
           // here as what "would have" happened would describe a displacement that did not occur.
-          const only = !address && auto.length === 1 && auto[0]!.account !== me ? auto[0]! : undefined;
+          const only = !shared && auto.length === 1 && auto[0]!.account !== me ? auto[0]! : undefined;
           const automatic = mine.attribution === 'manual' && only
             ? { accountNumber: only.account, ...(only.site ? { site: only.site } : {}) }
             : undefined;
           meta[sk] = {
             domain: r.domain,
             attribution: mine.attribution,
-            // The single site, when the item has exactly one. A multi-site address has no one site to
-            // badge the row with, and `sharedWith` is what says where it actually is.
+            // The single site, when the item has exactly one. A multi-site shared item has no one site
+            // to badge the row with, and `sharedWith` is what says where it actually is.
             ...(at.sites.length === 1 ? { site: at.sites[0]! } : {}),
             ...(automatic ? { automatic } : {}),
             ...(others.length ? { sharedWith: others } : {}),
@@ -437,6 +459,11 @@ export function scopeInventory(account: ResolvedAccountScope, reads: DomainRead[
     place(r.detail.systemUsers, detail.systemUsers, ownSite, 'drop');
     place(r.detail.dids, detail.dids, attributed, 'unassigned');
     place(r.detail.e911Addresses, detail.e911Addresses, attributed, 'unassigned');
+    // `?? []` on the two newest lists: a per-domain cache entry written before netsapiens-lib 0.9.0 has
+    // neither, and the version bump on the cache key is a fact about NEW entries, not about the old ones
+    // still in flight when it lands.
+    place(r.detail.e911Endpoints ?? [], detail.e911Endpoints, attributed, 'unassigned');
+    place(r.detail.e911Legacy ?? [], detail.e911Legacy, attributed, 'unassigned');
     place(r.detail.smsNumbers, detail.smsNumbers, attributed, 'unassigned');
   }
   return { detail, inventory: countInventoryDetail(detail), meta, unassigned, domainTotals };

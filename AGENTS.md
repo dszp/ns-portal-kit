@@ -128,6 +128,11 @@ Settings, formats and defaults: [CONFIG.md](./CONFIG.md) ·
   service, and do not point it at a third party's webhook tester. *(This division — kit owns the surface,
   operator owns the message — is deliberate and may change in a future version; today the responder is
   theirs to build.)*
+- **Never add an origin to `PORTAL_HANDOFF_ORIGINS` the operator does not control, and never set it to
+  make a `handoff` menu entry validate.** A `handoff` entry POSTs each clicking user's live `ns_t` to that
+  origin — a working NetSapiens credential for that user. Two settings have to agree before it leaves; do
+  not be the second one. If the operator has no tool that verifies the token, leave the setting unset and
+  do not write the entry.
 - **Never widen `kit.status` to reach the console.** It accepts only `off`, `superadmin`, `super_user` or
   `reseller`; anything lower is refused when the configuration is parsed, which makes **every route after
   `/health` return 500** — the deploy itself succeeds, so this surfaces as a running Worker that answers

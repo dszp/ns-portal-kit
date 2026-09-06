@@ -1,5 +1,5 @@
 /** Offline test for account scoping. pnpm test:onebillscope */
-import { resolveAccountScope, domainHolders, accountHolders, scopeInventory, scopedKey, splitScopedKey } from './onebillScope.js';
+import { resolveAccountScope, domainHolders, accountHolders, isSharedKind, scopeInventory, scopedKey, splitScopedKey } from './onebillScope.js';
 import { OnebillRequestError, type LinkReport } from './onebill.js';
 import { listDomainInventory, attributeDomainInventory } from '@dszp/netsapiens-lib';
 
@@ -220,5 +220,58 @@ ok(thrown(() => splitScopedKey('ext:100')) instanceof Error, 'a key with no slas
     { domain: 'branch.example', detail, attribution, assignments: [] },
   ], holders)) instanceof Error, 'the same domain twice in reads throws');
 }
+// ── E911 endpoints and legacy numbers are SHARED kinds, exactly as an address is ────────────────────
+{
+  // One endpoint, referenced from North and South; one legacy number, referenced from the same two.
+  // Both are facts about a place the carrier bills for, so both follow the address's set rule.
+  const snapE = { meta: { domain: 'branch.example' }, users: [
+    { user: '100', site: 'North', 'service-code': '', 'emergency-address-id': 'a-1', 'caller-id-number-emergency': '13175550100' },
+    { user: '200', site: 'South', 'service-code': '', 'emergency-address-id': 'a-1', 'caller-id-number-emergency': '3175550100' },
+    { user: '110', site: 'North', 'service-code': '', 'caller-id-number-emergency': '3175550900' },
+    { user: '210', site: 'South', 'service-code': '', 'caller-id-number-emergency': '3175550900' },
+  ], phonenumbers: [], smsnumbers: [],
+    addresses: [{ 'emergency-address-id': 'a-1', 'address-name': 'Shared' }],
+    addressEndpoints: [{ 'emergency-address-id': '3175550100', 'address-name': 'Shared', 'caller-name': 'Branch', 'address-line-1': '1 Main St', 'address-city': 'Springfield' }] };
+  const dE = listDomainInventory(snapE), atE = attributeDomainInventory(snapE);
+  const holdersE = { 'branch.example': domainHolders(REPORT(), 'branch.example') };
+  const northE = resolveAccountScope(REPORT(), { account: 'CLI00002' });
+  const scopedNorthE = { ...northE, scopes: [northE.scopes[0]!], domains: ['branch.example'] };
+  const read = (assignments: never[] | { domain: string; key: string; accountNumber: string; label: string; decidedBy: string; decidedAt: string }[]) =>
+    [{ domain: 'branch.example', detail: dE, attribution: atE, assignments }];
+
+  const n = scopeInventory(scopedNorthE, read([]), holdersE);
+  ok(n.detail.e911Endpoints.map((x) => x.key).join() === 'branch.example/e911:3175550100', 'North holds the endpoint its own users reference');
+  ok(n.inventory.e911Endpoints === 1 && n.inventory.e911Legacy === 1, 'and the two new dimensions are counted on the scoped slice');
+  ok(!n.unassigned.some((u) => u.key.startsWith('e911')), 'neither is Unassigned for being shared');
+  ok(JSON.stringify(n.meta['branch.example/e911:3175550100']!.sharedWith) === JSON.stringify([{ accountNumber: 'CLI00003', accountName: 'Branch South' }]),
+    'sharedWith names the OTHER holder, by number and name');
+  ok(n.meta['branch.example/e911:3175550100']!.site === undefined, 'placed by site with no single site to name');
+  ok(JSON.stringify(n.meta['branch.example/e911legacy:3175550900']!.sharedWith) === JSON.stringify([{ accountNumber: 'CLI00003', accountName: 'Branch South' }]),
+    'and a legacy number shares the same way');
+
+  const south = scopeInventory(resolveAccountScope(REPORT(), { account: 'CLI00003' }), read([]), holdersE);
+  ok(south.detail.e911Endpoints.length === 1 && south.detail.e911Legacy.length === 1, 'South holds the very same endpoint and legacy number');
+
+  // A manual assignment ADDS an account rather than replacing the automatic ones — the address rule.
+  const add = [{ domain: 'branch.example', key: 'e911:3175550100', accountNumber: 'CLI00003', label: 'x', decidedBy: 'x', decidedAt: 'y' }];
+  const kept = scopeInventory(scopedNorthE, read(add), holdersE);
+  ok(kept.detail.e911Endpoints.length === 1 && kept.meta['branch.example/e911:3175550100']!.attribution === 'site',
+    'an assignment naming another account leaves this one holding the endpoint automatically');
+  const named = scopeInventory(resolveAccountScope(REPORT(), { account: 'CLI00003' }), read(add), holdersE);
+  ok(named.meta['branch.example/e911:3175550100']!.attribution === 'manual' && named.meta['branch.example/e911:3175550100']!.automatic === undefined,
+    'and the named account holds it as manual, with no automatic counterfactual - nothing was displaced');
+
+  // The remainder rule: an unheld referencing site sends it to the whole-domain account too.
+  const mixed = { 'branch.example': { whole: { accountNumber: 'CLI00001' }, bySite: { North: { accountNumber: 'CLI00002' } } } };
+  const whole = { accountNumber: 'CLI00001', scopes: [{ domain: 'branch.example' }], domains: ['branch.example'] };
+  const w = scopeInventory(whole, read([]), mixed);
+  ok(w.detail.e911Endpoints.length === 1 && w.meta['branch.example/e911:3175550100']!.attribution === 'domain',
+    'an endpoint with an unheld referencing site reaches the whole-domain account as the remainder');
+  ok(w.detail.e911Legacy.length === 1, 'and so does a legacy number');
+}
+ok(isSharedKind('addr:a-1') && isSharedKind('e911:3175550100') && isSharedKind('e911legacy:3175550900'), 'the three E911 kinds are shared kinds');
+ok(!isSharedKind('ext:100') && !isSharedKind('did:13175550100') && !isSharedKind('sms:13175550100'), 'and nothing else is');
+
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

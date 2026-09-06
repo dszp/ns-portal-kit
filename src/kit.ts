@@ -548,9 +548,46 @@ function fillRaw(s){return String(s==null?'':s).split('{page}').join(pgRaw)}
 var seen=[];
 add.forEach(function(m){if(!m||!m.url||seen.indexOf(m.url)>=0)return;seen.push(m.url);
 var li=document.createElement('li');li.className='_svxadd';li.setAttribute('data-u',m.url);
-var a=document.createElement('a');a.textContent=fillRaw(m.label);a.href=fill(m.url);a.target='_blank';a.rel='noopener noreferrer';
-if(m.title)a.title=fillRaw(m.title);li.appendChild(a);
+// The literal, not truthiness: the server refuses any other value, and a client that read true as
+// "yes" would be the one place a second spelling could send the token.
+if(m.handoff==='ns_t'){li.appendChild(menuHandoff(fill(m.url),fillRaw(m.label),m.title?fillRaw(m.title):''))}
+else{var a=document.createElement('a');a.textContent=fillRaw(m.label);a.href=fill(m.url);a.target='_blank';a.rel='noopener noreferrer';
+if(m.title)a.title=fillRaw(m.title);li.appendChild(a)}
 if(before&&before.parentNode===ul)ul.insertBefore(li,before);else ul.appendChild(li)})}
+/**
+ * A HANDOFF ENTRY IS A FORM, NOT A LINK. It hands the caller's own session token to another tool, and a
+ * token in a URL lands in browser history, in the Referer of everything the destination then loads, and
+ * in every access log on the way -- so it travels in the body of ONE POST navigation, and the new tab's
+ * address bar holds nothing. The hidden field is EMPTY at render: a value set here would sit in the DOM
+ * for the life of the page, readable by any script or extension that walks it. It is filled inside the
+ * submit handler, which runs before the browser gathers the form data, and cleared again on the next
+ * tick once the navigation has read it. No token in the page ⇒ the submit is cancelled; an empty POST
+ * would only produce a confusing 401 in a fresh tab.
+ *
+ * This function never decides WHERE the token goes. The server emits a handoff entry only for a url whose
+ * origin is listed in PORTAL_HANDOFF_ORIGINS -- two settings, so a menu edit alone cannot re-aim it --
+ * and the receiver checks the browser's Origin header and verifies the JWT on its side. What is decided
+ * here is only WHEN the token leaves: at the click, and not before.
+ *
+ * rel="noopener" ONLY -- never "noreferrer" here. A cross-origin target=_blank navigation is opener-less
+ * by default and noopener makes that explicit; noreferrer would go further and set the request's referrer
+ * policy to no-referrer, and per Fetch a non-GET request under that policy carries "Origin: null". The
+ * receiver exact-matches the Origin header against its own allow-list, so with noreferrer every click
+ * would 403 in exactly the browsers that honour rel on a form. The default policy sends the portal's
+ * ORIGIN as Referer -- no path, no token -- which is what the receiver needs and nothing more.
+ */
+function menuHandoff(url,label,title){
+var f=document.createElement('form');f.className='_svxho';f.method='POST';f.action=url;f.target='_blank';f.setAttribute('rel','noopener');
+var h=document.createElement('input');h.type='hidden';h.name='ns_t';h.value='';f.appendChild(h);
+var b=document.createElement('button');b.type='submit';b.textContent=label;if(title)b.title=title;
+// Drawn as its sibling rows are. Bootstrap styles li > a and nothing else, so a button gets the same
+// box by hand -- inherit the font and colour, keep the row's padding, lose the button chrome.
+b.style.cssText='display:block;width:100%;text-align:left;background:none;border:0;margin:0;padding:3px 20px;font:inherit;line-height:20px;color:inherit;white-space:nowrap;cursor:pointer';
+f.appendChild(b);
+f.addEventListener('submit',function(e){var t=tok();
+if(!t){e.preventDefault();console.warn('menu handoff: no session token in this page, nothing sent');return}
+h.value=t;setTimeout(function(){h.value=''},0)});
+return f}
 /**
  * RELABEL STOCK ROWS IN PLACE. Same destination, same position, same anchor -- which is the whole reason
  * this is not just a hide plus an add: that pair needs the url, moves the row, and throws away the

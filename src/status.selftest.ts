@@ -218,8 +218,8 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // (a binding, alongside ASSETS and JWT_RATE_LIMITER). Pinned as an EXACT number on purpose — `>= 60`
   // was a floor that passed by coincidence, so deleting a row did not trip it. Bump this deliberately
   // when adding one; the drift guard in statusModel.selftest.ts is what proves the table matches
-  // `interface Env`.
-  ok(SETTINGS.length === 73, `sanity: the descriptor table has exactly 73 rows (got ${SETTINGS.length})`);
+  // `interface Env`. 74 with PORTAL_HANDOFF_ORIGINS, the origin allow-list a `handoff` menu entry needs.
+  ok(SETTINGS.length === 74, `sanity: the descriptor table has exactly 74 rows (got ${SETTINGS.length})`);
   // Every row is rendered now: there is one deployment shape, so no setting is inapplicable to it.
   ok(doc.settings.length === SETTINGS.length,
     `every row is rendered (${doc.settings.length} of ${SETTINGS.length})`);

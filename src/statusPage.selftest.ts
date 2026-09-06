@@ -1709,13 +1709,20 @@ function builderSource(script: string, exports: string): string {
     { NS_SERVER: 'api.example.com', NS_PORTAL_ISS: 'manage.example.com', PORTAL_MODE: '1',
       PORTAL_HANDOFF_URL: '', PORTAL_SUPERADMINS: 'boss@example.com', CACHE_SCOPE: 'dev',
       RINGOTEL_API_KEY: 'k', DOCUMO_DOMAINS: 'acme.example',
+      // The second key a handoff entry needs; the resolve reply below has to carry it too, as the Worker's
+      // resolve route does, or the real resolver refuses the candidate the page was built from.
+      PORTAL_HANDOFF_ORIGINS: 'https://tools.example.com',
       PORTAL_MENUS: JSON.stringify({
         apps: {
           hide: { app: { ringotel: ['SNAPmobile Web'] }, '*': [] },
           // ⚠️ A {variable} on purpose. menuItemAt interpolates it and the preview resolves with no user
           // facts, so the plan's url is NOT this url — which is what made every entry using the feature
           // report itself as "not editable here".
-          add: { app: { ringotel: [{ label: 'App Admin', url: 'https://admin.example/?ext={ext}' }] }, '*': [] },
+          // And ONE handoff entry beside it: the picture has to say which row sends the session.
+          add: { app: { ringotel: [
+            { label: 'App Admin', url: 'https://admin.example/?ext={ext}' },
+            { label: 'Bulk tool', url: 'https://tools.example.com/launch', handoff: 'ns_t' },
+          ] }, '*': [] },
           // A half this editor does not edit, drawn read-only in the picture.
           rename: [{ from: 'User Portal', to: 'My Dashboard' }],
         },
@@ -1776,8 +1783,9 @@ function builderSource(script: string, exports: string): string {
   const REPLY = (() => {
     const matched = {} as never;
     const rawAdds = {} as never;
-    const plan = resolveMenus({ PORTAL_MENUS: d.menus.raw } as never, MENU_CTX as never, matched, rawAdds);
-    return { plan, matched, rawAdds, appsHide: appsHideSources({ PORTAL_MENUS: d.menus.raw } as never, MENU_CTX as never) };
+    const menuEnv = { PORTAL_MENUS: d.menus.raw, PORTAL_HANDOFF_ORIGINS: 'https://tools.example.com' } as never;
+    const plan = resolveMenus(menuEnv, MENU_CTX as never, matched, rawAdds);
+    return { plan, matched, rawAdds, appsHide: appsHideSources(menuEnv, MENU_CTX as never) };
   })();
   const askCount = () => dom.posts.filter((m) => m[SPK_BRIDGE.tag] === SPK_BRIDGE.resolveRequest).length;
   /** Run the real cycle to a standstill: fire the timers, answer whatever they asked, repeat. */
@@ -1853,6 +1861,13 @@ function builderSource(script: string, exports: string): string {
     `[dom] an entry whose url carries a variable is still editable (${addRow.textContent})`);
   ok(!addRow.textContent.includes('not editable here'),
     '[dom] and it does not claim otherwise');
+
+  // The one entry that sends a credential is named as such. This picture is where an operator audits what
+  // a menu sends, and a handoff row that looked like a link would hide exactly the row that matters.
+  const hoRow = rows.find((r) => r.textContent.includes('Bulk tool'))!;
+  ok(!!hoRow && hoRow.textContent.includes('hands the session to https://tools.example.com'),
+    `[dom] a handoff entry says it hands the session over, and to which origin (${hoRow && hoRow.textContent})`);
+  ok(!addRow.textContent.includes('hands the session'), '[dom] and a plain entry does not');
 
   // The kit's OWN rows are drawn and marked not-config: they are in the menu the user opens, they cannot
   // be hidden by config (menuHide skips them), and a picture missing them invites an operator to add a
@@ -1953,8 +1968,9 @@ function builderSource(script: string, exports: string): string {
     const REPLY_BASIC = (() => {
       const matched = {} as never;
       const rawAdds = {} as never;
-      const plan = resolveMenus({ PORTAL_MENUS: d.menus.raw } as never, BASIC_CTX as never, matched, rawAdds);
-      return { plan, matched, rawAdds, appsHide: appsHideSources({ PORTAL_MENUS: d.menus.raw } as never, BASIC_CTX as never) };
+      const menuEnv = { PORTAL_MENUS: d.menus.raw, PORTAL_HANDOFF_ORIGINS: 'https://tools.example.com' } as never;
+      const plan = resolveMenus(menuEnv, BASIC_CTX as never, matched, rawAdds);
+      return { plan, matched, rawAdds, appsHide: appsHideSources(menuEnv, BASIC_CTX as never) };
     })();
     const wasScope = api.mbPersona.scope, wasApps = api.mbPersona.apps.slice();
     api.mbPersona.scope = 'Basic User';
@@ -2041,8 +2057,9 @@ function builderSource(script: string, exports: string): string {
     const REPLY_NONE = (() => {
       const matched = {} as never;
       const rawAdds = {} as never;
-      const plan = resolveMenus({ PORTAL_MENUS: d.menus.raw } as never, NONE_CTX as never, matched, rawAdds);
-      return { plan, matched, rawAdds, appsHide: appsHideSources({ PORTAL_MENUS: d.menus.raw } as never, NONE_CTX as never) };
+      const menuEnv = { PORTAL_MENUS: d.menus.raw, PORTAL_HANDOFF_ORIGINS: 'https://tools.example.com' } as never;
+      const plan = resolveMenus(menuEnv, NONE_CTX as never, matched, rawAdds);
+      return { plan, matched, rawAdds, appsHide: appsHideSources(menuEnv, NONE_CTX as never) };
     })();
     // Q2 — the operator moves on before Q1 comes back. This is now the question on screen.
     api.mbPersona.apps = ['ringotel'];

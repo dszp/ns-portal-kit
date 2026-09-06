@@ -26,7 +26,38 @@ export interface MenuItem {
   label: string;
   url: string;
   title?: string;
+  /**
+   * HAND THE CALLER'S SESSION TO THE DESTINATION. Present ⇒ the applier draws a `<form method="POST">`
+   * carrying one hidden `ns_t` field instead of an `<a href>`, and the receiver authenticates the operator
+   * from the form body — see {@link HANDOFF_KINDS} for why it is a form, and what the value names.
+   *
+   * A literal, not a boolean: a second kind of handoff is a new value here, not a second flag beside
+   * this one. Absent on a plain link, never `false` — the applier tests for presence.
+   */
+  handoff?: HandoffKind;
 }
+
+/**
+ * What a menu entry may hand to its destination. One kind today: the portal session token, POSTed as a
+ * form field named `ns_t` and never anything else.
+ *
+ * WHY A FORM AND NOT A LINK. `ns_t` is a working NetSapiens credential for the caller. In a URL it lands
+ * in browser history, in the `Referer` of everything the destination page then loads, and in every
+ * access log between here and there; a form POST puts it in the body of one navigation, and the new
+ * tab's address bar holds nothing. So a handoff entry MUST be a POST, and the value is read from the
+ * page's storage at the moment of submit — never at render, where it would sit in the DOM for the life
+ * of the page.
+ *
+ * WHY A SECOND SETTING. An `add` entry's url is already validated to https with a fixed authority, and
+ * for a link that is enough: the worst a wrong url does is send a click somewhere unhelpful. A handoff
+ * sends the token, so the destination is a decision the operator has to make TWICE — once in the menu,
+ * once in {@link MenuEnv.PORTAL_HANDOFF_ORIGINS} — and an edit to the menu alone can never route the
+ * credential somewhere new. The receiver is expected to check the browser's `Origin` header against its
+ * own list and to verify the JWT it is handed; this kit only refuses to build the form for anywhere it
+ * was not told twice.
+ */
+export const HANDOFF_KINDS = ['ns_t'] as const;
+export type HandoffKind = (typeof HANDOFF_KINDS)[number];
 
 /**
  * RELABEL A STOCK ENTRY IN PLACE — same destination, same row, same anchor.
@@ -248,6 +279,12 @@ export interface MenuEnv {
   /** Domains to treat as Documo-active until the integration ships — see {@link documoEnabled}. */
   DOCUMO_DOMAINS?: string;
   PORTAL_APPS_HIDE?: string;
+  /**
+   * Comma-separated EXACT origins (`https://host[:port]`) a `handoff` entry may POST the session token to.
+   * Unset or empty ⇒ no handoff entry is legal, and writing one is a startup error naming this setting.
+   * The second of the two keys a handoff needs — see {@link HANDOFF_KINDS}.
+   */
+  PORTAL_HANDOFF_ORIGINS?: string;
 }
 
 /** Which app is active for the domain being resolved (`'none'` when nothing is). */
@@ -370,11 +407,54 @@ function interpolate(s: string, vars: Record<string, string> | undefined, path: 
   });
 }
 
-const menuItemAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuItem => {
+/**
+ * PORTAL_HANDOFF_ORIGINS, parsed and checked. `null` when the setting is absent or blank, so the error a
+ * handoff entry then gets can say "set it" rather than "not listed in an empty list".
+ *
+ * Each entry has to BE an origin — `new URL(x).origin` printed back equals it, give or take the trailing
+ * slash a browser prints one with. `https://tools.example.com/launch` is refused rather than accepted
+ * and never matched, because an allow-list entry that silently admits nothing is a handoff that is
+ * refused for every user with the setting apparently correct. https only: the receiver is being handed
+ * a credential, and the browser's `Origin` header for a plain-http destination would say so too.
+ *
+ * Origins are lowercase by construction (`URL` lowercases the host), which is what makes the item-side
+ * comparison exact rather than case-sensitive on a part of a URL browsers do not treat that way.
+ */
+function parseHandoffOrigins(env: MenuEnv): string[] | null {
+  const src = (env.PORTAL_HANDOFF_ORIGINS ?? '').trim();
+  if (!src) return null;
+  const out: string[] = [];
+  for (const raw of src.split(',').map((x) => x.trim()).filter(Boolean)) {
+    let u: URL;
+    try { u = new URL(raw); } catch {
+      throw new MenuConfigError(`PORTAL_HANDOFF_ORIGINS entry "${raw}" is not an origin — write it as https://host[:port]`);
+    }
+    if (u.protocol !== 'https:') throw new MenuConfigError(`PORTAL_HANDOFF_ORIGINS entry "${raw}" must be https`);
+    if (u.href !== u.origin && u.href !== `${u.origin}/`) {
+      throw new MenuConfigError(`PORTAL_HANDOFF_ORIGINS entry "${raw}" carries a path, query or credentials — an origin is scheme + host [+ port] only`);
+    }
+    out.push(u.origin);
+  }
+  return out;
+}
+
+/**
+ * `origins` is the parsed {@link MenuEnv.PORTAL_HANDOFF_ORIGINS} (`null` ⇒ unset), threaded in rather than
+ * re-read per item so the list is parsed — and its own errors thrown — once per resolve.
+ */
+const menuItemAt = (ctx: TargetCtx, origins: string[] | null) => (v: unknown, path: string): MenuItem => {
   if (!isObj(v)) throw new MenuConfigError(`${path} must be an object`);
   const rawLabel = typeof v.label === 'string' ? v.label.trim() : '';
   const rawUrl = typeof v.url === 'string' ? v.url.trim() : '';
   if (!rawLabel) throw new MenuConfigError(`${path} needs a label`);
+  // The handoff field, read by PRESENCE and then by exact value. Any other value — `true`, `"yes"`, a
+  // different case — is refused rather than read as "yes" or ignored: read as yes would send the token on
+  // a spelling nobody agreed, ignored would quietly draw a link where the operator asked for a handoff.
+  const hasHandoff = Object.prototype.hasOwnProperty.call(v, 'handoff');
+  if (hasHandoff && !(HANDOFF_KINDS as readonly unknown[]).includes(v.handoff)) {
+    throw new MenuConfigError(`${path}.handoff must be ${HANDOFF_KINDS.map((k) => `"${k}"`).join(' or ')} — omit it for a plain link`);
+  }
+  const handoff = hasHandoff ? (v.handoff as HandoffKind) : undefined;
   // Validate the SCHEME on the template, before substitution: a value can only ever land inside a
   // query/path, never at the front, so it cannot turn an https link into something else.
   if (!ALLOWED_SCHEME.test(rawUrl)) throw new MenuConfigError(`${path}.url must start with https:// or mailto:`);
@@ -389,11 +469,27 @@ const menuItemAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuItem => {
       throw new MenuConfigError(`${path}.url must not use a {variable} in the host — the destination has to be fixed`);
     }
   }
+  if (handoff) {
+    // A handoff is a POST, so only https can carry it — mailto: is a scheme the general rule allows and
+    // this one cannot. Checked on the TEMPLATE, like the authority rule above: the host was just proven
+    // variable-free, so the origin computed here is the origin the operator wrote, for every user.
+    if (!/^https:\/\//i.test(rawUrl)) throw new MenuConfigError(`${path}.url must be https:// to carry a handoff — a POST cannot go to mailto:`);
+    let origin: string;
+    try { origin = new URL(rawUrl).origin; } catch {
+      throw new MenuConfigError(`${path}.url is not a URL a browser could POST to`);
+    }
+    if (origins === null) {
+      throw new MenuConfigError(`${path} hands the session token to ${origin}, but PORTAL_HANDOFF_ORIGINS is not set — a handoff needs the destination listed there as well`);
+    }
+    if (!origins.includes(origin)) {
+      throw new MenuConfigError(`${path} hands the session token to ${origin}, which PORTAL_HANDOFF_ORIGINS does not list (it allows: ${origins.join(', ')})`);
+    }
+  }
   const url = interpolate(rawUrl, ctx.vars, `${path}.url`);
   const label = interpolate(rawLabel, ctx.vars, `${path}.label`, false);
   const rawTitle = typeof v.title === 'string' && v.title.trim() ? v.title.trim() : undefined;
   const title = rawTitle ? interpolate(rawTitle, ctx.vars, `${path}.title`, false) : undefined;
-  return { label, url, ...(title ? { title } : {}) };
+  return { label, url, ...(title ? { title } : {}), ...(handoff ? { handoff } : {}) };
 };
 
 /**
@@ -410,13 +506,15 @@ const menuItemAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuItem => {
  * would shift every index after them.
  */
 interface MenuItemPair { it: MenuItem; raw: MenuItem }
-const menuItemPairAt = (ctx: TargetCtx) => (v: unknown, path: string): MenuItemPair => {
-  const it = menuItemAt(ctx)(v, path);
+const menuItemPairAt = (ctx: TargetCtx, origins: string[] | null) => (v: unknown, path: string): MenuItemPair => {
+  const it = menuItemAt(ctx, origins)(v, path);
   const o = v as Record<string, unknown>;
   const label = String(o.label ?? '').trim();
   const url = String(o.url ?? '').trim();
   const rawTitle = typeof o.title === 'string' && o.title.trim() ? o.title.trim() : undefined;
-  return { it, raw: { label, url, ...(rawTitle ? { title: rawTitle } : {}) } };
+  // `handoff` is never interpolated, so the raw half carries the validated value as-is. Dropping it here
+  // would make the console's round-trip emit a plain link where the operator wrote a handoff.
+  return { it, raw: { label, url, ...(rawTitle ? { title: rawTitle } : {}), ...(it.handoff ? { handoff: it.handoff } : {}) } };
 };
 
 /**
@@ -872,6 +970,9 @@ export function resolveMenus(
   rawRenames?: Record<MenuName, MenuRename[]>,
 ): Record<MenuName, MenuPlan> {
   const menus = rawMenus(env);
+  // Parsed ONCE per resolve, before any menu: a malformed allow-list is a fault in its own right, and it
+  // has to surface whether or not a handoff entry exists yet — an operator lists the origin first.
+  const origins = parseHandoffOrigins(env);
 
   const out = {} as Record<MenuName, MenuPlan>;
   for (const name of MENU_NAMES) {
@@ -884,7 +985,7 @@ export function resolveMenus(
     const hide = name === 'apps'
       ? appsHideSources(env, ctx, hs).effective
       : resolveTargeted<string>(cfg.hide, ctx, `PORTAL_MENUS["${name}"].hide`, asStringItem, hs, mergeHides);
-    const pairs = resolveTargeted<MenuItemPair>(cfg.add, ctx, `PORTAL_MENUS["${name}"].add`, menuItemPairAt(ctx), as, mergeAdds);
+    const pairs = resolveTargeted<MenuItemPair>(cfg.add, ctx, `PORTAL_MENUS["${name}"].add`, menuItemPairAt(ctx, origins), as, mergeAdds);
     const rs: SourceOut = { sources: [] };
     const rpairs = resolveTargeted<MenuRenamePair>(cfg.rename, ctx, `PORTAL_MENUS["${name}"].rename`, menuRenamePairAt(ctx), rs, mergeRenames);
     out[name] = { hide, add: pairs.map((p) => p.it), rename: rpairs.map((p) => p.it) };

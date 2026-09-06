@@ -21,7 +21,7 @@ import type { LinkReport, SetupCheck, SetupMissing } from './onebill.js';
 import type { AccountReport, ScopedComparisonItem, ScopedComparisonRow } from './onebillAccount.js';
 import type { AccountRef, UnassignedItem } from './onebillScope.js';
 import type { ComparisonItem, ComparisonRow, RecurringComparison } from '@dszp/onebill-lib';
-import type { DomainInventory, DomainInventoryDetail, ExtensionItem, InventoryItem, NumberItem } from '@dszp/netsapiens-lib';
+import type { DomainInventory, DomainInventoryDetail, EndpointItem, ExtensionItem, InventoryItem, NumberItem } from '@dszp/netsapiens-lib';
 
 export interface OnebillDoc {
   /** The caller holds `onebill.write`. False ⇒ the write surface is not rendered AT ALL — see below. */
@@ -378,10 +378,17 @@ return o}
 // One dispatcher over a record already in hand, so a placed item and an Unassigned one cannot describe
 // the same thing two ways. The KIND comes off the bare key; the record comes from wherever the caller
 // found it (rep.detail for a placed item, the row itself for an unassigned one).
+// An ENDPOINT is a callback number in the label cell and nothing else; what an operator reconciling an
+// E911 line needs beside it is who the carrier announces and where responders are sent.
+function obEpDetail(e){var p=[];
+if(e.callerName)p.push(esc(e.callerName));
+if(e.billingAddress)p.push(esc(e.billingAddress));
+return p.join(' · ')}
 function obRecDetail(k,rec){if(!rec)return '';
 var b=obBareKey(k);
 if(b.indexOf('ext:')===0)return obExtDetail(rec);
 if(b.indexOf('did:')===0)return obDidDetail(rec);
+if(b.indexOf('e911:')===0)return obEpDetail(rec);
 return ''}
 // The scoped detail record behind a placed item's key, or null. The comparison carries identities and
 // counts, never names, so this is the join back to them; the KIND comes off the bare key and the lookup
@@ -393,6 +400,7 @@ return ''}
 function obDetailRec(k,rep){var d=rep.detail||{},b=obBareKey(k),i;
 if(b.indexOf('ext:')===0){var xs=(d.extensions||[]).concat(d.systemUsers||[]);for(i=0;i<xs.length;i++)if(xs[i].key===k)return xs[i];return null}
 if(b.indexOf('did:')===0){var ns=d.dids||[];for(i=0;i<ns.length;i++)if(ns[i].key===k)return ns[i];return null}
+if(b.indexOf('e911:')===0){var es=d.e911Endpoints||[];for(i=0;i<es.length;i++)if(es[i].key===k)return es[i];return null}
 return null}
 // "as <plan>" is part of the DECISION, not of the item: an operator who tags nine seats to a tier that
 // bills eight has recorded something for the next reader, and the next reader can only see it here.
@@ -409,6 +417,10 @@ function obKind(k,rec){var b=obBareKey(k);
 if(b.indexOf('ext:')===0)return '<span class="kind kind-ext">extension</span>';
 if(b.indexOf('did:')===0)return (rec&&rec.fax===true)?'<span class="kind kind-fax">fax line</span>':'<span class="kind kind-did">number</span>';
 if(b.indexOf('addr:')===0)return '<span class="kind kind-addr">E911 address</span>';
+// e911legacy: FIRST. It does not begin with 'e911:' (there is no colon at that position), so the order
+// is not load-bearing today - but a reader should not have to work that out to see they are two rows.
+if(b.indexOf('e911legacy:')===0)return '<span class="kind kind-e911legacy">Legacy E911</span>';
+if(b.indexOf('e911:')===0)return '<span class="kind kind-e911">E911 endpoint</span>';
 if(b.indexOf('sms:')===0)return '<span class="kind kind-sms">SMS number</span>';
 return ''}
 // What ONE co-holder's own bill says about the same group. billed -1 is "their subscriptions would not
@@ -458,19 +470,23 @@ return o}
 function obMoveCtl(it,rep){var hs=obOtherHolders(it,rep);if(!hs.length)return '';
 var o='<select data-role="assign-to">'+obAcctOpts(hs);
 return o+'</select><button type="button" class="btn small" data-act="assign" data-placed="1" data-domain="'+esc(it.domain)+'" data-key="'+esc(obBareKey(it.key))+'" data-label="'+esc(it.label)+'">Move</button>'}
-// Who could still be ADDED to this address's set: the domain's other holders, minus the ones already on
-// it. Offering an account that already holds the address is a control whose only outcome is a write that
-// changes nothing.
+// Who could still be ADDED to this item's set: the domain's other holders, minus the ones already on it.
+// Offering an account that already holds it is a control whose only outcome is a write that changes
+// nothing.
 function obAddable(it,rep){var hs=obOtherHolders(it,rep),ws=it.sharedWith||[],o=[],i,j,on;
 for(i=0;i<hs.length;i++){on=false;
 for(j=0;j<ws.length;j++)if(ws[j].accountNumber===hs[i].accountNumber)on=true;
 if(!on)o.push(hs[i])}
 return o}
-// AN ADDRESS IS PLACED ON A SET, so its controls are add-one and remove-one rather than Move: moving it
-// would take an E911 bundle off an account that really does bill for the place. Remove appears only where
-// this account is in the MANUAL set — an automatic placement belongs to the site link, and the site link
-// would put it straight back, so a button offering to undo it is a button that does nothing.
-function obAddrCtl(it,rep){var o='',as=obAddable(it,rep);
+// Which kinds an account SHARES rather than owns outright - an E911 address, an endpoint, a legacy
+// number. Mirrors isSharedKind in onebillScope.ts, which is what the assign route enforces; the two
+// disagreeing would offer a control the route then refuses.
+function obSharedKind(b){return b.indexOf('addr:')===0||b.indexOf('e911:')===0||b.indexOf('e911legacy:')===0}
+// A SHARED KIND IS PLACED ON A SET, so its controls are add-one and remove-one rather than Move: moving
+// it would take an E911 line off an account that really does bill for the place. Remove appears only
+// where this account is in the MANUAL set - an automatic placement belongs to the site link, and the
+// site link would put it straight back, so a button offering to undo it does nothing.
+function obSharedCtl(it,rep){var o='',as=obAddable(it,rep);
 if(it.attribution==='manual')o+='<button type="button" class="btn small" data-act="unassign" data-domain="'+esc(it.domain)+'" data-key="'+esc(obBareKey(it.key))+'" data-label="'+esc(it.label)+'">Remove from this account</button>';
 if(as.length)o+='<select data-role="assign-to">'+obAcctOpts(as)+'</select><button type="button" class="btn small" data-act="assign" data-domain="'+esc(it.domain)+'" data-key="'+esc(obBareKey(it.key))+'" data-label="'+esc(it.label)+'">Assign</button>';
 return o}
@@ -478,11 +494,11 @@ return o}
 // back. Clear assignment is keyed BARE beside its own domain, because that is the shape the assign route
 // reads: a scoped key would name the domain twice, once in a field nothing reads it from. Move comes last
 // because it is the only one of the three that sends the item somewhere else.
-// No data-placed on an address's Assign: it ADDS an account and clears nothing here, so the placeholder
-// that warns about losing this account's acceptance would be a sentence about the wrong write.
+// No data-placed on a shared kind's Assign: it ADDS an account and clears nothing here, so the
+// placeholder warning about losing this account's acceptance would be a sentence about the wrong write.
 function obItemCtl(it,rep){if(!obCanAct(rep))return '';
 var o='';
-if(obBareKey(it.key).indexOf('addr:')===0)return '<td class="act">'+obAddrCtl(it,rep)+'</td>';
+if(obSharedKind(obBareKey(it.key)))return '<td class="act">'+obSharedCtl(it,rep)+'</td>';
 if(it.attribution==='manual')o+='<button type="button" class="btn small" data-act="clear-assign" data-domain="'+esc(it.domain)+'" data-key="'+esc(obBareKey(it.key))+'" data-label="'+esc(it.label)+'">Clear assignment</button>';
 o+=obMoveCtl(it,rep);
 return '<td class="act">'+o+'</td>'}
@@ -652,16 +668,18 @@ o+='<tr data-unassigned-key="'+esc(u.key)+'" data-domain="'+esc(u.domain)+'">'
 o+='</tbody></table>'}
 return o}
 // What the WHOLE domain holds, beside the slice this account bills for — and only where the two differ,
-// which on a single-domain account they never do. Four numbers, because those are the four the comparison
-// rows are judged on; a breakdown here would be a second inventory nobody asked for.
+// which on a single-domain account they never do. One number per JUDGED dimension and no more; a
+// breakdown here would be a second inventory nobody asked for. E911 endpoints and legacy numbers joined
+// the list when they became billable dimensions, for the reason fax lines did before them: a domain
+// differing from this slice by nothing but its endpoints would otherwise print no line at all.
 function obDomainTotals(rep){var ds=rep.domains||[],t=rep.domainTotals||{},v=rep.inventory||{},o='',i;
 for(i=0;i<ds.length;i++){var d=ds[i];
 if(!Object.prototype.hasOwnProperty.call(t,d))continue;
 var x=t[d],xe=x.extensions||{},xd=x.dids||{},ve=v.extensions||{},vd=v.dids||{};
 // Fax lines are in the test AND in the sentence: they are a judged dimension of their own now, and a
 // domain differing from this slice by nothing but its fax lines would otherwise print no line at all.
-if(xe.total===ve.total&&xd.total===vd.total&&xd.fax===vd.fax&&x.e911Addresses===v.e911Addresses&&x.smsNumbers===v.smsNumbers)continue;
-o+='<div class="dim small">of '+esc(d)+': '+obNum(xe.total)+' extensions · '+obNum(xd.total)+' numbers · '+obNum(xd.fax)+' fax lines · '+obNum(x.e911Addresses)+' E911 addresses · '+obNum(x.smsNumbers)+' SMS numbers</div>'}
+if(xe.total===ve.total&&xd.total===vd.total&&xd.fax===vd.fax&&x.e911Endpoints===v.e911Endpoints&&x.e911Legacy===v.e911Legacy&&x.e911Addresses===v.e911Addresses&&x.smsNumbers===v.smsNumbers)continue;
+o+='<div class="dim small">of '+esc(d)+': '+obNum(xe.total)+' extensions · '+obNum(xd.total)+' numbers · '+obNum(xd.fax)+' fax lines · '+obNum(x.e911Endpoints)+' E911 endpoints · '+obNum(x.e911Legacy)+' legacy E911 · '+obNum(x.e911Addresses)+' E911 addresses · '+obNum(x.smsNumbers)+' SMS numbers</div>'}
 return o}
 // A domain that would not read makes every count on this page a lower bound, so nothing is accepted from
 // it. Said where an Accept would have been, rather than only withheld: a panel that quietly dropped its
@@ -694,6 +712,10 @@ return '<h3>What is on the phone system</h3><div class="inv">'
 // field existed still renders, with the number it used to show.
 +'<div class="bd"><b>Numbers</b><ul><li>Total - '+obNum(d.all==null?d.total:d.all)+'</li><li>Toll-free - '+obNum(d.tollFree)+'</li><li>Local - '+obNum(d.local)+'</li>'
 +'<li>Fax lines - '+obNum(d.fax)+'</li>'
+// The ENDPOINT is the billed E911 unit, and a LEGACY number is the same thing on a domain that predates
+// endpoints - so they share a line, and the ADDRESS count stays beneath them as information. An address
+// is where responders are sent; nobody bills one.
++'<li>E911 endpoints - '+obNum(v.e911Endpoints)+' · legacy numbers - '+obNum(v.e911Legacy)+'</li>'
 +'<li>E911 addresses - '+obNum(v.e911Addresses)+'</li><li>SMS numbers - '+obNum(v.smsNumbers)+'</li></ul></div>'
 +'<div class="bd"><b>Devices</b><ul><li>Total - '+obNum(dv.total)+'</li></ul></div>'
 +obBreakdown('Devices by model',dv.byModel)
@@ -1327,14 +1349,22 @@ function didDetail(n: NumberItem): string {
     + (n.description ? ` · <span class="dim">${esc(n.description)}</span>` : '');
 }
 
+/** Mirrors `obEpDetail`: an ENDPOINT is a callback number in the label cell and nothing else; what an
+ *  operator reconciling an E911 line needs beside it is who the carrier announces and where responders
+ *  are sent. */
+function epDetail(e: EndpointItem): string {
+  return [e.callerName, e.billingAddress].filter(Boolean).map((x) => esc(x)).join(' · ');
+}
+
 /** Mirrors `obRecDetail`: one dispatcher over a record already in hand, so a placed item and an
  *  Unassigned one cannot describe the same thing two ways. The KIND comes off the bare key; the record
  *  comes from wherever the caller found it. */
-function recDetail(k: string, rec: ExtensionItem | NumberItem | undefined): string {
+function recDetail(k: string, rec: ExtensionItem | NumberItem | EndpointItem | undefined): string {
   if (!rec) return '';
   const b = bareKey(k);
   if (b.indexOf('ext:') === 0) return extDetail(rec as ExtensionItem);
   if (b.indexOf('did:') === 0) return didDetail(rec as NumberItem);
+  if (b.indexOf('e911:') === 0) return epDetail(rec as EndpointItem);
   return '';
 }
 
@@ -1349,11 +1379,12 @@ function recDetail(k: string, rec: ExtensionItem | NumberItem | undefined): stri
  * to its record, and two lookups of one key are two chances for the chip to say "number" while the cell
  * beside it describes a fax line.
  */
-function detailRec(k: string, rep: AccountReport): ExtensionItem | NumberItem | undefined {
+function detailRec(k: string, rep: AccountReport): ExtensionItem | NumberItem | EndpointItem | undefined {
   const d: Partial<DomainInventoryDetail> = rep.detail ?? {};
   const b = bareKey(k);
   if (b.indexOf('ext:') === 0) return (d.extensions ?? []).concat(d.systemUsers ?? []).find((e) => e.key === k);
   if (b.indexOf('did:') === 0) return (d.dids ?? []).find((y) => y.key === k);
+  if (b.indexOf('e911:') === 0) return (d.e911Endpoints ?? []).find((y) => y.key === k);
   return undefined;
 }
 
@@ -1377,7 +1408,7 @@ function itemChip(it: ComparisonItem): string {
  * before 0.7.0 has no `fax` on it) it reads "number", which is what it was called before fax lines were
  * counted apart.
  */
-function kindChip(key: string, rec?: ExtensionItem | NumberItem | InventoryItem): string {
+function kindChip(key: string, rec?: ExtensionItem | NumberItem | EndpointItem | InventoryItem): string {
   const b = bareKey(key);
   if (b.indexOf('ext:') === 0) return '<span class="kind kind-ext">extension</span>';
   if (b.indexOf('did:') === 0) {
@@ -1386,6 +1417,10 @@ function kindChip(key: string, rec?: ExtensionItem | NumberItem | InventoryItem)
       : '<span class="kind kind-did">number</span>';
   }
   if (b.indexOf('addr:') === 0) return '<span class="kind kind-addr">E911 address</span>';
+  // `e911legacy:` FIRST. It does not begin with `e911:` (there is no colon at that position), so the
+  // order is not load-bearing today — but a reader should not have to work that out to see they differ.
+  if (b.indexOf('e911legacy:') === 0) return '<span class="kind kind-e911legacy">Legacy E911</span>';
+  if (b.indexOf('e911:') === 0) return '<span class="kind kind-e911">E911 endpoint</span>';
   if (b.indexOf('sms:') === 0) return '<span class="kind kind-sms">SMS number</span>';
   return '';
 }
@@ -1452,20 +1487,27 @@ function moveCtl(it: ScopedComparisonItem, rep: AccountReport): string {
     + `</select><button type="button" class="btn small" data-act="assign" data-placed="1" data-domain="${esc(it.domain)}" data-key="${esc(bareKey(it.key))}" data-label="${esc(it.label)}">Move</button>`;
 }
 
-/** Mirrors `obAddable`: who could still be ADDED to this address's set — the domain's other holders,
- *  minus the ones already on it. Offering an account that already holds the address is a control whose
- *  only outcome is a write that changes nothing. */
+/** Mirrors `obAddable`: who could still be ADDED to this item's set — the domain's other holders, minus
+ *  the ones already on it. Offering an account that already holds it is a control whose only outcome is
+ *  a write that changes nothing. */
 function addable(it: ScopedComparisonItem, rep: AccountReport): AccountRef[] {
   const ws = it.sharedWith ?? [];
   return otherHolders(it, rep).filter((h) => !ws.some((w) => w.accountNumber === h.accountNumber));
 }
 
-/** Mirrors `obAddrCtl`. AN ADDRESS IS PLACED ON A SET, so its controls are add-one and remove-one rather
- *  than Move: moving it would take an E911 bundle off an account that really does bill for the place.
- *  Remove appears only where this account is in the MANUAL set — an automatic placement belongs to the
- *  site link, and the site link would put it straight back, so a button offering to undo it does
+/** Mirrors `obSharedKind`: which kinds an account SHARES rather than owns outright. The same three
+ *  `isSharedKind` names in `onebillScope.ts`, which is what the assign route enforces — a page offering
+ *  a control the route then refuses is worse than no control. Written out rather than imported because
+ *  the client copy beside it cannot import anything. */
+const sharedKind = (b: string): boolean =>
+  b.indexOf('addr:') === 0 || b.indexOf('e911:') === 0 || b.indexOf('e911legacy:') === 0;
+
+/** Mirrors `obSharedCtl`. A SHARED KIND IS PLACED ON A SET, so its controls are add-one and remove-one
+ *  rather than Move: moving it would take an E911 line off an account that really does bill for the
+ *  place. Remove appears only where this account is in the MANUAL set — an automatic placement belongs
+ *  to the site link, and the site link would put it straight back, so a button offering to undo it does
  *  nothing. */
-function addrCtl(it: ScopedComparisonItem, rep: AccountReport): string {
+function sharedCtl(it: ScopedComparisonItem, rep: AccountReport): string {
   const as = addable(it, rep);
   return (it.attribution === 'manual'
     ? `<button type="button" class="btn small" data-act="unassign" data-domain="${esc(it.domain)}" data-key="${esc(bareKey(it.key))}" data-label="${esc(it.label)}">Remove from this account</button>`
@@ -1485,13 +1527,13 @@ function addrCtl(it: ScopedComparisonItem, rep: AccountReport): string {
  * reads: a scoped key would name the domain twice, once in a field nothing reads it from. Move comes
  * last because it is the only one of the two that names another account.
  *
- * An ADDRESS takes the set controls instead (see {@link addrCtl}), and its Assign carries no
+ * A SHARED KIND takes the set controls instead (see {@link sharedCtl}), and its Assign carries no
  * `data-placed`: it adds an account and clears nothing here, so the placeholder warning about losing
  * this account's acceptance would be a sentence about the wrong write.
  */
 function itemCtl(it: ScopedComparisonItem, rep: AccountReport): string {
   if (!canAct(rep)) return '';
-  if (bareKey(it.key).indexOf('addr:') === 0) return `<td class="act">${addrCtl(it, rep)}</td>`;
+  if (sharedKind(bareKey(it.key))) return `<td class="act">${sharedCtl(it, rep)}</td>`;
   return '<td class="act">'
     + (it.attribution === 'manual'
       ? `<button type="button" class="btn small" data-act="clear-assign" data-domain="${esc(it.domain)}" data-key="${esc(bareKey(it.key))}" data-label="${esc(it.label)}">Clear assignment</button>`
@@ -1799,7 +1841,7 @@ function unassignedBlock(rep: AccountReport): string {
         // The same cell a placed item gets, from the record on the row: an operator deciding who a
         // number belongs to needs to know where it rings, and the label is a bare number until
         // something says so.
-        + `<td>${recDetail(u.key, u.item as ExtensionItem | NumberItem | undefined)}</td>`
+        + `<td>${recDetail(u.key, u.item as ExtensionItem | NumberItem | EndpointItem | undefined)}</td>`
         + `<td>${esc(u.reason)}${u.staleAssignment ? ` — assigned to ${esc(u.staleAssignment)}, which no longer holds this domain` : ''}</td>`
         + `${ctl}</tr>`;
     }).join('');
@@ -1808,10 +1850,11 @@ function unassignedBlock(rep: AccountReport): string {
 }
 
 /** Mirrors `obDomainTotals`: what the WHOLE domain holds, beside the slice this account bills for — and
- *  only where the two differ, which on a single-domain account they never do. Five numbers, because
- *  those are the five the comparison rows are judged on — fax lines joined the list when netsapiens-lib
- *  0.7.0 took them out of `dids.total`, and a domain differing from this slice by nothing but its fax
- *  lines would otherwise print no line at all. A breakdown here would be a second inventory. */
+ *  only where the two differ, which on a single-domain account they never do. One number per JUDGED
+ *  dimension and no more — fax lines joined the list when netsapiens-lib 0.7.0 took them out of
+ *  `dids.total`, and E911 endpoints and legacy numbers when 0.9.0 made them billable, each for the same
+ *  reason: a domain differing from this slice by nothing but that dimension would otherwise print no
+ *  line at all. A breakdown here would be a second inventory. */
 function domainTotalsLine(rep: AccountReport): string {
   const t = rep.domainTotals ?? {};
   const v: Partial<DomainInventory> = rep.inventory ?? {};
@@ -1823,9 +1866,11 @@ function domainTotalsLine(rep: AccountReport): string {
     const xe: Partial<DomainInventory['extensions']> = x.extensions ?? {};
     const xd: Partial<DomainInventory['dids']> = x.dids ?? {};
     if (xe.total === v.extensions?.total && xd.total === v.dids?.total && xd.fax === v.dids?.fax
+      && x.e911Endpoints === v.e911Endpoints && x.e911Legacy === v.e911Legacy
       && x.e911Addresses === v.e911Addresses && x.smsNumbers === v.smsNumbers) return '';
     return `<div class="dim small">of ${esc(d)}: ${num(xe.total)} extensions · ${num(xd.total)} numbers`
-      + ` · ${num(xd.fax)} fax lines · ${num(x.e911Addresses)} E911 addresses · ${num(x.smsNumbers)} SMS numbers</div>`;
+      + ` · ${num(xd.fax)} fax lines · ${num(x.e911Endpoints)} E911 endpoints · ${num(x.e911Legacy)} legacy E911`
+      + ` · ${num(x.e911Addresses)} E911 addresses · ${num(x.smsNumbers)} SMS numbers</div>`;
   }).join('');
 }
 
@@ -1874,6 +1919,10 @@ function inventoryBlock(rep: AccountReport): string {
     // field existed still renders, with the number it used to show.
     + `<div class="bd"><b>Numbers</b><ul><li>Total - ${num(d.all == null ? d.total : d.all)}</li><li>Toll-free - ${num(d.tollFree)}</li><li>Local - ${num(d.local)}</li>`
     + `<li>Fax lines - ${num(d.fax)}</li>`
+    // The ENDPOINT is the billed E911 unit, and a LEGACY number is the same thing on a domain that
+    // predates endpoints — so they share a line, and the ADDRESS count stays beneath them as
+    // information. An address is where responders are sent; nobody bills one.
+    + `<li>E911 endpoints - ${num(v.e911Endpoints)} · legacy numbers - ${num(v.e911Legacy)}</li>`
     + `<li>E911 addresses - ${num(v.e911Addresses)}</li><li>SMS numbers - ${num(v.smsNumbers)}</li></ul></div>`
     + `<div class="bd"><b>Devices</b><ul><li>Total - ${num(dv.total)}</li></ul></div>`
     + breakdown('Devices by model', dv.byModel)
@@ -2137,7 +2186,7 @@ input[data-role="note"] { font:inherit; font-size:.82rem; padding:.2rem .35rem; 
    be given one without touching the renderer. */
 .kind { display:inline-block; margin-right:.4rem; font-size:.65rem; letter-spacing:.04em;
         text-transform:uppercase; color:var(--dim); }
-.kind-ext, .kind-did, .kind-fax, .kind-addr, .kind-sms { }
+.kind-ext, .kind-did, .kind-fax, .kind-addr, .kind-e911, .kind-e911legacy, .kind-sms { }
 /* The other accounts this item is also on, and what each is billed for it. Under the label rather than
    beside it: there can be three, and a row that grows sideways pushes the numbers off the table. */
 .also { margin-top:.15rem; }
@@ -2401,10 +2450,8 @@ if(act==='clear-selected'){if(!confirm('Clear the '+nc+' selected accepted item'
 send('');return}
 if(act==='clear-shortfall'){if(!confirm('Clear the accepted '+gw+' on '+group+' for '+where+'?\n\nHistory keeps the record.'))return;
 send('');return}
-if(act==='accept-all'){if(!confirm('Accept all '+nc+' unreviewed item'+plural+' on '+group+' for '+where+'?'))return}
-else if(act==='accept-selected'){if(!confirm('Accept the '+nc+' selected unreviewed item'+plural+' on '+group+' for '+where+'?'))return}
-else if(act==='accept-shortfall'){var ob=Number(t.getAttribute('data-observed')||0),bi=Number(t.getAttribute('data-billed')||0);
-if(!confirm('Record '+ob+' live as the accepted count for '+group+' on '+where+', against '+bi+' billed?'))return}
+// An accept asks nothing here: the note-and-plan step that follows is the confirmation, and its Save
+// is the click that writes. Clears above still confirm — they undo a recorded decision in one click.
 // A shortfall is a decision about a COUNT, so it has no plan to be billed as and gets no picker. The
 // item forms do: which plan they are billed as is the one thing about an acceptance the numbers do not
 // already say.
@@ -2576,6 +2623,9 @@ OB_SORT=obSortNext(OB_SORT,key);
 obApplySortUI();if(OB_LAST_REP)render(OB_LAST_REP)}}
 for(var obsi=0;obsi<OB_SORT_THS.length;obsi++)if(OB_SORT_THS[obsi].btn)OB_SORT_THS[obsi].btn.addEventListener('click',obSortClick(OB_SORT_THS[obsi].key));
 function render(rep){OB_LAST_REP=rep;obSay('');
+// A links report is the LIST view. If an account panel is open (header Refresh while reading one),
+// close it first, or the list un-hides underneath the panel and both show at once.
+if(elPanel&&!elPanel.hidden)obPanelHide();
 if(elGen)elGen.textContent=obHeadline(rep,Date.now(),fmtWhen);
 if(elReq)elReq.textContent=(rep.requestCount||0)+' upstream requests'+((rep.retried||0)>0?' ('+rep.retried+' retried)':'');
 // OneBill has not declared the group this deployment maps links onto: the table, the filter bar and
@@ -2699,8 +2749,11 @@ var OB_OPEN={};
 // report-data-keyed map on this page uses one: a group name comes out of the rulebook, and "__proto__"
 // on a plain object is a setter that swallows the write.
 var OB_OFFER_LAST=Object.create(null);
-function obPanelHide(){if(elPanel){elPanel.hidden=true;elPanel.innerHTML=''}if(elNormal)elNormal.hidden=false;OB_PANEL_SEL=null;OB_LAST_ACCOUNT=null;OB_OPEN={};OB_OFFER_LAST=Object.create(null)}
-function obPanelShow(html){if(!elPanel)return;elPanel.innerHTML=html;elPanel.hidden=false;if(elNormal)elNormal.hidden=true;OB_OPEN={};OB_OFFER_LAST=Object.create(null)}
+// The header Refresh/Verify re-read the LINKS report, which is the list view. While an account panel is
+// open they are hidden — the panel carries its own Refresh — so a reader cannot stack the two views.
+function obHeadActions(show){var h=document.getElementById('ob-head-actions');if(h)h.hidden=!show}
+function obPanelHide(){if(elPanel){elPanel.hidden=true;elPanel.innerHTML=''}if(elNormal)elNormal.hidden=false;obHeadActions(true);OB_PANEL_SEL=null;OB_LAST_ACCOUNT=null;OB_OPEN={};OB_OFFER_LAST=Object.create(null)}
+function obPanelShow(html){if(!elPanel)return;elPanel.innerHTML=html;elPanel.hidden=false;if(elNormal)elNormal.hidden=true;obHeadActions(false);OB_OPEN={};OB_OFFER_LAST=Object.create(null)}
 // Both rows are found by WALKING and comparing the attribute, never by building a selector out of the
 // group name: a group is rulebook-supplied text, and a quote or a bracket in one makes a selector that
 // throws or, worse, matches a different row.
@@ -2825,8 +2878,8 @@ export function onebillHtml(doc: OnebillDoc): string {
 <header class="ob-head">
   <div class="eyebrow">Integration</div>
   <div class="title-row"><h1>OneBill links</h1><span class="ver">v${esc(doc.version)}</span><span class="grow"></span>
-    <button id="ob-refresh" class="btn primary" type="button">Refresh</button>
-    <button id="ob-verify" class="btn" type="button">Refresh and fully verify</button></div>
+    <span id="ob-head-actions"><button id="ob-refresh" class="btn primary" type="button">Refresh</button>
+    <button id="ob-verify" class="btn" type="button">Refresh and fully verify</button></span></div>
   <div class="meta"><span id="ob-gen">Loading…</span><span class="sep">·</span><span id="ob-req"></span>
     <span id="ob-say"></span></div>
 </header>

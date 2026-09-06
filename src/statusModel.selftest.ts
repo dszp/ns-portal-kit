@@ -93,7 +93,15 @@ ok(unrowed.length === 0,
  * The group anchors are asserted too. Each Config section footer links one.
  */
 {
-  const md = readFileSync(new URL('../CONFIG.public.md', import.meta.url), 'utf8');
+  // The private repo keeps this file as CONFIG.public.md; the sync renames it to CONFIG.md in the public
+  // mirror, where this same test runs against npm-installed libraries. Read whichever exists so the
+  // mirror's run guards the mirror's docs instead of failing on a filename.
+  const md = ((): string => {
+    for (const name of ['../CONFIG.public.md', '../CONFIG.md']) {
+      try { return readFileSync(new URL(name, import.meta.url), 'utf8'); } catch { /* try the next name */ }
+    }
+    throw new Error('neither CONFIG.public.md nor CONFIG.md is beside src/ — the guard is broken, not the docs');
+  })();
   const ids = new Set([...md.matchAll(/<a id="([^"]+)"/g)].map((m) => m[1]!));
   if (ids.size < 40) throw new Error(`found only ${ids.size} anchors in CONFIG.public.md — the guard is broken, not the docs`);
   const noAnchor = settingNames().filter((n) => !ids.has(n));

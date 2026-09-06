@@ -102,6 +102,14 @@ specific winning: domain → app state → `*`), which expresses "everywhere", "
 caller's **own** fields; a variable may not appear in a URL's host, so a value can never choose the
 destination. Hiding is cosmetic and fail-open — an entry that cannot be found is skipped, never an error.
 
+**A handoff entry is the one menu item that carries a credential, and it is drawn as a form.** An `add`
+entry marked `"handoff": "ns_t"` renders as `<form method="POST" target="_blank">` with a single hidden
+`ns_t` field; the injected bundle fills the field from the page's own storage inside the submit handler
+and clears it on the next tick, so the token is never in the DOM at rest and never in a URL. The server
+emits such an entry only when the url's origin is also listed in `PORTAL_HANDOFF_ORIGINS` — two settings,
+so a menu edit cannot re-aim the token — and only to a caller who presented a token, since the menu plan
+is fetched with it. Verifying the token and its issuer is the receiver's job, not this kit's.
+
 ## Worker-served injection
 
 Portal-backend mode serves its own client JS, **per tier**, instead of shipping a static file (`kit.ts`):
@@ -222,17 +230,27 @@ Unassigned list — first a manual assignment (`onebillAssignment.ts`, keyed by 
 key and the account, because the assignment is a fact about the item), then the item's site link,
 then the domain's whole-domain link, else Unassigned.
 
-**An E911 address is the one exception, because it is a fact about a place.** Users at several sites of a
-split domain can reference one address, and each of their accounts can legitimately buy an E911 bundle
-for it, so an address is placed on the SET of accounts holding its referencing sites — each once — plus
-the whole-domain holder when a referencing site is unheld or the users have no site. `attributeDomainInventory`
-in `@dszp/netsapiens-lib` 0.6.0 carries every such site in `ItemAttribution.sites`, and the old
-`unattributed:shared-across` reason is gone, because a multi-site address is placed rather than
-unplaceable. A manual assignment on an address JOINS that set — migration `0005` widens the primary key
-to include the account — and is removed per account; every other kind keeps the one-account rule, which
-the ROUTE now enforces rather than the schema. `AccountReport.coBilled` runs the same rulebook over each
-co-holder's own subscriptions with an EMPTY inventory — their bill is a thing this report may read, their
-inventory slice is not — so the page can say whether an account sharing an address bills for it too.
+**The three E911 kinds are the exception, because each is a fact about a place.** Users at several sites
+of a split domain can reference one, and each of their accounts can legitimately buy an E911 line for it,
+so one is placed on the SET of accounts holding its referencing sites — each once — plus the whole-domain
+holder when a referencing site is unheld or the users have no site. `isSharedKind` in `onebillScope.ts`
+is the single test for which kinds those are, read by the scoping, by `applyAssignment` and by the page's
+controls. `attributeDomainInventory` in `@dszp/netsapiens-lib` 0.6.0 carries every such site in
+`ItemAttribution.sites`, and the old `unattributed:shared-across` reason is gone, because a multi-site
+item is placed rather than unplaceable. A manual assignment on one JOINS that set — migration `0005`
+widens the primary key to include the account — and is removed per account; every other kind keeps the
+one-account rule, which the ROUTE now enforces rather than the schema. `AccountReport.coBilled` runs the
+same rulebook over each co-holder's own subscriptions with an EMPTY inventory — their bill is a thing
+this report may read, their inventory slice is not — so the page can say whether an account sharing an
+item bills for it too.
+
+**Which of the three is billable is not the one the page led with.** `@dszp/netsapiens-lib` 0.9.0 reads
+`/domains/{d}/addresses/endpoints` beside the addresses and counts `e911Endpoints`: an Emergency Endpoint
+is the callback number the E911 carrier routes on and charges per, while an address is a location
+responders are sent to and several of them can sit under one endpoint. `e911Legacy` counts the distinct
+emergency caller IDs on a domain that predates endpoints, where there is no API object for them at all,
+so one retail E911 rule counting both dimensions pays for either model. `e911Addresses` is still counted
+and still assignable — it is information, not the bill.
 
 Because one account's scope can span domains, an
 item inside its scoped comparison is re-keyed `<domain>/<bare key>` (`scopedKey`/`splitScopedKey` in

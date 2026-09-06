@@ -1117,6 +1117,8 @@ function menuSchema(): string {
     '    "hide": ["SNAPmobile Web"],',
     '',
     '    // ADD — your own entries. label and url required, title optional. https:// or mailto: only.',
+    '    // "handoff": "ns_t" makes the entry POST the signed-in user\u2019s session token to the url instead',
+    '    // of linking to it — only to an origin also listed in PORTAL_HANDOFF_ORIGINS.',
     '    "add": [{ "label": "Support", "url": "https://help.example/x", "title": "Opens a new tab" }],',
     '',
     '    // RENAME — relabel a stock entry in place. Same destination, same position, same icon.',
@@ -3816,6 +3818,16 @@ function script(hasRun: boolean, menusBase: string, doc: StatusDoc): string {
       var t = document.createElement('span'); t.className = 'tag';
       t.textContent = 'added' + (owners.length ? ' · ' + owners.map(function(o){ return mbSrcName(o.src); }).join(' + ') : '');
       row.appendChild(l); row.appendChild(t);
+      // The one entry that sends a credential must not look like a link. A handoff row POSTs the reader's
+      // session token to its destination, and this picture is where an operator audits what a menu sends,
+      // so it names the origin the token goes to -- the origin, because that is the unit the allow-list
+      // and the receiver both reason in.
+      if (it.handoff) {
+        var ho = document.createElement('span'); ho.className = 'tag ho';
+        var origin = ident.url; try { origin = new URL(ident.url).origin; } catch (e) {}
+        ho.textContent = '· hands the session to ' + origin;
+        row.appendChild(ho);
+      }
       if (!owners.length) {
         var lockNote = document.createElement('span'); lockNote.className = 'tag';
         lockNote.textContent = '· not editable here';

@@ -950,7 +950,7 @@ ok(onebillConfigError({}) === null, 'off is not an error');
     await loadLinkReport(env, cache, nsq.ns, ['b.example', 'a.example'], { readSource: src.source });
     ok(src.calls.list === 1, 'the first call reads');
     const k = [...store.keys()].find((u) => u.includes('/quick/'))!;
-    ok(/^https:\/\/onebill\.internal\/dev\/quick\/v3\/[0-9a-f]{64}$/.test(k), 'the report key is scope-namespaced, names its MODE, and carries a sha256 of the domain set');
+    ok(/^https:\/\/onebill\.internal\/dev\/quick\/v4\/[0-9a-f]{64}$/.test(k), 'the report key is scope-namespaced, names its MODE, and carries a sha256 of the domain set');
 
     await loadLinkReport(env, cache, nsq.ns, ['a.example', 'b.example'], { readSource: src.source });
     ok(src.calls.list === 1, 'a second call with the same domains in a different order hits the cache');
@@ -991,7 +991,7 @@ ok(onebillConfigError({}) === null, 'off is not an error');
     const first = await loadLinkReport(env, cache, nsq.ns, ['acme.example'], { readSource: src.source });
     // Overwrite the entry the load just wrote with a bare report under the same key.
     const k = [...store.keys()].find((u) => u.includes('/quick/'))!;
-    ok(k.includes('/quick/v3/'), 'the key carries the entry-shape version');
+    ok(k.includes('/quick/v4/'), 'the key carries the entry-shape version');
     store.set(k, new Response(JSON.stringify(first.report), { headers: { 'content-type': 'application/json' } }));
     const again = await loadLinkReport(env, cache, nsq.ns, ['acme.example'], { readSource: src.source });
     ok(src.calls.list === 2, 'a bare-report entry is treated as a miss and the report is rebuilt');

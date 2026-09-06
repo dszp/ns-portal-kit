@@ -217,6 +217,10 @@ interface Env {
    *  attributes each entry to the setting it came from. It used to be a config error; that was undone
    *  deliberately, and this comment went on saying otherwise. */
   PORTAL_MENUS?: string;
+  /** Comma-separated exact origins (`https://host[:port]`) a PORTAL_MENUS entry marked `handoff:"ns_t"`
+   *  may POST the caller's session token to. The second key such an entry needs — unset ⇒ every handoff
+   *  entry is a startup error — so a menu edit alone can never send the token somewhere new (menus.ts). */
+  PORTAL_HANDOFF_ORIGINS?: string;
   /** Domains to treat as Documo-active for menu targeting, until that integration ships and can answer
    *  for itself. A stand-in for a live signal, not a feature flag — see `documoEnabled` in menus.ts. */
   DOCUMO_DOMAINS?: string;
@@ -1791,10 +1795,11 @@ export default {
           // automatic rule have it again" — a real, durable change — so a body that simply forgot the
           // field must not be read as one. `undefined` here is the "forgot it" case and is refused.
           const accountNumber = b?.accountNumber === null ? null : typeof b?.accountNumber === 'string' ? b.accountNumber.trim() : undefined;
-          // `remove` takes an account OUT of an item's manual set — only an address HAS a set, and
-          // whether this key is one is decided against the loaded inventory, not here. What is decided
-          // here is the SHAPE: a boolean, and a removal has to say whom it removes. A `remove` with a
-          // null account is a page bug that would otherwise read as the whole-item clear beside it.
+          // `remove` takes an account OUT of an item's manual set — only an E911 address, endpoint or
+          // legacy number HAS a set (`isSharedKind` in onebillScope.ts), and whether this key is one is
+          // decided by `applyAssignment` against the loaded inventory, not here. What is decided here is
+          // the SHAPE: a boolean, and a removal has to say whom it removes. A `remove` with a null
+          // account is a page bug that would otherwise read as the whole-item clear beside it.
           const remove = b?.remove === undefined ? undefined : b.remove === true ? true : null;
           const note = typeof b?.note === 'string' && b.note.trim() ? b.note.trim().slice(0, 500) : undefined;
           const shape = 'Body must be { domain, key, accountNumber: string|null, remove?: true, note? } with ?viewing=<account number>';
@@ -2098,7 +2103,11 @@ export default {
           if (candidate.length > 8192) throw new HttpError(413, 'Candidate config too large to validate');
           // Probed against ONLY the candidate: passing the live env would let a deployment that is already
           // misconfigured report every candidate as broken, which is the opposite of useful while fixing it.
-          const error = menuConfigError({ PORTAL_MENUS: candidate });
+          // ONE live setting rides along, deliberately: PORTAL_HANDOFF_ORIGINS is the second key a
+          // `handoff` entry needs, the editor cannot change it, and a check that omitted it would call
+          // every handoff entry broken — or, worse, one that supplied a permissive stand-in would call
+          // Valid a config the running deployment then refuses at startup.
+          const error = menuConfigError({ PORTAL_MENUS: candidate, PORTAL_HANDOFF_ORIGINS: env.PORTAL_HANDOFF_ORIGINS });
           // WARNINGS ARE NOT ERRORS, and the distinction is the point: a config whose default can never
           // apply is accepted and deployed, because refusing it in the pre-routing gauntlet is how a
           // cosmetic menu mistake once took the whole injection down. It is told to the operator here,
@@ -2132,7 +2141,7 @@ export default {
         if (url.pathname === '/kit/menus/resolve') {
           const candidate = url.searchParams.get('c') ?? '';
           if (candidate.length > 8192) throw new HttpError(413, 'Candidate config too large to resolve');
-          const menuEnv = { PORTAL_MENUS: candidate, PORTAL_APPS_HIDE: env.PORTAL_APPS_HIDE };
+          const menuEnv = { PORTAL_MENUS: candidate, PORTAL_APPS_HIDE: env.PORTAL_APPS_HIDE, PORTAL_HANDOFF_ORIGINS: env.PORTAL_HANDOFF_ORIGINS };
           // The active SET the preview resolves against — the editor's persona picker sends one `app` per
           // active integration. Multiple values are a legal question now that the axis unions across them;
           // the refusal that used to live here was the union seam, and it is gone with the join.

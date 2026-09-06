@@ -18,7 +18,7 @@ shows every setting *with the value yours currently has*, its real default, and 
 - [Core](#group-core) — `NS_SERVER` · `NS_PORTAL_ISS` · `ALLOWED_ORIGINS` · `CACHE_SCOPE` · `NS_DEVICE_DETAILS`
 - [Domain limits](#group-domains) — `ALLOWED_DOMAINS` · `BLOCKED_DOMAINS`
 - [Portal injection](#group-injection) — `PRIMARY_BASENAME` · `PORTAL_HANDOFF_URL` · `PORTAL_SECONDARIES` · `PORTAL_FEATURES` · `PORTAL_SUPERADMINS` · `PORTAL_RELEASE_NOTES_URL` · `STATUS_BANNER_WEBHOOK` · `RINGOTEL_APP_BASE_URL`
-- [Portal menus](#group-menus) — `PORTAL_MENUS` · `PORTAL_APPS_HIDE`
+- [Portal menus](#group-menus) — `PORTAL_MENUS` · `PORTAL_HANDOFF_ORIGINS` · `PORTAL_APPS_HIDE`
 - [App integration](#group-ringotel) — `RINGOTEL_API_KEY` and its display settings
 - [OneBill](#group-onebill) — `ONEBILL_TENANT_ID` and its three secrets · `ONEBILL_LINK_GROUP` · `ONEBILL_USAGE_OFFERS` · `ONEBILL_USAGE_IGNORE` · `ONEBILL_RECURRING_RULES` · `NS_FAX_SERVER_HOSTS` · `NS_DEVICE_SUFFIXES`
 - [Activation rules](#group-eligibility) — the write rail and the exclusion lists
@@ -366,6 +366,9 @@ targeted by user, domain, NetSapiens scope, or whether your app is active for th
 - **Needs no other integration.** With no app API key set the app state is `none`, so static add, hide and
   rename work on any deployment.
 - **Full targeting model, variables and URL rules:** [Menu targeting](#menu-targeting).
+- **An entry can hand the user's session to another tool** — add `"handoff": "ns_t"` and list the
+  destination's origin in [`PORTAL_HANDOFF_ORIGINS`](#PORTAL_HANDOFF_ORIGINS). See
+  [Handoff entries](#menu-handoff).
 
 **Which menus you can target.** Menus are referenced by name — you never supply a CSS selector, which
 would break on portal updates and would turn an environment variable into a DOM-injection surface:
@@ -463,6 +466,31 @@ is missing from the capture entirely. Offering to rename that row would write a 
 portal never uses. Those rows say so; recapture the role and the control comes back. A row that merely
 *shares* a name another rule renames to is not this: it is a stock entry in its own right and keeps the
 control.
+
+<a id="PORTAL_HANDOFF_ORIGINS"></a>
+
+### `PORTAL_HANDOFF_ORIGINS` · `vars`
+
+The origins a menu entry marked `"handoff": "ns_t"` may POST the signed-in user's session token to.
+Comma-separated, each an **exact origin**: scheme, host and, if not the default, port — nothing after.
+
+- **Example** `https://tools.example.com`
+- **Unset** No handoff entry is allowed. A `PORTAL_MENUS` entry carrying `handoff` is then a startup error
+  that names this setting. Plain links are unaffected.
+- **What it gates** Only the token. A plain `add` entry may link anywhere `https://` reaches; this list
+  is consulted only for entries that hand the session over. See [Handoff entries](#menu-handoff) for the
+  entry itself.
+
+**Two settings on purpose.** The entry's `url` already has to be `https://` with a fixed host, and for a
+link that is enough. A handoff sends a working NetSapiens credential, so the destination has to be a
+decision you make twice — once in the menu, once here — and an edit to `PORTAL_MENUS` alone can never
+send the token somewhere new.
+
+**Exact means exact.** `https://tools.example.com:8443` and `https://sub.tools.example.com` are different
+origins from `https://tools.example.com`; the receiver compares the browser's `Origin` header the same
+way. An entry with a path (`https://tools.example.com/launch`) or a scheme other than `https` is refused
+at startup rather than accepted and never matched. A trailing slash is fine — it is how a browser prints
+an origin.
 
 <a id="DOCUMO_DOMAINS"></a>
 
@@ -1756,10 +1784,42 @@ viewing a session sees the menu that user sees.
 
 ### Added entries
 
-`add` entries take `label`, a `url`, and an optional `title`. Added links open in a new tab.
+`add` entries take `label`, a `url`, an optional `title`, and optionally `"handoff": "ns_t"` (below).
+Added links open in a new tab.
 
 **URL schemes:** `https://` and `mailto:` only. Anything else — notably `javascript:` and `data:` — is
 refused at startup, so a dangerous scheme can never reach the page.
+
+<a id="menu-handoff"></a>
+
+**Handoff entries.** An entry with `"handoff": "ns_t"` opens the destination **with the signed-in user's
+own session token**, so a tool of yours can act as that user without a second login:
+
+```json
+{"management": {"add": {"scopes": {"Reseller": [
+  { "label": "Bulk tool", "url": "https://tools.example.com/launch", "handoff": "ns_t" }
+]}}}}
+```
+
+It is drawn as a form, not a link. When the user clicks it, the browser POSTs one field named `ns_t` to
+the `url` in a new tab; the token is read from the page at that moment and never appears in the address
+bar, in browser history, in a `Referer`, or in an access log. The value is the literal string `ns_t` —
+a boolean is refused — so a second kind of handoff, if one is ever added, is a new value rather than a
+second flag.
+
+Three rules apply on top of the ordinary URL rules, and each is a startup error when broken:
+
+| Rule | Why |
+|---|---|
+| The `url` must be `https://` — `mailto:` cannot carry a POST | The token travels only in a request body over TLS. |
+| The url's origin must be listed in [`PORTAL_HANDOFF_ORIGINS`](#PORTAL_HANDOFF_ORIGINS) | Two settings have to agree before a credential leaves, so a menu edit alone cannot re-aim it. |
+| The receiver verifies the token and its issuer itself | This kit only decides *when* the token leaves and *where it may go*; the destination decides whether to trust it. Do not point a handoff at a tool that does not check. |
+
+The entry is only ever served to a signed-in user: the menu plan is fetched with the caller's own token,
+and a page with no token in it cancels the click and sends nothing. **Under masquerade the page holds the
+masqueraded user's session, so that is what the handoff carries** — the receiver acts as that user, which
+is the same rule every other decision here follows while masquerading. Variables work in the path and query
+as for any entry; the host is pinned, as for any entry.
 
 **Variables.** `label`, `url` and `title` may contain placeholders, filled in per signed-in user:
 

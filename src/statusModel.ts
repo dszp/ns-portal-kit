@@ -864,6 +864,12 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'No customization from this setting. `PORTAL_APPS_HIDE` still hides Apps-menu entries independently of it if set — that one is terser and not deprecated, but this key\'s `apps.hide` does everything it does.',
     affects: ['me.menuConfig'] },
 
+  { name: 'PORTAL_HANDOFF_ORIGINS', group: 'menus', kind: 'config',
+    example: 'https://tools.example.com',
+    what: 'Comma-separated exact origins (`https://host[:port]`) that a `PORTAL_MENUS` entry marked `"handoff": "ns_t"` may hand the signed-in user\'s session token to. Such an entry is drawn as a form that POSTs the token to the entry\'s url when clicked, never as a link, and the url\'s origin has to appear here as well — two settings, so editing the menu alone can never send the token somewhere new. The receiver is expected to check the browser\'s Origin header and verify the token itself.',
+    whenUnset: 'No handoff entry is allowed: a `PORTAL_MENUS` entry carrying `handoff` is then a startup error naming this setting. Plain links are unaffected.',
+    affects: ['me.menuConfig'] },
+
   { name: 'DOCUMO_DOMAINS', group: 'menus', kind: 'config',
     importance: 'minor', example: 'acme.example',
     what: 'Which domains count as running the fax integration, for menu targeting only — a comma-separated list, or `*` for every domain. It exists because that integration cannot answer for itself yet: menu rules written against `app` can name `documo`, and this is what makes them fire. When the integration ships it answers directly and this becomes an override rather than the source.',

@@ -750,7 +750,7 @@ function buildSubsystems(
       result: ssoCard(env) },
     { id: 'menus', name: 'Portal menu customization', group: 'menus', tab: 'deployment', parent: null,
       description: 'Adding or hiding entries in the Apps, account, and Management menus.',
-      settings: ['PORTAL_MENUS', 'PORTAL_APPS_HIDE'],
+      settings: ['PORTAL_MENUS', 'PORTAL_HANDOFF_ORIGINS', 'PORTAL_APPS_HIDE'],
       result: menusCard(env, errs.menuErr) },
     { id: 'injection', name: 'Manager-Portal injection', group: 'injection', tab: 'deployment', parent: null,
       description: 'The primary + gated secondary scripts served to the Manager Portal in portal-backend mode.',

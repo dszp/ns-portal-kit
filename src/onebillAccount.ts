@@ -58,7 +58,7 @@ import { ringotelSuffixEntry, scopeOf } from './ringotel.js';
 import { acceptItems, clearGroup, clearItemKeyStatement, clearItemStatements, clearItems, readBaselines, writeGroupRow } from './onebillBaseline.js';
 import { loadCatalogIndex, type CatalogSource } from './onebillCatalog.js';
 import { assignStatements, assignmentHistoryStatement, clearAssignmentStatements, clearOtherAssignmentsStatement, readAssignments, type Assignment } from './onebillAssignment.js';
-import { domainHolders, holdersOf, resolveAccountScope, scopeInventory, scopedKey, splitScopedKey, type AccountRef, type Attribution, type DomainHolders, type DomainRead, type ResolvedAccountScope, type Scope, type ScopedItemMeta, type UnassignedItem } from './onebillScope.js';
+import { domainHolders, holdersOf, isSharedKind, resolveAccountScope, scopeInventory, scopedKey, splitScopedKey, type AccountRef, type Attribution, type DomainHolders, type DomainRead, type ResolvedAccountScope, type Scope, type ScopedItemMeta, type UnassignedItem } from './onebillScope.js';
 
 // Re-exported so a consumer of the report imports the scope vocabulary from the same place as the
 // report itself, rather than having to know that `onebillScope.ts` is where the join lives.
@@ -83,12 +83,14 @@ const ACCOUNT_TTL_S = 600;
  * that hits the cap fails alone and lands in `readFailures` with `partial: true`, rather than taking
  * every other domain the account holds down with it.
  *
- * Change these options and bump the `entryKey` version segment (`v3` today), or a ten-minute-old entry
+ * Change these options and bump the `entryKey` version segment (`v4` today), or a ten-minute-old entry
  * built with the old options is served as current. The same rule covers the INVENTORY options passed to
  * `listDomainInventory` — `NS_FAX_SERVER_HOSTS` changes which numbers are fax lines, and a cached entry
  * built before it was set counts every fax line as a DID while looking exactly like a current one. That
  * is what took the segment from `v1` to `v2`; the device-suffix legend, which adds `suffix` and `kind`
- * to every cached device and decides which of them is a Teams connector, took it from `v2` to `v3`.
+ * to every cached device and decides which of them is a Teams connector, took it from `v2` to `v3`; and
+ * netsapiens-lib 0.9.0 took it to `v4` — `includeAddresses` now reads the emergency ENDPOINTS too, and a
+ * `v3` entry has none of them, so an E911 row would read zero endpoints on a domain that has three.
  */
 const DOMAIN_SNAPSHOT_OPTS = {
   includeAttendantMenus: false,
@@ -438,7 +440,7 @@ async function readCoBilled(
   }
   if (!wanted.length) return out;
 
-  const empty = countInventoryDetail({ extensions: [], systemUsers: [], dids: [], e911Addresses: [], smsNumbers: [] });
+  const empty = countInventoryDetail({ extensions: [], systemUsers: [], dids: [], e911Addresses: [], e911Endpoints: [], e911Legacy: [], smsNumbers: [] });
   /** One co-holder's bill, by group. `null` is "their subscriptions would not read". */
   const bills = new Map<string, Map<string, { billed: number; entitled: number }> | null>();
   for (const { others } of wanted) {
@@ -836,7 +838,10 @@ export interface AssignRequest {
  * about an item that plainly is.
  */
 function findItem(detail: DomainInventoryDetail, key: string): InventoryItem | undefined {
-  const lists: InventoryItem[][] = [detail.extensions, detail.systemUsers, detail.dids, detail.e911Addresses, detail.smsNumbers];
+  const lists: InventoryItem[][] = [detail.extensions, detail.systemUsers, detail.dids, detail.e911Addresses,
+    // `?? []` for the same reason as `onebillScope.ts`: an entry cached before netsapiens-lib 0.9.0 has
+    // neither list, and a find over `undefined` throws where a miss is the honest answer.
+    detail.e911Endpoints ?? [], detail.e911Legacy ?? [], detail.smsNumbers];
   for (const list of lists) {
     const hit = list.find((i) => i.key === key);
     if (hit) return hit;
@@ -956,16 +961,16 @@ export async function applyAssignment(
   // and it is what the history has to be able to show later.
   const label = itemLabel(item);
 
-  // ADDRESSES HAVE A SET, EVERYTHING ELSE HAS AT MOST ONE. The two shapes are refused against each
+  // THE E911 KINDS HAVE A SET, EVERYTHING ELSE HAS AT MOST ONE. The two shapes are refused against each
   // other rather than coerced: a page that sent `remove` for an extension, or a whole-item clear for an
-  // address, meant something this route cannot do, and doing the neighbouring thing instead would
-  // record a decision nobody made.
-  const address = req.key.startsWith('addr:');
-  if (req.remove && !address) {
-    throw new OnebillRequestError(`only an address has per-account assignments; ${req.key} has one assignment, so clear it instead.`, 409);
+  // endpoint, meant something this route cannot do, and doing the neighbouring thing instead would
+  // record a decision nobody made. `isSharedKind` and not a local prefix test — see `onebillScope.ts`.
+  const shared = isSharedKind(req.key);
+  if (req.remove && !shared) {
+    throw new OnebillRequestError(`only an E911 address, endpoint or legacy number has per-account assignments; ${req.key} has one assignment, so clear it instead.`, 409);
   }
-  if (address && req.accountNumber === null) {
-    throw new OnebillRequestError(`an address has per-account assignments; remove one instead.`, 409);
+  if (shared && req.accountNumber === null) {
+    throw new OnebillRequestError(`an E911 address, endpoint or legacy number has per-account assignments; remove one instead.`, 409);
   }
 
   const assignments = await readAssignments(db, req.domain);
@@ -982,12 +987,12 @@ export async function applyAssignment(
   // they take away, not in what they name.
   const row = req.accountNumber === null || req.remove ? undefined
     : { domain: req.domain, key: req.key, accountNumber: req.accountNumber, label, decidedBy, decidedAt: now.toISOString() };
-  // What the assignment table would hold after this write. An ADD on an address leaves every other
+  // What the assignment table would hold after this write. An ADD on a shared kind leaves every other
   // account's row standing — that is the whole of "additive"; every other shape replaces the item's one
   // row, which is the rule the schema stopped enforcing at migration 0005 and this line now carries.
   const next: Assignment[] = req.remove
     ? assignments.filter((a) => !(mine(a) && a.accountNumber === req.accountNumber))
-    : address
+    : shared
       ? [...assignments.filter((a) => !(mine(a) && a.accountNumber === req.accountNumber)), ...(row ? [row] : [])]
       : [...assignments.filter((a) => !mine(a)), ...(row ? [row] : [])];
 
@@ -1035,16 +1040,16 @@ export async function applyAssignment(
     // Bounded by the row's existence above, so exactly this row goes. The other holders keep theirs.
     writes.push(...clearAssignmentStatements(db, { domain: req.domain, key: req.key, accountNumber: req.accountNumber!, label, ...note, decidedBy }, now));
   } else if (req.accountNumber === null) {
-    // A non-address clear. One row in a healthy table; every row for the key if it is not, so a clear
+    // A non-shared clear. One row in a healthy table; every row for the key if it is not, so a clear
     // cannot leave one of a pair behind.
     for (const a of assignments.filter(mine)) {
       writes.push(...clearAssignmentStatements(db, { domain: req.domain, key: req.key, accountNumber: a.accountNumber, label, ...note, decidedBy }, now));
     }
-  } else if (address) {
+  } else if (shared) {
     // ADDITIVE: nothing else is touched. The upsert alone, on the (domain, key, account) triple.
     writes.push(...assignStatements(db, { domain: req.domain, key: req.key, accountNumber: req.accountNumber, label, ...note, decidedBy }, now));
   } else {
-    // A non-address assign: this account's row, and NO other account's. The note rides the assign — one
+    // A non-shared assign: this account's row, and NO other account's. The note rides the assign — one
     // decision, recorded once — so the displaced accounts' history rows carry none.
     for (const a of assignments.filter((x) => mine(x) && x.accountNumber !== req.accountNumber)) {
       writes.push(assignmentHistoryStatement(db, { domain: req.domain, key: req.key, accountNumber: a.accountNumber, label, action: 'clear', decidedBy }, now));

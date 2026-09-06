@@ -953,7 +953,7 @@ export async function domainHash(domains: string[]): Promise<string> {
  */
 // Exported so onebillAccount.ts shares one key scheme — see the note on domainHash above.
 export function entryKey(scope: string, kind: 'quick' | 'full' | 'usage' | 'domain' | 'subs' | 'catalog', hex: string): Request {
-  return new Request(`https://onebill.internal/${scope}/${kind}/v3/${hex}`);
+  return new Request(`https://onebill.internal/${scope}/${kind}/v4/${hex}`);
 }
 
 export interface LoadLinkReportOptions {

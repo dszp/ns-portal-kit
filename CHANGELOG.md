@@ -22,7 +22,31 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-06
+
 ### Changed
+
+- **The E911 row counts ENDPOINTS, not addresses.** An Emergency Endpoint is the callback number the E911
+  carrier routes a 911 call on and charges per; an emergency ADDRESS is a location responders are sent to,
+  and several of them can sit under one endpoint. The account panel now counts `e911Endpoints`, chips such
+  a line **E911 endpoint**, and says who the carrier announces and where it dispatches beside it. Addresses
+  are still counted, still listed and still assignable — as information. **Point your E911 rule at the new
+  dimension**: `"counts": ["e911Endpoints", "e911Legacy"]` in
+  [`ONEBILL_RECURRING_RULES`](./CONFIG.md#ONEBILL_RECURRING_RULES). A rule left on `e911Addresses` keeps
+  working and keeps counting locations, which on most domains is a different number.
+- **Legacy emergency numbers are counted too, as `e911Legacy`.** A domain still on the pre-endpoint model
+  has no endpoint records at all: every user carries an emergency caller ID set by hand, and the carrier
+  bills per distinct number. Those are counted, chipped **Legacy E911**, and placed on sites like an
+  endpoint. A number that is also an endpoint callback is counted once, as an endpoint, so a half-migrated
+  domain is not billed twice for one place. An E911 rule counting both dimensions pays for either model
+  with one line.
+- **A blank emergency field on a user now resolves to the domain default** before anything is called
+  unreferenced. A user with no `emergency-address-id` inherits the domain's default address, and one with
+  no emergency caller ID inherits that address's endpoint — so a domain whose users mostly leave the fields
+  blank no longer reports its busiest address as referenced by nobody.
+- The per-domain inventory cache segment moves to `v4`. Entries written before this upgrade are orphaned
+  rather than trusted: a `v3` entry has no endpoint list, so an E911 row read from one would report zero
+  endpoints on a domain that has three. The first read of each domain after deploying is a fresh one.
 
 - **A device chip says what the device IS when it has no model.** The account panel's device chips read
   `<name> <model>` as before; where NetSapiens has no model for the device the chip now names its KIND
@@ -37,6 +61,14 @@ release. The version at `/health` always matches a heading here.
 ### Fixed
 
 ### Added
+
+- **A menu entry can hand the signed-in user's session to another tool.** Mark a `PORTAL_MENUS` `add`
+  entry `"handoff": "ns_t"` and the click POSTs the user's portal session token to the entry's URL in a
+  new tab — as a form, never a link, so the token is in no URL, history entry, `Referer` or access log,
+  and it is read from the page only at the moment of the click. The destination's exact origin must also
+  be listed in the new **`PORTAL_HANDOFF_ORIGINS`**; an entry whose origin is not listed, or a list that
+  is unset, is a startup error, so editing the menu alone can never send the token somewhere new. The
+  receiver is expected to verify the token itself. See SETUP.md § Hand the session to another tool.
 
 - **[`NS_DEVICE_SUFFIXES`](./CONFIG.md#NS_DEVICE_SUFFIXES) names what a device-name suffix means on your
   system.** A device's suffix is what its name carries after the extension number — `1001wp` on extension
@@ -2318,6 +2350,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.7.1]: https://github.com/dszp/ns-portal-kit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/dszp/ns-portal-kit/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/dszp/ns-portal-kit/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/dszp/ns-portal-kit/compare/v0.5.0...v0.6.0

@@ -115,6 +115,54 @@ entries, which is much easier than typing labels and hoping they match.
 
 *Feature key `me.menuConfig`, default `all`. See [`PORTAL_MENUS`](./CONFIG.md#PORTAL_MENUS).*
 
+<a id="menu-handoff"></a>
+
+### Hand the session to another tool
+
+A menu entry can open one of your own tools **as the signed-in user**, with no second login: mark it
+`"handoff": "ns_t"` and the click POSTs the user's portal session token to the entry's URL in a new tab.
+
+**Why?** So a tool that acts on NetSapiens on the operator's behalf — a bulk editor, a diagram viewer —
+can pick up exactly the permissions the operator already has, instead of holding a stored credential of
+its own.
+
+If you want an entry to do this, do two things, then redeploy:
+
+1. Add the entry to `PORTAL_MENUS` with `"handoff": "ns_t"`:
+
+   ```json
+   {"management": {"add": {"scopes": {"Reseller": [
+     { "label": "Bulk tool", "url": "https://tools.example.com/launch", "handoff": "ns_t" }
+   ]}}}}
+   ```
+
+2. List the destination's origin in `PORTAL_HANDOFF_ORIGINS`:
+
+   ```jsonc
+   "PORTAL_HANDOFF_ORIGINS": "https://tools.example.com"
+   ```
+
+Three rules, each enforced at startup or by the receiver:
+
+- **POST only.** The token travels in the body of one form submission, never in a URL. The entry's URL
+  must be `https://`; `mailto:` is refused.
+- **Exact origin, twice.** The URL's origin must appear in `PORTAL_HANDOFF_ORIGINS`, exactly as the
+  browser would print it (`https://host[:port]`). Editing the menu alone cannot send the token anywhere
+  new.
+- **The receiver verifies the JWT.** This kit decides when the token leaves and where it may go; the
+  tool you point at must check the token against your NetSapiens deployment and accept only your
+  portal as its issuer, and it should compare the browser's `Origin` header against your portal's
+  origin. Do not point a handoff at a tool that does not.
+
+The entry is served only to signed-in users, and a click on a page with no session token sends nothing.
+
+**If your portal's Content-Security-Policy sets `form-action`, add the receiver's origin to it.** The
+same policy that has to allow your Worker in `script-src` ([above](#required-settings)) will otherwise
+block this POST silently: the new tab opens blank or not at all, and nothing reaches the receiver's log.
+
+*See [`PORTAL_HANDOFF_ORIGINS`](./CONFIG.md#PORTAL_HANDOFF_ORIGINS) and
+[Handoff entries](./CONFIG.md#menu-handoff).*
+
 ### A status banner you control
 
 A message across the top of the portal — maintenance notices, a welcome for a new customer, anything
@@ -402,14 +450,15 @@ rulebook, only what we sell:
   {"offer":"Bundled Call Center Seat","counts":"extensions.withAnyDevice","group":"Hosted Seats",
    "alsoCounts":{"Call Center Seats":1}},
 
-  {"offer":"E911 Physical Location and Phone Number","counts":"e911Addresses","group":"E911 and Number",
-   "alsoCounts":{"dids.total":1}},
+  {"offer":"E911 Physical Location and Phone Number","counts":["e911Endpoints","e911Legacy"],
+   "group":"E911 and Number","alsoCounts":{"dids.total":1}},
   {"offer":"Single Voice Phone Number (DID)","counts":"dids.total","group":"Phone Number (DID)"},
   {"offer":"Toll Free Phone Number (DID)","counts":"dids.tollFree"},
   {"offer":"Phone Numbers - Pack of 10","counts":"dids.total","group":"Phone Number (DID)","perUnit":10},
   {"offer":"Block of 10 Voice Phone Numbers (DIDs)","counts":"dids.total","group":"Phone Number (DID)","perUnit":10},
 
-  {"productCode":"e911","counts":"e911Addresses","group":"E911 and Number","alsoCounts":{"dids.total":1}},
+  {"productCode":"e911","counts":["e911Endpoints","e911Legacy"],"group":"E911 and Number",
+   "alsoCounts":{"dids.total":1}},
   {"productCode":"DID","counts":"dids.total","group":"Phone Number (DID)"},
 
   {"offer":"Native Fax - Analog (requires MP202B Fax ATA)","counts":"dids.fax","group":"Fax Lines"},
@@ -499,13 +548,19 @@ the thing and fewer live than billed is a shortfall; use `entitles` where the li
 The paths available to `counts`, `alsoCounts` and `entitles`: `extensions.total`, `extensions.withAnyDevice`,
 `extensions.withNoDevice`, `extensions.byScope.<scope>`, `extensions.byServiceCode.<code>`,
 `extensions.byDeviceCount.<0|1|2|3+>`, `systemUsers.total`, `transcriptionEnabled`, `teamsConnected`,
-`dids.total`, `dids.tollFree`, `dids.local`, `e911Addresses`, `smsNumbers`, `devices.total` and
-`devices.byModel.<model>`. Two of those deserve a callout. **`extensions.withAnyDevice`**, not
+`dids.total`, `dids.tollFree`, `dids.local`, `e911Endpoints`, `e911Legacy`, `e911Addresses`,
+`smsNumbers`, `devices.total` and `devices.byModel.<model>`. Three of those deserve a callout. **`extensions.withAnyDevice`**, not
 `extensions.total`, is what a seat rule should usually count: an extension carrying no device — no
 handset, no softphone, no Teams connector — is not in service yet, and billing on `total` counts seats
 nobody has picked up. **`extensions.byScope.<scope>`** is how a user *role* is counted rather than a
 device, which is what makes the Call Center row above possible without any NetSapiens field dedicated to
-"this is a Call Center seat."
+"this is a Call Center seat." **`e911Endpoints`**, not `e911Addresses`, is what an E911 rule should
+count: an Emergency Endpoint is the callback number the carrier routes a 911 call on and bills per, while
+an address is a location responders are sent to and several of them can sit under one endpoint. A domain
+still on the pre-endpoint model has no endpoint records at all — its users just carry an emergency caller
+ID each — so `e911Legacy` counts the distinct numbers there, and an E911 rule counting BOTH pays for
+either model with one line. `e911Addresses` remains a countable dimension, and it is the right one only
+if you genuinely bill per dispatchable location.
 
 **Retail (OIT-supplied) product fallbacks.** Six legacy retail products carry no plan code at all, and
 their product codes are stable, so a `productCode` rule catches whatever their plans are named without
@@ -514,7 +569,7 @@ enumerating every one:
 | retail product | code | rule |
 |---|---|---|
 | Hosted Seat | `SEAT` | `counts: extensions.withAnyDevice, group: seats` — a fallback; the JSON above instead names the three retail seat plans directly, so Premium's entitlements still apply |
-| E911 | `e911` | `counts: e911Addresses, group: e911, alsoCounts: { dids.total: 1 }` — it PAYS for the number, so a missing one is a shortfall |
+| E911 | `e911` | `counts: [e911Endpoints, e911Legacy], group: e911, alsoCounts: { dids.total: 1 }` — one line pays for either E911 model, and it PAYS for the number, so a missing one is a shortfall |
 | DID | `DID` | `counts: dids.total, group: numbers` |
 | Fax | `FAX` | `ignore` — until a fax system is a count source |
 | Integrations | `INTEG` | `ignore` — until its plans are mapped individually |

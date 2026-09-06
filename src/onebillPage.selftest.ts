@@ -1417,12 +1417,8 @@ const ACCOUNT = () => ({
   // needs to recognise what they are about to do: the group, the OneBill ACCOUNT, the domain, and how
   // many things it touches. One ok() each — an alternation over four sentences passes when three of
   // them are missing.
-  ok(/confirm\('Accept all '\+nc\+' unreviewed item'.*\+group\+' for '\+where/.test(wjs),
-    '[panel js] accept-all confirms, naming the count, the group and the account');
   ok(/confirm\('Clear all '\+nc\+' accepted item'.*\+group\+' for '\+where/.test(wjs),
     '[panel js] clear-all confirms, naming the count, the group and the account');
-  ok(/confirm\('Record '\+ob\+' live as the accepted count for '\+group\+' on '\+where\+', against '\+bi\+' billed\?'\)/.test(wjs),
-    '[panel js] accept-shortfall confirms, naming both counts, the group and the account');
   ok(/confirm\('Clear the accepted '\+gw\+' on '\+group\+' for '\+where/.test(wjs),
     '[panel js] clear-shortfall confirms, naming the group and the account');
   // …and using the same word the button did. "Clear the accepted shortfall" under a button labelled
@@ -1437,8 +1433,6 @@ const ACCOUNT = () => ({
   // The counts come off the BUTTON, written there by the renderer. Counting rows in the DOM instead
   // would count whatever the last swap left behind, which is not what the button was drawn for.
   ok(/getAttribute\('data-count'\)/.test(wjs), '[panel js] the -all counts are read off data-count');
-  ok(/getAttribute\('data-observed'\)/.test(wjs), '[panel js] and the shortfall observed count off data-observed');
-  ok(/getAttribute\('data-billed'\)/.test(wjs), '[panel js] and the billed one off data-billed');
   // A second click while the note field is open must not re-ask the confirm. obNoteFor's own guard runs
   // AFTER the dialog, so the reader would be asked again and then nothing would happen — which is why
   // this asserts the ORDER, not the presence: the same check further down the function is the bug.
@@ -1446,8 +1440,10 @@ const ACCOUNT = () => ({
   // The handler's OWN guard, not obNoteFor's — obNoteFor is defined further up the file, so a plain
   // indexOf on the predicate would find its call and pass on a handler that never guards at all.
   ok(wjs.includes('if(accepting&&obNoting(cell))return'), '[panel js] the accept path guards on it too');
-  ok(wjs.indexOf('if(accepting&&obNoting(cell))return') < wjs.indexOf("confirm('Accept all"),
-    '[panel js] and does so BEFORE it confirms, so a second click is not asked twice');
+  ok(wjs.indexOf('if(accepting&&obNoting(cell))return') < wjs.indexOf("var offers=act==='accept-shortfall'"),
+    '[panel js] and does so BEFORE it opens the note step, so a second click does not open it twice');
+  ok(!/confirm\('Accept /.test(wjs) && !/confirm\('Record /.test(wjs),
+    '[panel js] an accept asks no confirm - the note step and its Save are the confirmation');
   ok(/data-items-for/.test(wjs), '[panel js] the swap finds the item list by its data-items-for');
   ok(/outerHTML/.test(wjs), '[panel js] and swaps the row in place rather than reloading the panel');
   ok(/OB_LAST_ACCOUNT/.test(rjs), '[panel js] the swap keeps the last report to render against');
@@ -1553,7 +1549,9 @@ const SPLIT_INVENTORY = () => ({
   transcriptionEnabled: 1,
   // netsapiens-lib 0.7.0: the fax line is NOT in `total`, `local` or `tollFree`. `all` is everything.
   dids: { total: 5, tollFree: 1, local: 4, fax: 1, all: 6 },
-  e911Addresses: 1, smsNumbers: 1,
+  // netsapiens-lib 0.9.0: the ENDPOINT is the billed E911 unit and a LEGACY number is the same thing on
+  // a domain that predates endpoints. The address count stays, as information.
+  e911Addresses: 1, e911Endpoints: 1, e911Legacy: 1, smsNumbers: 1,
   devices: { total: 6, byModel: { 'Model A': 4, '(unknown)': 2 } },
 });
 /** The two accounts that share branch.example, as a picker offers them. */
@@ -1580,6 +1578,10 @@ const ACCOUNT_SPLIT = () => ({
       { key: 'other.example/did:+15550202', number: '+15550202', kind: 'local' },
     ],
     e911Addresses: [{ key: 'branch.example/addr:a-2', label: 'North dock' }],
+    // The endpoint's detail cell is the one place the caller name and billing address are on the page:
+    // the label is a bare callback number, which says nothing about which place it bills for.
+    e911Endpoints: [{ key: 'branch.example/e911:3175550100', callback: '3175550100', callerName: 'Branch North', billingAddress: '1 Main St, Springfield', users: 4 }],
+    e911Legacy: [{ key: 'branch.example/e911legacy:3175550900', number: '3175550900', users: 2 }],
     smsNumbers: [{ key: 'other.example/sms:+15550200', number: '+15550200' }],
   },
   // branch.example is much bigger than the slice this account bills; other.example is entirely theirs,
@@ -1590,7 +1592,7 @@ const ACCOUNT_SPLIT = () => ({
       systemUsers: { total: 2, byServiceCode: { 'system-aa': 2 } },
       transcriptionEnabled: 2,
       dids: { total: 11, tollFree: 1, local: 10, fax: 2, all: 13 },
-      e911Addresses: 3, smsNumbers: 2,
+      e911Addresses: 3, e911Endpoints: 2, e911Legacy: 1, smsNumbers: 2,
       devices: { total: 9, byModel: { 'Model A': 9 } },
     },
     'other.example': SPLIT_INVENTORY(),
@@ -1617,6 +1619,11 @@ const ACCOUNT_SPLIT = () => ({
     // decided from the record on the row itself — the one place the two routes to `fax` could diverge.
     { domain: 'branch.example', key: 'did:+15550998', label: '+15550998', reason: 'no site set',
       item: { key: 'did:+15550998', number: '+15550998', kind: 'local', fax: true, destination: 'to fax server', description: '' },
+      candidates: SHARED_HOLDERS },
+    // An unassigned ENDPOINT. Its record is on the row rather than in `detail`, which is the second of
+    // the two routes to `epDetail` and the one that could diverge from the placed-item route.
+    { domain: 'branch.example', key: 'e911:3175550101', label: '3175550101 — Branch Annex, 2 Side St, Springfield', reason: 'site Annex is not linked',
+      item: { key: 'e911:3175550101', callback: '3175550101', callerName: 'Branch Annex', billingAddress: '2 Side St, Springfield', users: 1 },
       candidates: SHARED_HOLDERS },
   ],
   comparison: {
@@ -1668,6 +1675,15 @@ const ACCOUNT_SPLIT = () => ({
       { group: 'Fax Lines', dimension: 'dids.fax', dimensions: ['dids.fax'], billed: 0, entitled: 0, observed: 1, verdict: 'unbaselined',
         items: [{ key: 'branch.example/did:+15550102', label: '+15550102', status: 'unreviewed', domain: 'branch.example', site: 'North', attribution: 'site' }],
         unreviewed: 1, stale: 0, offers: [] },
+      // The BILLED E911 row: one retail line pays for either model, so the group counts both dimensions
+      // and both kinds of item sit on it. Each is shared with the other site account, like an address.
+      { group: 'E911 and Number', dimension: 'e911Endpoints', dimensions: ['e911Endpoints', 'e911Legacy'], billed: 2, observed: 2, verdict: 'match',
+        items: [
+          { key: 'branch.example/e911:3175550100', label: '3175550100 — Branch North, 1 Main St, Springfield', status: 'unreviewed', domain: 'branch.example', attribution: 'site',
+            sharedWith: [{ accountNumber: 'CLI00003', accountName: 'Branch South' }] },
+          { key: 'branch.example/e911legacy:3175550900', label: '3175550900 — legacy E911 (2 users)', status: 'unreviewed', domain: 'branch.example', attribution: 'site',
+            sharedWith: [{ accountNumber: 'CLI00003', accountName: 'Branch South' }] },
+        ], unreviewed: 2, stale: 0, offers: [] },
       // The fourth kind, so the chip set is complete in one sweep.
       { group: 'sms', dimension: 'smsNumbers', dimensions: ['smsNumbers'], billed: 1, observed: 1, verdict: 'match',
         items: [{ key: 'other.example/sms:+15550200', label: '+15550200', status: 'unreviewed', domain: 'other.example', attribution: 'domain' }],
@@ -1732,9 +1748,27 @@ const ACCOUNT_SPLIT = () => ({
   ok(itemCell('branch.example/did:+15550100').startsWith('<span class="kind kind-did">number</span>+15550100'), '[kind] a number says number');
   ok(itemCell('branch.example/addr:a-2').startsWith('<span class="kind kind-addr">E911 address</span>North dock'), '[kind] an address says E911 address');
   ok(itemCell('other.example/sms:+15550200').startsWith('<span class="kind kind-sms">SMS number</span>+15550200'), '[kind] and an SMS number says SMS number');
+  // The billed E911 unit and the model that predates it. Both look like bare phone numbers in the label
+  // cell, so without the chip a reader cannot tell either from a DID.
+  ok(itemCell('branch.example/e911:3175550100').startsWith('<span class="kind kind-e911">E911 endpoint</span>3175550100'),
+    '[kind] an endpoint says E911 endpoint');
+  ok(itemCell('branch.example/e911legacy:3175550900').startsWith('<span class="kind kind-e911legacy">Legacy E911</span>3175550900'),
+    '[kind] and a legacy number says Legacy E911 rather than borrowing the endpoint chip');
   // The Unassigned rows carry it too — that list mixes all four kinds by construction.
   ok(rw.includes('<td><span class="kind kind-addr">E911 address</span>Shared</td>'), '[kind] the Unassigned list is chipped the same way');
   ok(rw.includes('<td><span class="kind kind-did">number</span>+15550999</td>'), '[kind] including its numbers');
+  ok(rw.includes('<span class="kind kind-e911">E911 endpoint</span>3175550101 — Branch Annex, 2 Side St, Springfield'),
+    '[kind] and its endpoints');
+  // The DETAIL cell: the label is a bare callback number, and who the carrier announces and where it
+  // sends responders is the only thing on the page that says which place the line bills for.
+  /** One item row's DETAIL cell — the third, after the checkbox and the label. */
+  const detailCell = (k: string): string => ((rw.split(`<tr data-item-key="${k}"`)[1] ?? '').split('</td><td>')[2] ?? '');
+  ok(detailCell('branch.example/e911:3175550100').startsWith('Branch North · 1 Main St, Springfield'),
+    '[kind] an endpoint line says who it announces and where it dispatches');
+  ok(rw.includes('<td>Branch Annex · 2 Side St, Springfield</td>'), '[kind] and the Unassigned list says the same, off the record on its own row');
+  // A legacy number has no record to describe — it is derived from the users, not read — so the cell is
+  // empty rather than carrying a sentence invented for it.
+  ok(detailCell('branch.example/e911legacy:3175550900') === '', '[kind] while a legacy number has nothing to describe - it is derived, not read');
   // The stylesheet has to know the class, or it renders as an unstyled word beside the label.
   ok(onebillHtml({ canWrite: true, version: 't' }).includes('.kind {'), '[kind] and the stylesheet has a rule for it - an unstyled word beside the label reads as a rendering bug');
 
@@ -1768,6 +1802,14 @@ const ACCOUNT_SPLIT = () => ({
   ok(!/data-act="assign"/.test(addrRow('a-2')) && !/data-act="assign"/.test(addrRow('a-3')),
     '[shared] and neither offers a picker, both of the domain\'s holders already being on it');
   ok(!/data-placed/.test(addrRow('a-2')), '[shared] no Move on an address at all - the control that would take a bundle away');
+  // An ENDPOINT and a LEGACY number are the same kind of thing — a place the carrier bills a line for —
+  // so they take the set controls too. Getting the extension's Move here would offer to take an E911
+  // line off an account that really does bill for the place.
+  const e911Row = (k: string): string => (rw.split(`<tr data-item-key="branch.example/${k}"`)[1] ?? '').split('</tr>')[0] ?? '';
+  ok(!/data-placed/.test(e911Row('e911:3175550100')) && !/data-placed/.test(e911Row('e911legacy:3175550900')),
+    '[shared] an endpoint and a legacy number are never offered Move either');
+  ok(e911Row('e911:3175550100').includes('also on') && e911Row('e911legacy:3175550900').includes('also on'),
+    '[shared] and both say which other account holds them');
   ok(rw.split('<tr data-item-key="branch.example/ext:100"')[1]!.split('</tr>')[0]!.includes('data-placed="1"'),
     '[shared] while an extension still moves, being a fact about one thing');
   // WRITE SURFACE ONLY, the same rule every other control here follows.
@@ -1829,7 +1871,7 @@ const ACCOUNT_SPLIT = () => ({
     '[scoped] an account with nothing unassigned gets no list at all');
 
   // ── the domain totals line ────────────────────────────────────────────────────────────────────
-  ok(rw.includes('<div class="dim small">of branch.example: 9 extensions · 11 numbers · 2 fax lines · 3 E911 addresses · 2 SMS numbers</div>'),
+  ok(rw.includes('<div class="dim small">of branch.example: 9 extensions · 11 numbers · 2 fax lines · 2 E911 endpoints · 1 legacy E911 · 3 E911 addresses · 2 SMS numbers</div>'),
     '[scoped] the inventory says what the whole domain holds beside the account\'s slice');
   ok(!/of other\.example:/.test(rw), '[scoped] and says nothing for a domain the account holds entirely');
   ok(!/of acme\.example:/.test(renderAccountPanel(ACCOUNT() as never, true)),
@@ -1861,6 +1903,11 @@ const ACCOUNT_SPLIT = () => ({
   ok(doc.includes('.where {'), '[scoped] and a .where rule');
   ok(doc.includes('table.una {'), '[scoped] and a table.una rule');
   ok(doc.includes('table.una td {'), '[scoped] whose cells are styled too, the panel having no other table like it');
+  // Every `.kind-<token>` the renderer can print needs to be in the stylesheet's selector list, or the
+  // next person giving one kind a colour will not find the two newest ones there to give it to.
+  for (const k of ['kind-ext', 'kind-did', 'kind-fax', 'kind-addr', 'kind-e911', 'kind-e911legacy', 'kind-sms']) {
+    ok(new RegExp(`\\.${k}[,\\s]`).test(doc), `[scoped] and the stylesheet names .${k}`);
+  }
 
   // ── the two copies, byte for byte, on every branch this fixture has ───────────────────────────
   for (const [rep, what] of [
@@ -2161,11 +2208,11 @@ const OFFERS_ACCOUNT = () => ({
   const staleItem = rw.split('<tr data-item-key=').find((x) => x.startsWith('"other.example/did:+15550999"')) ?? '';
   ok(staleItem !== '' && /<td class="sel"><button type="button" class="btn small" data-act="clear-item"/.test(staleItem),
     '[sel] a stale item gets its Clear with no checkbox before it');
-  ok((rw.match(/data-role="pick"/g) ?? []).length === 11,
+  ok((rw.match(/data-role="pick"/g) ?? []).length === 13,
     `[sel] so the panel has one box per non-stale item (${(rw.match(/data-role="pick"/g) ?? []).length})`);
 
   // One tick-everything box per item list, write build only.
-  ok((rw.match(/data-role="pick-all"/g) ?? []).length === 6, '[sel] each item list is headed by one pick-all box');
+  ok((rw.match(/data-role="pick-all"/g) ?? []).length === 7, '[sel] each item list is headed by one pick-all box');
   ok(rw.includes('<tr class="ihead"><td class="sel"><input type="checkbox" data-role="pick-all" aria-label="Select every unreviewed item"></td><td></td><td></td><td></td><td class="act"></td></tr>'),
     '[sel] whose header row has the same five cells as the rows under it, so the columns cannot drift');
   ok(rw.indexOf('<tr class="ihead">') < rw.indexOf('<tr data-item-key='), '[sel] and heads the list rather than trailing it');
@@ -2227,7 +2274,6 @@ const OFFERS_ACCOUNT = () => ({
     '[pick js] the group is walked to, never built into a selector out of a rulebook name');
   ok(/var picked=\(act==='accept-selected'\|\|act==='clear-selected'\)\?obPickedItems\(group\):null/.test(wjs),
     '[pick js] the selection is read ONCE, when the button is clicked, so a later tick cannot change what was confirmed');
-  ok(/Accept the '\+nc\+' selected unreviewed item/.test(wjs), '[pick js] Accept selected confirms, naming how many and which group');
   ok(/Clear the '\+nc\+' selected accepted item/.test(wjs), '[pick js] and Clear selected likewise');
   ok(wjs.includes("obSay('Nothing is selected on that row.')"), '[pick js] a -selected click with nothing ticked says so rather than sending an empty list');
 
@@ -2325,6 +2371,13 @@ const OFFERS_ACCOUNT = () => ({
   ok(/<table class="nodev"><tbody><tr><td>201<\/td><td>Dee Fox · HQ · Basic User<\/td><\/tr><\/tbody><\/table>/.test(rw),
     '[nodev] and lists each by extension, name, site and scope');
   ok(rw.indexOf('What is on the phone system') < rw.indexOf('details class="nodev"'), '[nodev] under the inventory heading');
+  {
+    // The billed E911 unit leads, and the ADDRESS count stays beneath it as information — an address is
+    // where responders are sent, and nobody bills one.
+    const inv = renderAccountPanel(ACCOUNT_SPLIT() as never, true);
+    ok(inv.includes('<li>E911 endpoints - 1 · legacy numbers - 1</li><li>E911 addresses - 1</li>'),
+      '[nodev] the inventory counts endpoints and legacy numbers, with addresses kept below as information');
+  }
   ok(!/data-act=/.test(rw.slice(rw.indexOf('<details class="nodev"'))), '[nodev] with no control on it - it is a reading, not a decision');
   ok(!/class="nodev"/.test(renderAccountPanel(ACCOUNT() as never, true)),
     '[nodev] and no block at all where every extension has something');

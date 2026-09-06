@@ -861,5 +861,87 @@ function selectOneReference(raw: unknown, ctx: { domain: string; app: string; sc
     '[mixed] and so does the named-axis form, which is where those keys belong');
 }
 
+// ── `handoff: "ns_t"` — an entry that POSTs the caller's session token to another tool ───────────────
+// The token must never travel in a URL, so a handoff entry is a form, not a link — and because it sends
+// a working credential to a third party, the url alone is not permission enough: the destination's
+// ORIGIN must also be named in PORTAL_HANDOFF_ORIGINS. Two settings, so a menu edit alone can never
+// send the token somewhere new. Everything here is refused at startup, on the same path as a bad scheme.
+{
+  const TOOLS = 'https://tools.example.com';
+  const H = (item: Record<string, unknown>, origins?: string) => ({
+    PORTAL_MENUS: JSON.stringify({ management: { add: [{ label: 'Bulk tool', url: `${TOOLS}/launch`, handoff: 'ns_t', ...item }] } }),
+    ...(origins === undefined ? {} : { PORTAL_HANDOFF_ORIGINS: origins }),
+  });
+  const plan = (env: Record<string, string>) => resolveMenus(env, { domain: ACME, app: 'none' }).management.add;
+
+  // ── parse ─────────────────────────────────────────────────────────────────────────────────────────
+  const got = plan(H({}, TOOLS));
+  ok(got.length === 1 && got[0]!.handoff === 'ns_t', '[handoff] an item with handoff:"ns_t" resolves and carries the field to the plan');
+  ok(menuConfigError(H({}, TOOLS)) === null, '[handoff] and the startup check accepts it');
+  ok(!('handoff' in resolveMenus(M({ apps: { add: [{ label: 'L', url: 'https://s.example/' }] } }), { domain: ACME, app: 'none' }).apps.add[0]!),
+    '[handoff] a plain item carries no handoff key at all — the applier tests for presence');
+
+  // ── only the one literal value ──────────────────────────────────────────────────────────────────────
+  for (const bad of [true, 1, 'yes', 'NS_T', 'token', '', null]) {
+    ok(threw(() => plan(H({ handoff: bad }, TOOLS))), `[handoff] handoff:${JSON.stringify(bad)} is refused — the field is the literal "ns_t", not a boolean`);
+  }
+  {
+    const err = menuConfigError(H({ handoff: true }, TOOLS));
+    ok(!!err && /ns_t/.test(err), `[handoff] and the error names the accepted value (${err})`);
+  }
+
+  // ── the second key: the origin allow-list ───────────────────────────────────────────────────────────
+  ok(threw(() => plan(H({}))), '[handoff] with PORTAL_HANDOFF_ORIGINS unset, a handoff item is a config error');
+  {
+    const err = menuConfigError(H({}));
+    ok(!!err && /PORTAL_HANDOFF_ORIGINS/.test(err), `[handoff] and the error names the setting to add (${err})`);
+  }
+  ok(threw(() => plan(H({}, ''))), '[handoff] an empty list is the same as unset — nothing is allowed');
+  ok(threw(() => plan(H({}, 'https://other.example.com'))), '[handoff] an origin not in the list is refused');
+  {
+    const err = menuConfigError(H({}, 'https://other.example.com'));
+    ok(!!err && /tools\.example\.com/.test(err) && /PORTAL_HANDOFF_ORIGINS/.test(err),
+      `[handoff] naming the origin that was refused and the list that would admit it (${err})`);
+  }
+  ok(plan(H({}, `https://other.example.com, ${TOOLS}`)).length === 1, '[handoff] a comma-separated list admits any listed origin, whitespace tolerated');
+  // Exact origin: scheme + host + port. The receiver compares the browser's Origin header the same way.
+  ok(threw(() => plan(H({}, 'https://tools.example.com:8443'))), '[handoff] a different port is a different origin');
+  ok(threw(() => plan(H({}, 'https://sub.tools.example.com'))), '[handoff] a subdomain is a different origin');
+  ok(threw(() => plan(H({ url: 'https://tools.example.com:8443/launch' }, TOOLS))), '[handoff] and the other way round');
+  ok(plan(H({ url: 'https://TOOLS.example.com/launch' }, TOOLS)).length === 1, '[handoff] the host compares case-insensitively, as a browser would');
+  // The list itself is validated: an entry with a path is not an origin and would never match anything.
+  ok(threw(() => plan(H({}, `${TOOLS}/launch`))), '[handoff] a list entry carrying a path is refused rather than silently never matching');
+  ok(threw(() => plan(H({}, 'http://tools.example.com'))), '[handoff] a list entry must be https');
+  ok(threw(() => plan(H({}, 'tools.example.com'))), '[handoff] a bare host is not an origin');
+  ok(plan(H({}, `${TOOLS}/`)).length === 1, '[handoff] a trailing slash is the same origin — it is how a browser prints one');
+  // Present but unused is legal: an operator can list the origin before writing the entry.
+  ok(menuConfigError({ PORTAL_MENUS: JSON.stringify({ apps: { add: [{ label: 'L', url: 'https://s.example/' }] } }), PORTAL_HANDOFF_ORIGINS: TOOLS }) === null,
+    '[handoff] an allow-list with no handoff item using it is fine');
+  ok(menuConfigError({ PORTAL_HANDOFF_ORIGINS: TOOLS }) === null, '[handoff] and so is one with no PORTAL_MENUS at all');
+
+  // ── the url rules still apply, and one tightens ─────────────────────────────────────────────────────
+  ok(threw(() => plan(H({ url: 'mailto:x@tools.example.com' }, TOOLS))), '[handoff] mailto: cannot carry a POST — refused');
+  ok(threw(() => plan(H({ url: 'http://tools.example.com/launch' }, TOOLS))), '[handoff] plain http is still refused');
+  ok(threw(() => plan(H({ url: 'https://{fname}.example.com/launch' }, TOOLS))), '[handoff] a variable in the host is still refused');
+  ok(resolveMenus(H({ url: `${TOOLS}/launch?from={page}&d={domain}` }, TOOLS), { domain: ACME, app: 'none', vars: { domain: ACME } }).management.add[0]!.url
+    === `${TOOLS}/launch?from={page}&d=acme.example`,
+    '[handoff] variables in the path and query still interpolate — the origin is what is pinned');
+
+  // ── plain items are unaffected ──────────────────────────────────────────────────────────────────────
+  ok(menuConfigError(M({ management: { add: [{ label: 'Docs', url: 'https://anywhere.example.com/x' }] } })) === null,
+    '[handoff] a plain link to an unlisted origin is still fine — the allow-list gates the token, not links');
+  {
+    // The raw half the console round-trips keeps the field, so the builder cannot strip it on save.
+    const rawAdds = {} as Record<string, MenuItem[]>;
+    resolveMenus(H({}, TOOLS), { domain: ACME, app: 'none' }, undefined, rawAdds as never);
+    ok(rawAdds.management?.[0]?.handoff === 'ns_t', '[handoff] the as-written half carries handoff too');
+  }
+  // Every menu goes through the same client applier, so the field is legal in all three.
+  for (const menu of MENU_NAMES) {
+    const env = { PORTAL_MENUS: JSON.stringify({ [menu]: { add: [{ label: 'T', url: `${TOOLS}/x`, handoff: 'ns_t' }] } }), PORTAL_HANDOFF_ORIGINS: TOOLS };
+    ok(menuConfigError(env) === null, `[handoff] accepted in the ${menu} menu`);
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

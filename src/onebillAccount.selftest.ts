@@ -440,6 +440,42 @@ const ACME = (): ResolvedAccountScope => resolveAccountScope(REPORT(), { domain:
 
 }
 
+// -- one E911 rule counting BOTH models, end to end through the real load path ----------------------
+{
+  // The shape the production rulebook now has: `counts: ["e911Endpoints","e911Legacy"]`, so one retail
+  // line pays for a domain on either model — and, on a half-migrated one, for both without paying twice.
+  // branch.example carries an endpoint (100 and 200 reference it) and one number that is NOT provisioned
+  // as an endpoint (300 carries it by hand, with no emergency address, which is the legacy shape).
+  const env = { ONEBILL_TENANT_ID: 't', ONEBILL_CLIENT_SECRET: 's', ONEBILL_USERNAME: 'u', ONEBILL_PASSWORD: 'p',
+    CACHE_SCOPE: 'test-e911-both',
+    ONEBILL_RECURRING_RULES: '[{"offer":"E911","counts":["e911Endpoints","e911Legacy"],"group":"E911 and Number","alsoCounts":{"dids.total":1}}]' };
+  const { cache } = fakeCache();
+  const ns = { get: async (p: string) => {
+    const branch = p.includes('/domains/branch.example/');
+    if (!branch) return [];
+    if (/\/users$/.test(p)) return [
+      { user: '100', site: 'North', 'service-code': '', 'emergency-address-id': 'a-1', 'caller-id-number-emergency': '13175550100' },
+      { user: '200', site: 'South', 'service-code': '', 'emergency-address-id': 'a-1', 'caller-id-number-emergency': '3175550100' },
+      { user: '300', site: 'North', 'service-code': '', 'caller-id-number-emergency': '3175550900' },
+    ];
+    if (/\/addresses$/.test(p)) return [{ 'emergency-address-id': 'a-1', 'address-name': 'Shared dock' }];
+    if (/\/addresses\/endpoints$/.test(p)) return [{ 'emergency-address-id': '3175550100', 'address-name': 'Shared dock', 'caller-name': 'Branch', 'address-line-1': '1 Main St', 'address-city': 'Springfield', 'count-users-configured': 2 }];
+    return [];
+  } } as never;
+  const readSource = { getSubscriptions: async () => [] as never };
+  const f = fakeD1();
+  const north = resolveAccountScope(REPORT(), { account: 'CLI00002' });
+  const rep = await loadAccountReport(env as never, cache, ns, REPORT(), north, { canWrite: true, readSource, db: f.db });
+  const row = rep.comparison.rows.find((r) => r.group === 'E911 and Number')!;
+  ok(row !== undefined && row.observed === 2, '[e911 rule] one rule counting both dimensions observes the endpoint AND the legacy number');
+  ok(!row.observedMissing, '[e911 rule] and both paths are dimensions the counter knows - a typo here reads as zero live');
+  ok(row.items!.map((i) => i.key).sort().join() === 'branch.example/e911:3175550100,branch.example/e911legacy:3175550900',
+    '[e911 rule] the two item lists are unioned onto the one row');
+  ok(rep.inventory.e911Endpoints === 1 && rep.inventory.e911Legacy === 1 && rep.inventory.e911Addresses === 1,
+    '[e911 rule] and the three E911 dimensions are counted apart - the endpoint callback is never also a legacy number');
+  ok(row.items!.every((i) => i.sharedWith === undefined || i.sharedWith.length > 0), '[e911 rule] sharedWith is present or absent, never an empty list');
+}
+
 // -- an ADDRESS is assigned additively, removed per account, and shows the co-holder's bill ----------
 {
   // branch.example is split North (CLI00002) / South (CLI00003), and one address is referenced from
@@ -552,7 +588,8 @@ const ACME = (): ResolvedAccountScope => resolveAccountScope(REPORT(), { domain:
   ok(wholeClear?.status === 409 && /remove one instead/.test(wholeClear?.message ?? ''),
     'clearing an address outright is refused - it has per-account assignments, and the operator has to say which');
   const removeExt = await bad({ domain: 'branch.example', key: 'ext:100', accountNumber: 'CLI00002', remove: true });
-  ok(removeExt?.status === 409 && /only an address/.test(removeExt?.message ?? ''), 'and `remove` on anything but an address is refused rather than doing the clear it resembles');
+  ok(removeExt?.status === 409 && /only an E911 address, endpoint or legacy number/.test(removeExt?.message ?? ''),
+    'and `remove` on anything but a shared E911 kind is refused rather than doing the clear it resembles');
   const removeNothing = await bad({ domain: 'branch.example', key: 'addr:a-1', accountNumber: 'CLI00002', remove: true });
   ok(removeNothing?.status === 409 && /not manually assigned/.test(removeNothing?.message ?? ''), 'removing an account that has no row on the address says so');
 
@@ -770,7 +807,7 @@ const ACME = (): ResolvedAccountScope => resolveAccountScope(REPORT(), { domain:
   // Fax lines changed what a `domain` entry MEANS, so its shape segment had to move: a ten-minute-old v1
   // entry read as current would count every fax line as a DID while looking exactly like a fresh read.
   const key = (await domainEntryKey({ ...base, CACHE_SCOPE: 'test-fax' } as never, 'acme.example')).url;
-  ok(key.includes('/domain/v3/'), 'the domain cache key carries the v3 shape segment');
+  ok(key.includes('/domain/v4/'), 'the domain cache key carries the current shape segment');
   ok(!key.includes('/domain/v1/'), 'and no longer the v1 one, so every entry built before this is orphaned rather than trusted');
 }
 
@@ -867,8 +904,9 @@ const ACME = (): ResolvedAccountScope => resolveAccountScope(REPORT(), { domain:
 
   // The legend is baked into the cached inventory, so its arrival moved the shape segment with it.
   const key = (await domainEntryKey({ ...base, CACHE_SCOPE: 'test-suf-default' } as never, 'acme.example')).url;
-  ok(key.includes('/domain/v3/'), 'the device-suffix legend took the domain cache key to v3');
-  ok(!key.includes('/domain/v2/'), 'so every entry built before it, with no suffix or kind on any device, is orphaned rather than trusted');
+  ok(key.includes('/domain/v4/'), 'the device-suffix legend moved the domain cache key, and the E911 endpoints moved it again');
+  ok(!key.includes('/domain/v2/') && !key.includes('/domain/v3/'),
+    'so every entry built before either, with no suffix on a device and no endpoint list at all, is orphaned rather than trusted');
 }
 
 // -- a stale acceptance can be cleared, never re-accepted ------------------------------------------
