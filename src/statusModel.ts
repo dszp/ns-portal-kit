@@ -779,9 +779,9 @@ export const SETTINGS: SettingDef[] = [
     affects: ['onebill.view'] },
 
   { name: 'NS_DEVICE_SUFFIXES', group: 'onebill', kind: 'config',
-    gatedBy: 'ONEBILL_CLIENT_SECRET', example: '{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"Teams","teams":true},"ai":{"label":"Acme App iOS"},"aa":{"label":"Acme App Android"},"aw":{"label":"Acme App Windows"}}',
+    gatedBy: 'ONEBILL_CLIENT_SECRET', example: '{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"SNAPmobile Tablet"},"tm":{"label":"Teams","teams":true},"ai":{"label":"Acme App iOS"},"aa":{"label":"Acme App Android"},"aw":{"label":"Acme App Windows"}}',
     what: 'JSON object naming what a device-name suffix means here - the part of a device name after the extension number, so "1001wp" has suffix "wp". The label is printed on the device chip, and the suffix marked "teams" is what identifies a Microsoft Teams connector. Setting it replaces the default legend rather than adding to it. An app that registers one suffix per platform gets one entry per suffix: the suffix is the whole remainder after the extension number, so "ai" and "a" are different keys.',
-    whenUnset: 'The three suffixes NetSapiens itself ships: wp SNAPmobile Web, m SNAPmobile, t Teams. Ringotel adds its activation suffix on top whenever that integration is enabled.',
+    whenUnset: 'The four suffixes NetSapiens itself ships: wp SNAPmobile Web, m SNAPmobile, t SNAPmobile Tablet, tm Teams (TeamMate). A deployment whose TeamMate connectors still register as <ext>t must set this and mark t teams:true itself. Ringotel adds its activation suffix on top whenever that integration is enabled.',
     affects: ['onebill.view'] },
 
   // ── eligibility: who gets an app device on activation, and the write safety rail ──────────────────

@@ -106,8 +106,10 @@ export interface OnebillEnv extends Pick<RingotelEnv, 'CACHE_SCOPE' | 'RINGOTEL_
    * `{"<suffix>": {"label": "<what it is>", "teams": true?}}`. A device's suffix is what its name carries
    * after the extension number (`1001wp` on ext `1001` → `wp`).
    *
-   * Unset means netsapiens-lib's default legend, the three suffixes NetSapiens itself ships: `wp`
-   * SNAPmobile Web, `m` SNAPmobile, `t` Teams. Set, it REPLACES that default wholesale rather than
+   * Unset means netsapiens-lib's default legend, the four suffixes NetSapiens itself ships: `wp`
+   * SNAPmobile Web, `m` SNAPmobile, `t` SNAPmobile Tablet, `tm` Teams (TeamMate). NetSapiens moved
+   * TeamMate from `t` to `tm`; a deployment whose connectors still register as `<ext>t` sets this and
+   * marks `t` teams:true itself, beside `tm`. Set, it REPLACES that default wholesale rather than
    * merging with it — which is the only way a deployment without TeamMate can say so, by omitting `t` and
    * turning Teams detection off. Whatever the value, the Ringotel activation suffix is added on top when
    * that integration is enabled; see `inventoryOpts` in onebillAccount.ts.

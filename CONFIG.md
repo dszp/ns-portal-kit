@@ -844,14 +844,19 @@ carries after the extension number: `1001wp` on extension `1001` has suffix `wp`
 none. The account panel prints the label on the device chip, and the suffix marked `teams` is what
 identifies a Microsoft Teams connector — which is the device the seat counts deliberately exclude.
 
-- **Example** `{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"Teams","teams":true},"ai":{"label":"Acme App iOS"},"aa":{"label":"Acme App Android"},"aw":{"label":"Acme App Windows"}}`
-- **Unset** The three suffixes NetSapiens itself ships: `wp` SNAPmobile Web, `m` SNAPmobile, and `t` Teams
-  (`teams: true`).
+- **Example** `{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"SNAPmobile Tablet"},"tm":{"label":"Teams","teams":true},"ai":{"label":"Acme App iOS"},"aa":{"label":"Acme App Android"},"aw":{"label":"Acme App Windows"}}`
+- **Unset** The four suffixes NetSapiens itself ships: `wp` SNAPmobile Web, `m` SNAPmobile, `t` SNAPmobile
+  Tablet, and `tm` Teams (`teams: true`).
 
 **Setting it REPLACES the default, it does not add to it.** Whatever you write is the whole legend, so
-the example above restates `wp`, `m` and `t` in order to keep them. That is deliberate: a deployment
-without TeamMate omits `t`, and Teams detection is then off entirely — every `<ext>t` device is a handset
+the example above restates `wp`, `m`, `t` and `tm` in order to keep them. That is deliberate: a deployment
+without TeamMate omits `tm`, and Teams detection is then off entirely — every `<ext>tm` device is a handset
 and is counted as one — which a merge could not express.
+
+**TeamMate moved from `t` to `tm`.** NetSapiens now reserves `t` for SNAPmobile on a tablet and recommends
+`tm` for the Teams connector, and the default legend follows. If your connectors still register as
+`<ext>t`, set this and mark `t` as `{"label":"Teams","teams":true}` beside `tm` — both may carry `teams` —
+or those extensions stop counting as Teams-connected and the connector is counted as a handset.
 
 **One entry per suffix, not per app.** The suffix is the whole remainder after the extension number,
 matched exactly, so an app that registers under one suffix per platform — `1001ai` on iOS, `1001aa` on

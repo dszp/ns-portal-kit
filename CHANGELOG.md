@@ -24,6 +24,7 @@ release. The version at `/health` always matches a heading here.
 
 ### Changed
 
+- **The default device-suffix legend follows NetSapiens: `t` is SNAPmobile Tablet and `tm` is the TeamMate Teams connector** (`@dszp/netsapiens-lib` 0.10.0). If your connectors still register as `<ext>t` and `NS_DEVICE_SUFFIXES` is unset, they stop counting as Teams-connected on upgrade: set the legend and mark `t` `teams:true` beside `tm`.
 - The `NS_DEVICE_SUFFIXES` example and reference now show an app that registers one suffix per platform, and say that each suffix needs its own entry because the suffix is matched whole.
 
 ### Fixed
