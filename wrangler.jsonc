@@ -120,8 +120,9 @@
     //
     // What a device-name suffix means here - the part of a device name after the extension number, so
     // "1001wp" has suffix "wp". Setting this replaces the default legend (wp/m/t) rather than adding to
-    // it, so restate the ones you want to keep. Omit "t" and Teams detection is off entirely.
-    // "NS_DEVICE_SUFFIXES": "{\"wp\":{\"label\":\"SNAPmobile Web\"},\"m\":{\"label\":\"SNAPmobile\"},\"t\":{\"label\":\"Teams\",\"teams\":true}}"
+    // it, so restate the ones you want to keep. Omit "t" and Teams detection is off entirely. An app that
+    // registers one suffix per platform needs one entry per suffix - the suffix is matched whole.
+    // "NS_DEVICE_SUFFIXES": "{\"wp\":{\"label\":\"SNAPmobile Web\"},\"m\":{\"label\":\"SNAPmobile\"},\"t\":{\"label\":\"Teams\",\"teams\":true},\"ai\":{\"label\":\"Acme App iOS\"},\"aa\":{\"label\":\"Acme App Android\"},\"aw\":{\"label\":\"Acme App Windows\"}}"
   },
 
   // NB: do NOT also declare ALLOWED_ORIGINS / ALLOWED_DOMAINS in a .dev.vars file. A key present in

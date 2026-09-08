@@ -22,6 +22,10 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+### Changed
+
+- The `NS_DEVICE_SUFFIXES` example and reference now show an app that registers one suffix per platform, and say that each suffix needs its own entry because the suffix is matched whole.
+
 ### Fixed
 
 - A `handoff` menu entry is drawn as an anchor that is the row's direct child, so the portal's own dropdown hover applies; the form sits hidden beside it and the token still travels only in the POST body.

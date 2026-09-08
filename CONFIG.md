@@ -844,7 +844,7 @@ carries after the extension number: `1001wp` on extension `1001` has suffix `wp`
 none. The account panel prints the label on the device chip, and the suffix marked `teams` is what
 identifies a Microsoft Teams connector — which is the device the seat counts deliberately exclude.
 
-- **Example** `{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"Teams","teams":true},"d":{"label":"Acme Desktop"}}`
+- **Example** `{"wp":{"label":"SNAPmobile Web"},"m":{"label":"SNAPmobile"},"t":{"label":"Teams","teams":true},"ai":{"label":"Acme App iOS"},"aa":{"label":"Acme App Android"},"aw":{"label":"Acme App Windows"}}`
 - **Unset** The three suffixes NetSapiens itself ships: `wp` SNAPmobile Web, `m` SNAPmobile, and `t` Teams
   (`teams: true`).
 
@@ -852,6 +852,11 @@ identifies a Microsoft Teams connector — which is the device the seat counts d
 the example above restates `wp`, `m` and `t` in order to keep them. That is deliberate: a deployment
 without TeamMate omits `t`, and Teams detection is then off entirely — every `<ext>t` device is a handset
 and is counted as one — which a merge could not express.
+
+**One entry per suffix, not per app.** The suffix is the whole remainder after the extension number,
+matched exactly, so an app that registers under one suffix per platform — `1001ai` on iOS, `1001aa` on
+Android — needs an entry for each, and `a` on its own would match neither. The example above shows the
+shape.
 
 **A suffix the legend does not carry has no label.** Its chip falls back to the device model, and to
 `(no model)` when NetSapiens has none. Nothing is guessed from an unlisted suffix.
