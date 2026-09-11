@@ -76,7 +76,8 @@ is a question answered by logging into a second system, one user at a time.
 
 Authorized roles can activate or deactivate a user's app account, and reset its password, without leaving
 the NetSapiens user profile. There is also a **preview-and-apply** tool that pre-populates a whole domain's
-directory with inactive entries.
+directory with inactive entries, and an [automatic mode](#auto-directory) that runs the same reconcile
+hourly with nobody clicking it.
 
 **Why?** Because the alternative is a second admin console, a second set of credentials, and a
 copy-and-paste step where extensions get transposed. These are writes, so they are gated harder than
@@ -322,6 +323,7 @@ its own minimum is met.
 |---|---|---|
 | **App status** (banner, user column, domain column) | [`RINGOTEL_API_KEY`](./CONFIG.md#RINGOTEL_API_KEY) | That single key is the gate for everything app-related. Absent, the routes 404 and the kit behaves as if the integration did not exist. |
 | **App activation / reset / pre-population** (writes) | `RINGOTEL_API_KEY` **+** [`RINGOTEL_WRITE_DOMAINS`](./CONFIG.md#RINGOTEL_WRITE_DOMAINS) | The write rail is **fail-closed**: empty refuses every write. Set it to the domains you mean, or `*`. |
+| **Automatic app directory** (the reconcile) | the write rail **+** [`RINGOTEL_PREPOP_AUTO`](./CONFIG.md#RINGOTEL_PREPOP_AUTO) **+** [`NS_API_KEY`](./CONFIG.md#NS_API_KEY) (or admin credentials) **+** a cron trigger | The hourly door needs the service identity even with change events off — it reads NetSapiens with no caller to act as. Arming it is a step of its own: [below](#auto-directory). |
 | **Sign-in instructions** | `RINGOTEL_API_KEY`, then any of [`RINGOTEL_SSO_SERVICE`](./CONFIG.md#RINGOTEL_SSO_SERVICE), [`SSO_AUTO_ACTIVATE`](./CONFIG.md#SSO_AUTO_ACTIVATE), [`PORTAL_APP_DOWNLOADS`](./CONFIG.md#PORTAL_APP_DOWNLOADS) | All three fail closed. Unset means no SSO is claimed and no links are shown — never a wrong instruction. |
 | **Menu customization** | [`PORTAL_MENUS`](./CONFIG.md#PORTAL_MENUS) alone | No other integration required. With no app configured, static add, hide and rename still work. |
 | **Status banner** | [`STATUS_BANNER_WEBHOOK`](./CONFIG.md#STATUS_BANNER_WEBHOOK) — an `https` endpoint **you host** | ⚠️ It receives the signed-in user's live `ns_t` on every page load. Name only something you control. |
@@ -331,6 +333,29 @@ its own minimum is met.
 | **Accepting a gap** | the four above **+** the [`ONEBILL_DB`](./CONFIG.md#ONEBILL_DB) D1 binding, migrated | Apply `migrations/` **before** you deploy this version. Without the binding the panel still shows every gap; it just cannot record that one of them is normal. |
 | **Your own gated scripts** | [`PORTAL_SECONDARIES`](./CONFIG.md#PORTAL_SECONDARIES), plus the [`ASSETS`](./CONFIG.md#ASSETS) R2 binding for `r2:` entries | The advanced path. Most deployments start with the built-in bundles and add these later. |
 | **Rate limiting the token checks** | the [`JWT_RATE_LIMITER`](./CONFIG.md#JWT_RATE_LIMITER) binding | Optional and worth having. Without it an in-isolate limiter still applies, just per edge location. |
+
+<a id="auto-directory"></a>
+
+### Automatic app directory
+
+Two rails arm this, and they go on in this order.
+
+**1. [`RINGOTEL_PREPOP_AUTO`](./CONFIG.md#RINGOTEL_PREPOP_AUTO), one domain first.** With the service
+identity and a cron trigger in place, the hourly reconcile keeps that domain's app directory in step with
+NetSapiens on its own: a free placeholder for every user who would be provisioned on an SSO sign-in,
+renamed when NetSapiens renames them, removed when the extension goes away or stops qualifying. It needs
+neither change events nor a signed-in caller, so this alone is a complete configuration — and one run is a
+whole domain, which is why the first one is worth reading in the logs before you widen. Every removal is
+logged by extension; creates and updates arrive as counts, because those records are still there to look
+at.
+
+**2. [`NS_EVENTS_DOMAINS`](./CONFIG.md#NS_EVENTS_DOMAINS), once you trust what step 1 does.** The same
+work then happens within seconds of the change in NetSapiens instead of at the top of the hour. This is
+the half that leaves state behind in NetSapiens — it creates a subscription — so read [the depth
+notes](./CONFIG.md#events-reference) before turning it on rather than after.
+
+**The two rails are independent.** Both take `!name` exclusions after a `*`, and an exclusion on one is
+not an exclusion on the other: carve a domain out of both, or neither, deliberately.
 
 ---
 

@@ -48,19 +48,19 @@ import { worstSeverity, type HealthFlag, type User } from '@dszp/ringotel-lib';
 import { brandAccent, productName, VERSION } from './brand.js';
 import { needsSetup, setupHtml } from './setup.js';
 import { portalModeHtml } from './portalInfo.js';
-import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeWriteClient, invalidateOrgUsers, resolveForWrite, buildExtIndex, ringotelDomains, scopeOf, connectionsOf, orgidOf, type OrgResolution, type UserAppStatus } from './ringotel.js';
+import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeWriteClient, invalidateOrgUsers, resolveForWrite, buildExtIndex, ringotelDomains, scopeOf, takePrepopLock, releasePrepopLock, connectionsOf, orgidOf, type OrgResolution, type UserAppStatus } from './ringotel.js';
 // The eligibility DECISION is the shared engine in the library — one implementation with the SSO worker,
 // so the two can't drift. Only this deployment's config parsing is local.
 import { evaluateEligibility, type EligUser } from '@dszp/netsapiens-lib';
-import { resolveRingotelConfig, ringotelConfigError } from './eligibility.js';
+import { resolveRingotelConfig, ringotelConfigError, prepopArmed, type RingotelConfig } from './eligibility.js';
 import { activate, deactivate, resetPassword, isDomainWritable, RingotelWriteError } from './ringotelActivation.js';
-import { planDirectoryPrepop, applyDirectoryPrepop, type PrepopInput } from './ringotelPrepop.js';
+import { planDirectoryReconcile, applyDirectoryReconcile, planExtensionReconcile, applyDirectoryPrepop, emptyPlan, type PrepopInput, type ReconcileWriter } from './ringotelPrepop.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
 import { planDomainSweep, type SweepPlan } from './nsOffboard.js';
 import {
   parseNsEventsConfig, nsEventsConfigError, verifyEventRequest, decodeEventBatch, diagShape,
   desiredSubscriptions, ownedPrefix, applySubscriptionPlan, planInertCleanup, healthLine,
-  sweepScope, NS_EVENTS_PREFIX, locateConnection, type NsEventsConfig,
+  sweepScope, isValidEventDomain, NS_EVENTS_PREFIX, locateConnection, type NsEventsConfig,
 } from './nsEvents.js';
 import { getServiceToken } from './nsIdentity.js';
 import { syncIdentity, deactivateAppOnly, repairDeviceForEvent } from './ringotelActivation.js';
@@ -195,7 +195,9 @@ interface Env {
   RINGOTEL_EXCLUDE_EXTS_BY_DOMAIN?: string;
   /** Truthy ⇒ the no-device heuristic tightens the name matcher (default off). */
   RINGOTEL_EXCLUDE_NO_DEVICES?: string;
-  /** CSV of soft categories a reseller may override: `names|exts|no_devices|all`. */
+  /** How a user with NetSapiens' *List in Directory* off is graded: `soft` (default) or `ignore`. */
+  RINGOTEL_UNLISTED_USERS?: string;
+  /** CSV of soft categories a reseller may override: `names|exts|no_devices|unlisted|all`. */
   RINGOTEL_RESELLER_OVERRIDE?: string;
   /** WRITE SAFETY RAIL — allowlist of domains where writes may mutate. Empty ⇒ all writes refused
    *  (fail-closed); `*` ⇒ all scope-permitted; a CSV list ⇒ only those. NS + Ringotel are LIVE. */
@@ -286,8 +288,13 @@ interface Env {
   RINGOTEL_ROTATE_SIP_ON_ACTIVATE?: string;
   /** Truthy ⇒ directory pre-population also creates entries for SOFT-gated users (SHARED/VOICEMAIL/etc). */
   RINGOTEL_PREPOP_INCLUDE_SOFT?: string;
+  /** Domains the directory reconcile runs for automatically. `*` (optionally with `!domain` carve-outs,
+   *  e.g. `*,!lab.example`) or CSV; unset ⇒ off. Always intersected with RINGOTEL_WRITE_DOMAINS — see
+   *  `prepopArmed` in eligibility.ts. */
+  RINGOTEL_PREPOP_AUTO?: string;
   NS_EVENTS?: string;
-  /** Enumerated domains, or `*` for every domain the Ringotel write rail permits. Unset ⇒ inert. */
+  /** Enumerated domains, or `*` for every domain the Ringotel write rail permits, optionally with
+   *  `!domain` carve-outs (`*,!lab.example`). Unset ⇒ inert. */
   NS_EVENTS_DOMAINS?: string;
   /** This Worker's public origin. MUST be host-distinct per env, or two reconcilers fight over one
    *  subscription set (ownership is decided by post-url prefix). */
@@ -720,6 +727,78 @@ function refreshRequested(url: URL, auth: Auth, env: Env, policies: FeaturePolic
   return can(auth.principal, 'ringotel.refresh', policies);
 }
 
+/**
+ * Which of these domains a forced refresh would actually reconcile. Empty when the door is shut — the
+ * caller did not force a refresh (or may not), or nothing in front of them is armed.
+ *
+ * Separate from {@link kickReconcileOnRefresh} because two decisions hang off this answer and they
+ * happen at opposite ends of the handler: whether the request needs a fresh token re-validation BEFORE
+ * it is answered, and what to reconcile AFTER it has been. Computing it twice would let the two drift.
+ */
+function armedForRefresh(domains: string[], refresh: boolean, rtConfig: RingotelConfig): string[] {
+  if (!refresh) return [];
+  return domains.filter((d) => prepopArmed(d, rtConfig));
+}
+
+/**
+ * The refresh door: a forced refresh on an armed domain also reconciles its Ringotel directory.
+ *
+ * The third door onto the same `reconcileDomainDirectory` the event tier and the cron use. It exists
+ * because the other two leave a gap an operator can see: events are at-least-once and the cron is
+ * hourly, so someone who has just noticed drift has no way to ask for convergence now except the apply
+ * route, which is a decision they may not want to make. A forced refresh is already the operator
+ * capability for "re-dig this, I do not trust the cache" (`ringotel.refresh`, checked by
+ * `refreshRequested`), so it is the honest place to hang it.
+ *
+ * **Call this AFTER the route's own read has completed.** The reconcile ends by invalidating the org's
+ * user cache; a forced refresh re-populates that same cache for ten minutes. Kicked first, the two race,
+ * and the loser is the foreground read — it can `put` a list it fetched BEFORE the reconcile's creates
+ * and then serve it, pinned, long after the records exist. Deferred work started after the read cannot
+ * invalidate a cache entry the read has already written.
+ *
+ * Four properties this must keep:
+ *  - **After the response.** `ctx.waitUntil`, never awaited — the read's latency and status are decided
+ *    without it, so an operator's refresh cannot start failing because a reconcile did.
+ *  - **On the SERVICE identity.** The caller's `ns_t` must not be handed to work that outlives the
+ *    request: it can be invalidated by a logout the moment the response is sent, and a background task
+ *    holding it would be acting as a user who is no longer there.
+ *  - **No new gate, but a FRESH one.** It adds nothing to who may do what — `refreshRequested` already
+ *    carries the capability check and `prepopArmed` is the pair of rails the cron runs behind. What it
+ *    does change is that a `read` route can now initiate writes, so the caller must first re-validate
+ *    the token live (`requireFreshAuth`) whenever `armedForRefresh` is non-empty: a logged-out session
+ *    then fails the read with its usual 401 instead of silently triggering a write. The caller chooses
+ *    WHEN, because only the caller knows whether anything in front of it is armed, and taxing every
+ *    plain read with a live `/jwt` round trip to cover the refresh case would be the wrong trade. The
+ *    writes themselves are the SERVICE identity's, confined to armed domains, carry no caller-supplied
+ *    payload, and are the same ones the cron performs hourly regardless — so freshness is required
+ *    exactly where a write could be initiated, and nowhere else.
+ *  - **ONE deferred task, whatever the domain count.** `domains` is a list because `/rapp/orgs` refreshes
+ *    a whole visible fleet, and a `waitUntil` per domain would fan a single click out into N concurrent
+ *    reconciles sharing one invocation's subrequest budget. They run SEQUENTIALLY inside one task, the
+ *    shape `runDirectoryReconcile` already uses — isolated per domain, so one failure never stops the
+ *    rest. The single-domain routes pass a one-element list rather than getting a second entry point.
+ *
+ * Takes the list {@link armedForRefresh} already filtered: silent on an empty one, and silent when no
+ * service identity is configured. Both are ordinary deployment states, not faults, and a log line per
+ * refresh would say nothing the config does not.
+ */
+function kickReconcileOnRefresh(ctx: ExecutionContext, env: Env, armed: string[]): void {
+  if (!armed.length) return;
+  const cfg = parseNsEventsConfig(env);
+  if (!cfg.identity) return;
+  ctx.waitUntil((async () => {
+    const token = await getServiceToken(cfg.identity!, env);
+    const client = new NsClient({ server: assertBareServer(env.NS_SERVER), token });
+    for (const domain of armed) {
+      try {
+        await reconcileDomainDirectory(env, caches.default, client, domain);
+      } catch (e) {
+        console.error(JSON.stringify({ msg: 'prepop reconcile (refresh) failed', domain, error: String((e as Error)?.message ?? e).slice(0, 200) }));
+      }
+    }
+  })().catch((e) => console.error(JSON.stringify({ msg: 'prepop reconcile (refresh) failed', error: String((e as Error)?.message ?? e).slice(0, 200) }))));
+}
+
 /** Which domain this request may act on, from a raw domain value (query for reads, JSON body for writes):
  *  delegated is locked to its own; service/reseller takes the supplied domain. The ALLOWED_DOMAINS gate
  *  applies to BOTH modes — a domain outside it is refused (403). */
@@ -837,12 +916,30 @@ function menuVars(u: Record<string, unknown> | null, ext: string, domain: string
   return { ext, domain, email: firstEmail(r), fname, lname, name };
 }
 
+/**
+ * NetSapiens' per-user *List in Directory* switch, as the library's THREE-STATE `listedInDirectory`.
+ *
+ * `yes` ⇒ listed, `no` ⇒ hidden, and **anything else leaves the key out entirely** — the same contract
+ * email follows (`emailForWrite`), for the same reason: a read that was projected, narrowed, or returned a
+ * shape we do not recognise must read as "we did not learn this", never as "the user is hidden". Only
+ * `false` fires the exclusion, so an absent key is the safe answer and an invented one is not.
+ *
+ * `||` rather than `??` between the two field spellings: a present-but-blank first field is no answer, so
+ * the second spelling still gets its turn.
+ */
+function directoryListing(u: Record<string, unknown>): { listedInDirectory?: boolean } {
+  const raw = (str(u['directory-name-visible-in-list-enabled']) || str(u['dir_list'])).toLowerCase();
+  if (raw === 'yes') return { listedInDirectory: true };
+  if (raw === 'no') return { listedInDirectory: false };
+  return {};
+}
+
 function nsUserToElig(u: Record<string, unknown>, ext: string, deviceCount: number): EligUser {
   const first = str(u['first-name'] ?? u['first_name'] ?? u['name-first-name']);
   const last = str(u['last-name'] ?? u['last_name'] ?? u['name-last-name']);
   const display = str(u['display-name'] ?? u['name'] ?? u['subscriber_name']);
   const srvCode = str(u['srv_code'] ?? u['srv-code'] ?? u['service-code']);
-  return { ext, srvCode, email: firstEmail(u), names: [first, last, display].filter(Boolean), deviceCount };
+  return { ext, srvCode, email: firstEmail(u), names: [first, last, display].filter(Boolean), deviceCount, ...directoryListing(u) };
 }
 
 /**
@@ -1096,11 +1193,51 @@ function resolveWriteConnection(
 }
 
 /**
+ * `RINGOTEL_PREPOP_INCLUDE_SOFT` as a boolean.
+ *
+ * One parse for every door. The domain plan and the per-extension event path both decide whether a SOFT
+ * verdict may act, and they must decide it the same way — two copies of this regex were two chances for
+ * one door to start removing records the other leaves alone.
+ */
+const prepopIncludeSoft = (env: Pick<Env, 'RINGOTEL_PREPOP_INCLUDE_SOFT'>): boolean =>
+  /^(1|true|yes|on)$/i.test((env.RINGOTEL_PREPOP_INCLUDE_SOFT ?? '').trim());
+
+/**
+ * One NetSapiens record, projected onto the input the prepop rule reads. Both doors reach it — the domain
+ * planner over a `/users` list, and the event door over a single-user re-read — and both have to make the
+ * same two judgement calls, so they make them in one place.
+ *
+ * **The device count is DROPPED, never fabricated.** Counting devices would be one extra API call per user
+ * across a whole domain, and a wrong count is worse than an absent one: `excludeNoDevices` tightens name
+ * matching only when the count is exactly 0, so an invented zero turns every SHARED/VOICEMAIL-named
+ * placeholder into a removal on an inference. `planExtensionReconcile` refuses a soft removal while the
+ * count is unknown, which is exactly the behaviour both callers want.
+ *
+ * **Email is three-state**, the same rule `emailForWrite` applies to a single-user read: a record carrying
+ * no email FIELD is a narrowed response, not a cleared address. The reconcile fold WRITES `email` on
+ * drift, so flattening "unknown" to `''` would push a blank over every good address a projected read
+ * happened to omit.
+ */
+function toPrepopInput(rec: Record<string, unknown>, ext: string): PrepopInput {
+  const { deviceCount: _dropped, ...elig } = nsUserToElig(rec, ext, 0);
+  const email = hasEmailField(rec) ? firstEmail(rec) : undefined;
+  return { ext, name: nsDisplayName(rec), elig, ...(email !== undefined ? { email } : {}) };
+}
+
+/**
  * Build the pre-population plan for a domain: read the NetSapiens users, read the Ringotel branch, and
  * decide which users lack a directory entry. Shared by preview and apply so the two cannot disagree —
  * apply re-plans rather than trusting anything the client sends back.
+ *
+ * **The reconcile has no principal, so it takes no reseller scope.** The question this feature answers is
+ * "would this user auto-provision on SSO login", which is a fact about the user and the deployment, not
+ * about whoever happens to be looking. `RINGOTEL_RESELLER_OVERRIDE` exists to let a reseller force ONE
+ * activation they are watching; threaded in here it would silently widen a whole-domain sweep — the same
+ * domain would plan differently depending on which door reached it, and a reseller's preview would create
+ * placeholders the cron then removes. So `isReseller` is fixed `false` for every door, and there is no
+ * parameter to pass it through.
  */
-async function buildPrepopPlan(client: NsClient, env: Env, cache: Cache, domain: string, isReseller: boolean) {
+async function buildPrepopPlan(client: NsClient, env: Env, cache: Cache, domain: string) {
   const org = await resolveForWrite(env, cache, domain);
   if (org.status === 'none') throw new HttpError(404, 'No app organization is configured for this domain');
   if (org.status === 'ambiguous') throw new HttpError(409, 'App organization binding is ambiguous for this domain');
@@ -1110,29 +1247,97 @@ async function buildPrepopPlan(client: NsClient, env: Env, cache: Cache, domain:
     throw new HttpError(409, 'This domain has more than one app connection — bulk pre-population needs a default connection');
   }
 
-  const raw = await client.get(`/domains/${encPath(domain)}/users`);
-  const nsUsers = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+  // A FAILED list read is `null`, never `[]`. The difference is the whole directory: an empty list says
+  // "NetSapiens has nobody here", which the reconcile fold would answer by removing every placeholder.
+  // A body that arrives in an unexpected SHAPE is the same kind of non-evidence, so it is `null` too.
+  const raw = await client.get(`/domains/${encPath(domain)}/users`).catch(() => null);
+  const nsUsers = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : null;
   const rtConfig = resolveRingotelConfig(env);
 
-  const inputs: PrepopInput[] = nsUsers.map((u) => {
-    const ext = str(u['user'] ?? u['extension']);
-    // Drop the device count rather than fabricate one. Counting devices would be one extra API call PER
-    // USER across a whole domain; a wrong count is worse than an absent one, because `excludeNoDevices`
-    // tightens name matching only when the count is exactly 0.
-    const { deviceCount: _dropped, ...elig } = nsUserToElig(u, ext, 0);
-    const email = firstEmail(u);
-    return { ext, name: nsDisplayName(u), elig, ...(email !== undefined ? { email } : {}) };
-  });
+  const inputs: PrepopInput[] = (nsUsers ?? []).map((u) => toPrepopInput(u, str(u['user'] ?? u['extension'])));
 
-  const plan = planDirectoryPrepop(inputs, org.users ?? [], {
+  const plan = planDirectoryReconcile(nsUsers === null ? null : inputs, org.users ?? [], {
     domain,
     branchid: org.entry.branchid,
     suffix: rtConfig.suffix,
-    isReseller,
+    // Never the caller's scope — see this function's doc comment.
+    isReseller: false,
     config: rtConfig,
-    includeSoft: /^(1|true|yes|on)$/i.test((env.RINGOTEL_PREPOP_INCLUDE_SOFT ?? '').trim()),
+    includeSoft: prepopIncludeSoft(env),
+    // One removal cap for the whole feature: the sweep's `NS_EVENTS_SWEEP_MAX`. Removing placeholders is
+    // the same act whichever door reached it, so a second knob would only let the two disagree.
+    maxRemove: parseNsEventsConfig(env).sweepMax,
   });
   return { plan, org };
+}
+
+/**
+ * Plan + apply the directory reconcile for ONE domain and invalidate the org's user cache. The single
+ * function behind every service-token door (event tier, cron, refresh door) and the apply route, so
+ * "what a reconcile does" has exactly one definition.
+ *
+ * **One reconcile per domain at a time.** The plan is a read-then-write over a directory every other door
+ * can also be changing: two runs that both read an extension as absent will both create it, and Ringotel
+ * will happily hold two records for one extension. The doors are independent by design — an event, the
+ * hourly cron, an operator's refresh, an explicit apply — so serializing them cannot live in any one of
+ * them; it belongs here, on the function they all pass through. The lock is taken BEFORE planning,
+ * because the plan is where the stale read is made, and released in a `finally`, because a run that
+ * throws must not wedge the domain until the TTL lapses.
+ *
+ * A locked run is a NON-EVENT, not a failure: it reports `abort` / `locked` and writes nothing, because
+ * the run already holding the lock is about to do the same work with a fresher read. See
+ * `takePrepopLock` for the honest limit — it is a same-colo coalescer, not a distributed mutex.
+ */
+export async function reconcileDomainDirectory(env: Env, cache: Cache, client: NsClient, domain: string) {
+  const runId = await takePrepopLock(cache, scopeOf(env), domain);
+  if (!runId) {
+    console.log(JSON.stringify({ msg: 'prepop reconcile skipped', domain, reason: 'locked' }));
+    // No `orgid`: resolving one costs the Ringotel directory read this abort exists to avoid, and no
+    // caller reads it. Absent is honest where a `''` would look like an answer.
+    return { plan: emptyPlan('abort', 'locked'), result: { created: 0, updated: 0, removed: 0, removedExts: [], failed: [] }, orgid: undefined };
+  }
+  try {
+    return await runDomainReconcile(env, cache, client, domain);
+  } finally {
+    // By id: if this run overran the TTL and another has since taken the lock, releasing here would
+    // unlock a domain that run is still writing to.
+    await releasePrepopLock(cache, scopeOf(env), domain, runId);
+  }
+}
+
+/** The reconcile itself, inside the lock {@link reconcileDomainDirectory} holds. Split out only so the
+ *  `finally` cannot be separated from the body it releases for. */
+async function runDomainReconcile(env: Env, cache: Cache, client: NsClient, domain: string) {
+  const { plan, org } = await buildPrepopPlan(client, env, cache, domain);
+  const rtWrite = makeWriteClient(env);
+  const writer: ReconcileWriter = {
+    createUser: rtWrite.createUser.bind(rtWrite),
+    updateUser: rtWrite.updateUser.bind(rtWrite),
+    deleteUser: rtWrite.deleteUser.bind(rtWrite),
+    // `ns-gone` is an inference from a LIST read, and a truncated or filtered page says the same thing as
+    // a departure. So every removal is confirmed against NetSapiens one extension at a time, on the SAME
+    // 404-only rule the orphan sweep uses (`authorisesDeactivation`): a failed read is `false`, never a
+    // licence to delete.
+    confirmGone: async (ext) => (await readNsUser(client, domain, ext)).kind === 'gone',
+  };
+  const result = await applyDirectoryReconcile(writer, org.entry.orgid, org.entry.branchid, plan);
+  if (result.created + result.updated + result.removed > 0) await invalidateOrgUsers(cache, scopeOf(env), org.entry.orgid);
+  console.log(JSON.stringify({ msg: 'prepop reconcile', domain, status: plan.status, ...(plan.reason ? { reason: plan.reason } : {}), created: result.created, updated: result.updated, removed: result.removed, failed: result.failed.length, truncated: plan.truncated }));
+  // One line per DELETED extension, beside the domain summary rather than instead of it. A count is
+  // enough for a create or an update — the record is still there to look at. A delete leaves nothing
+  // behind, so `removed: 1` across five domains is an unanswerable question the next morning, which is
+  // exactly what a fleet run produced. Named per extension, with the verdict that authorised it.
+  for (const r of result.removedExts) {
+    console.log(JSON.stringify({ msg: 'prepop reconcile removed', domain, ext: r.ext, reason: r.reason }));
+  }
+  // Failures were only ever a COUNT in the summary above, which has the same problem one step earlier:
+  // "failed: 1" names neither the extension nor the operation. Warn, not log — a failed write is drift
+  // that will still be there next hour.
+  for (const f of result.failed) {
+    console.warn(JSON.stringify({ msg: 'prepop reconcile op failed', domain, ext: f.ext, op: f.op, error: f.error }));
+  }
+  if (plan.truncated) console.warn(JSON.stringify({ msg: 'prepop reconcile truncated', domain, cap: parseNsEventsConfig(env).sweepMax }));
+  return { plan, result, orgid: org.entry.orgid as string | undefined };
 }
 
 
@@ -1176,17 +1381,40 @@ export async function readNsUser(
 }
 
 /**
- * The ONE authorisation rule both offboarding tiers now share (fix-wave F1, 2026-07-31): a candidate may
- * be deactivated only when the confirming re-read reports the NetSapiens user is truly gone — a 404.
+ * Is this NetSapiens user in `reset` state? Trimmed, case-insensitive, and exact — `pwd reset` is a
+ * password reset, a different and entirely ordinary thing, so a substring test would offboard half a
+ * domain. The values seen on this platform are `standard` · `new` · `reset` · `pwd reset`.
  *
- * `ok` means the candidate still exists: whatever produced it (a stale cache, a truncated or filtered
- * `/users` listing) was wrong, and the safe response is to refuse and log it loudly — that refusal is
- * itself the strongest available signal that the list read was bad. `failed` means the read didn't
- * resolve either way and must never be mistaken for a deletion. Pulled out as a pure predicate so the
- * decision is unit-testable without a network (see `runOrphanSweep`, which is I/O-bound and consumes it).
+ * **"Reset User" is an offboarding.** It strips the user's name, email, password and soft-phone devices
+ * and parks the account in setup state, ready to be recycled for the next hire. Nothing of the person
+ * remains; only the shell does. So everything that made a DELETED user's app record worth deactivating
+ * is true here too — and the record is the one thing NetSapiens cannot strip, because it does not own it.
+ *
+ * Pure, and always applied to a RE-READ of the user, never to an event payload.
+ */
+export function isResetAccount(rec: Record<string, unknown>): boolean {
+  return str(rec['account-status']).trim().toLowerCase() === 'reset';
+}
+
+/**
+ * The ONE authorisation rule both offboarding tiers share (fix-wave F1, 2026-07-31): a candidate may be
+ * deactivated only when the confirming re-read says so, and there are exactly TWO ways it can.
+ *
+ * - **`gone`** — a literal 404. The user was deleted.
+ * - **`ok` + `account-status: reset`** — the user is still there, but NetSapiens has stripped everything
+ *   that made them a user (see {@link isResetAccount}). The record exists, so `gone` can never describe
+ *   this case; it needs its own evidence, and this is it.
+ *
+ * Any other `ok` means the candidate is a LIVE user: whatever produced it (a stale cache, a truncated or
+ * filtered `/users` listing) was wrong, and the safe response is to refuse and log it loudly — that
+ * refusal is itself the strongest available signal that the list read was bad. `failed` means the read
+ * didn't resolve either way and must never be mistaken for either kind of departure. Pulled out as a
+ * pure predicate so the decision is unit-testable without a network (see `runOrphanSweep`, which is
+ * I/O-bound and consumes it).
  */
 export function authorisesDeactivation(read: NsUserReadResult): boolean {
-  return read.kind === 'gone';
+  if (read.kind === 'gone') return true;
+  return read.kind === 'ok' && isResetAccount(read.rec);
 }
 
 /**
@@ -1202,6 +1430,175 @@ export function authorisesDeactivation(read: NsUserReadResult): boolean {
  */
 export function nsEventsMissingRingotelKey(env: Pick<Env, 'RINGOTEL_API_KEY'>, userCount: number): boolean {
   return userCount > 0 && !(env.RINGOTEL_API_KEY ?? '').trim();
+}
+
+/** What one event-door reconcile did, for the log line. */
+type EventPrepopOutcome = 'created' | 'updated' | 'removed' | 'none' | 'multi-connection' | 'no-connection';
+
+interface EventPrepopArgs {
+  env: Env;
+  cache: Cache;
+  domain: string;
+  ext: string;
+  /**
+   * The NetSapiens re-read for this extension, carried as the discriminated result rather than as a
+   * record-or-null. `gone` is a literal 404 and is the ONLY warrant for removing a placeholder; `failed`
+   * is deliberately not in the type, so a read that did not resolve cannot reach this door at all.
+   */
+  read: Extract<NsUserReadResult, { kind: 'ok' | 'gone' }>;
+  org: OrgResolution & { users?: User[] };
+  rtConfig: RingotelConfig;
+}
+
+/**
+ * The event door's slice of the directory reconcile: ONE extension, one verdict, applied.
+ *
+ * The rule is `planExtensionReconcile` — the same function the cron and the apply route fold over a whole
+ * domain — so the fast path and the converging path can never disagree about a person. What differs is
+ * only the evidence: here it is this event's own single-user re-read, not a domain list.
+ *
+ * ⚠️ **Why this may call `deleteUser` directly, bypassing `applyDirectoryReconcile`'s `confirmGone`.**
+ * That confirmation exists because an `ns-gone` verdict off a LIST read is an inference — a truncated or
+ * filtered page looks exactly like a departure — so the fold re-asks NetSapiens one extension at a time.
+ * Here the re-read IS that confirmation and it has already happened: the absent record can only come from
+ * `readNsUser` answering `gone`, which is a literal 404. That invariant used to be a runtime check beside a
+ * `rec: Record | null`, because the pair could desync; {@link EventPrepopArgs.read} carries the outcome
+ * itself, so a `failed` read is now unrepresentable at this call and there is nothing left to check.
+ *
+ * Creating needs exactly ONE connection, so a `multi` domain refuses and says so; its located records are
+ * still handled by the sync/offboard paths around this call, and creation waits for the configured default
+ * connection.
+ */
+async function reconcileOneFromEvent(a: EventPrepopArgs): Promise<EventPrepopOutcome> {
+  if (a.org.status !== 'active') return a.org.status === 'multi' ? 'multi-connection' : 'no-connection';
+
+  // `gone` is the absent record, and the type admits no third outcome. Nothing has counted this user's
+  // devices at this point either (the device-repair block does its own listing, later, and only when
+  // `cfg.deviceRepair` asks), so the unknown count `toPrepopInput` carries through is the honest one here.
+  const ns: PrepopInput | null = a.read.kind === 'ok' ? toPrepopInput(a.read.rec, a.ext) : null;
+
+  const v = planExtensionReconcile(ns, a.ext, a.org.users ?? [], {
+    domain: a.domain,
+    branchid: a.org.entry.branchid,
+    suffix: a.rtConfig.suffix,
+    // A service-token path has no principal, so there is no reseller override to apply — the same footing
+    // the cron and the sweep run on.
+    isReseller: false,
+    config: a.rtConfig,
+    includeSoft: prepopIncludeSoft(a.env),
+  });
+
+  if (v.action === 'none') {
+    // A permanently unreconcilable extension (two-plus placeholders, or one with no id) must not go silent
+    // just because it collapses to the same 'none' every other in-sync extension does — the cron and the
+    // refresh door will keep hitting this same verdict forever, and nothing else names the extension.
+    if (v.reason === 'ambiguous') {
+      console.log(JSON.stringify({ msg: 'ns-event prepop ambiguous', domain: a.domain, ext: a.ext, detail: v.detail }));
+    }
+    return 'none';
+  }
+  const w = makeWriteClient(a.env);
+  const orgid = a.org.entry.orgid;
+  if (v.action === 'create') {
+    // Through `applyDirectoryPrepop` rather than a bare `createUser`, so a placeholder made here is
+    // byte-identical to one made by the domain sweep — status 0, no `username`/`authname`/`password`.
+    await applyDirectoryPrepop(w, orgid, a.org.entry.branchid, [v.candidate]);
+  } else if (v.action === 'remove') {
+    await w.deleteUser(v.id, orgid);
+  } else {
+    await w.updateUser(v.id, orgid, { ...v.changes });
+  }
+  await invalidateOrgUsers(a.cache, scopeOf(a.env), orgid);
+  return v.action === 'create' ? 'created' : v.action === 'remove' ? 'removed' : 'updated';
+}
+
+/**
+ * Run the event door's reconcile for one extension and log what it did — errors contained, exactly like the
+ * device-repair block in the same loop. A Ringotel failure here must not cost the offboard or the identity
+ * sync this same event still owes (or has already done); the line names the extension, so a persistent
+ * failure shows up per user instead of as one lost batch.
+ *
+ * Logs only when something happened or was refused. A quiet `none` is the ordinary case on a busy domain —
+ * every event for an already-in-sync user reaches this — and a line per event would drown the ones that matter.
+ */
+async function runEventPrepop(a: EventPrepopArgs): Promise<void> {
+  try {
+    const did = await reconcileOneFromEvent(a);
+    if (did !== 'none') console.log(JSON.stringify({ msg: 'ns-event prepop', domain: a.domain, ext: a.ext, did }));
+  } catch (e) {
+    console.error(JSON.stringify({
+      msg: 'ns-event prepop failed', domain: a.domain, ext: a.ext,
+      error: String((e as Error)?.message ?? e).slice(0, 200),
+    }));
+  }
+}
+
+/**
+ * The Ringotel record as `syncIdentity` has just left it, projected onto a COPY of the row.
+ *
+ * `org.users` is the directory as it was READ; the sync above has since changed it. Handing that stale
+ * snapshot to the reconcile would make it re-issue the very name/email write the sync just made —
+ * idempotent, but a second RPC and a log line crediting this door with a rename it did not do. The copy is
+ * local to one event; the cached array itself is never mutated. Email is written to both spellings
+ * `syncIdentity` compares against (`info.email` first, top-level as the fallback) so a record carrying
+ * either one compares equal afterwards.
+ */
+function applySyncedIdentity(u: User, changed: string[], name: string, email: string | undefined): User {
+  const next: Record<string, unknown> = { ...(u as unknown as Record<string, unknown>) };
+  if (changed.includes('name')) next['name'] = name;
+  if (changed.includes('email') && email !== undefined) {
+    next['email'] = email;
+    const info = next['info'];
+    if (info && typeof info === 'object') next['info'] = { ...(info as Record<string, unknown>), email };
+  }
+  return next as unknown as User;
+}
+
+/**
+ * Deactivate one extension's app record from the event tier, for either of the two evidences that
+ * authorise it: a confirmed 404 (`ns-404`), or a NetSapiens user in `reset` state (`ns-reset`).
+ *
+ * Extracted when `reset` became the second evidence. The two doors differ ONLY in what they read — the
+ * writing half (locate the connection, deactivate every active record at the extension, invalidate the
+ * cached directory, log it) has to be identical or the fleet's behaviour depends on how a person left.
+ * Both paths reach it having already satisfied {@link authorisesDeactivation}.
+ *
+ * `evidence` rides the log line because the two are answerable by different follow-ups: a 404 means the
+ * user is gone, a reset means the account is still there and about to be handed to someone new.
+ */
+async function offboardOneFromEvent(a: {
+  env: Env; cache: Cache; nsWrite: NsWriteClient;
+  org: OrgResolution & { users?: User[] };
+  domain: string; ext: string; suffix: string;
+  evidence: 'ns-404' | 'ns-reset';
+}): Promise<void> {
+  const branches = connectionsOf(a.org);
+  if (!branches.length) {
+    console.log(JSON.stringify({ msg: 'ns-event offboard skip', domain: a.domain, ext: a.ext, reason: `org-${a.org.status}`, evidence: a.evidence }));
+    return;
+  }
+  const orgid = orgidOf(a.org)!; // guarded above: branches.length > 0 ⇒ status is active/multi
+  const at = locateConnection((a.org.users ?? []) as never[], branches.map((b) => b.branchid), a.ext);
+  if (at.kind !== 'one') {
+    // 'none' is ordinary (no app record for this extension); 'conflict' is a real problem we surface
+    // rather than guess our way through. `reason` names the skip; `evidence` names what triggered the
+    // attempt, since the two answer different questions and this line is the only place both are known.
+    console.log(JSON.stringify({
+      msg: 'ns-event offboard skip', domain: a.domain, ext: a.ext,
+      reason: at.kind === 'none' ? 'no-app-record' : 'connection-conflict',
+      evidence: a.evidence,
+      ...(at.kind === 'conflict' ? { branchids: at.branchids } : {}),
+    }));
+    return;
+  }
+  const off = await deactivateAppOnly({
+    nsWrite: a.nsWrite, rtWrite: makeWriteClient(a.env),
+    users: a.org.users ?? [],
+    orgid, branchid: at.branchid,
+    domain: a.domain, ext: a.ext, suffix: a.suffix,
+  });
+  if (off.action === 'deactivated') await invalidateOrgUsers(a.cache, scopeOf(a.env), orgid);
+  console.log(JSON.stringify({ msg: 'ns-event offboard', domain: a.domain, ext: a.ext, action: off.action, rtUserIds: off.rtUserIds, reason: a.evidence }));
 }
 
 /**
@@ -1243,34 +1640,22 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
       if (read.kind !== 'ok') {
         // A 404 is the ONLY read outcome that may authorise a deactivation. `failed` never does — a
         // transient NS error mistaken for a deletion would offboard a live user.
-        if (read.kind === 'gone' && cfg.offboard === 'deactivate') {
+        const goneArmed = read.kind === 'gone' && prepopArmed(u.domain, rtConfig);
+        if (read.kind === 'gone' && (goneArmed || cfg.offboard === 'deactivate')) {
+          // ONE directory read for both doors below — `resolveForWrite` is a forced-fresh Ringotel read, and
+          // the placeholder reconcile and the offboard have to judge the same state anyway. Resolved only
+          // when one of them will actually run, so a deployment with neither armed still pays nothing here.
           const org = await resolveForWrite(env, cache, u.domain);
-          const branches = connectionsOf(org);
-          if (!branches.length) {
-            console.log(JSON.stringify({ msg: 'ns-event offboard skip', domain: u.domain, ext: u.ext, reason: `org-${org.status}` }));
+          // NetSapiens says this extension is gone, and this door owns what that means for a PLACEHOLDER:
+          // delete it, because a directory entry for someone who no longer exists is the whole thing the
+          // reconcile is for. An ACTIVE record is not its business — `planExtensionReconcile` answers
+          // 'active' for one, and `deactivateAppOnly` below still handles it on the reversible path that
+          // offboarding chose deliberately. The two can never reach the same record.
+          if (goneArmed) await runEventPrepop({ env, cache, domain: u.domain, ext: u.ext, read, org, rtConfig });
+          if (cfg.offboard === 'deactivate') {
+            await offboardOneFromEvent({ env, cache, nsWrite, org, domain: u.domain, ext: u.ext, suffix: rtConfig.suffix, evidence: 'ns-404' });
             continue;
           }
-          const orgid = orgidOf(org)!; // guarded above: branches.length > 0 ⇒ status is active/multi
-          const at = locateConnection((org.users ?? []) as never[], branches.map((b) => b.branchid), u.ext);
-          if (at.kind !== 'one') {
-            // 'none' is ordinary (no app record for this extension); 'conflict' is a real problem we
-            // surface rather than guess our way through.
-            console.log(JSON.stringify({
-              msg: 'ns-event offboard skip', domain: u.domain, ext: u.ext,
-              reason: at.kind === 'none' ? 'no-app-record' : 'connection-conflict',
-              ...(at.kind === 'conflict' ? { branchids: at.branchids } : {}),
-            }));
-            continue;
-          }
-          const off = await deactivateAppOnly({
-            nsWrite, rtWrite: makeWriteClient(env),
-            users: org.users ?? [],
-            orgid, branchid: at.branchid,
-            domain: u.domain, ext: u.ext, suffix: rtConfig.suffix,
-          });
-          if (off.action === 'deactivated') await invalidateOrgUsers(cache, scopeOf(env), orgid);
-          console.log(JSON.stringify({ msg: 'ns-event offboard', domain: u.domain, ext: u.ext, action: off.action, rtUserIds: off.rtUserIds }));
-          continue;
         }
         console.log(JSON.stringify({
           msg: 'ns-event skip', domain: u.domain, ext: u.ext,
@@ -1280,6 +1665,30 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
         continue;
       }
       const rec = read.rec;
+
+      // ⚠️ A NetSapiens user in `reset` state is offboarded exactly like a deleted one, and this is the
+      // FIRST thing decided about a successful re-read — ahead of the identity sync, the placeholder
+      // reconcile and the device repair, all of which would otherwise write to an account that has had
+      // its name, email, password and devices deliberately stripped. The device repair is the sharp end:
+      // in `heal` mode it would re-create the `<ext>r` device NetSapiens had just taken away, handing a
+      // departed person's shell a working SIP credential.
+      //
+      // Both arms `continue`. Turning NS_EVENTS_OFFBOARD off means "do not deactivate"; it has never
+      // meant "sync a stripped account instead", and reading it that way is how the switch would become
+      // the thing that re-provisions the account it was set to leave alone.
+      if (isResetAccount(rec)) {
+        if (cfg.offboard === 'deactivate') {
+          await offboardOneFromEvent({
+            env, cache, nsWrite,
+            org: await resolveForWrite(env, cache, u.domain),
+            domain: u.domain, ext: u.ext, suffix: rtConfig.suffix, evidence: 'ns-reset',
+          });
+        } else {
+          console.log(JSON.stringify({ msg: 'ns-event skip', domain: u.domain, ext: u.ext, reason: 'ns-reset' }));
+        }
+        continue;
+      }
+
       const org = await resolveForWrite(env, cache, u.domain);
       const branches = connectionsOf(org);
       if (!branches.length) {
@@ -1297,8 +1706,19 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
           reason: syncAt.kind === 'none' ? 'no-app-record' : 'connection-conflict',
           ...(syncAt.kind === 'conflict' ? { branchids: syncAt.branchids } : {}),
         }));
+        // "No app record on any bound connection" is the gap the directory reconcile exists to fill, and
+        // this is the only site in THIS handler that creates one — the cron, the refresh kick and the apply
+        // route reach the same creation through `reconcileDomainDirectory`. 'conflict' is deliberately NOT
+        // passed: the same extension already sitting on two connections is a state a third record would
+        // make worse, and the log line above is the response it gets.
+        if (syncAt.kind === 'none' && prepopArmed(u.domain, rtConfig)) {
+          await runEventPrepop({ env, cache, domain: u.domain, ext: u.ext, read, org, rtConfig });
+        }
         continue;
       }
+      const nsName = nsDisplayName(rec);
+      // No principal ⇒ not a masqueraded read ⇒ a successful read with no address is a REAL removal.
+      const nsEmail = emailForWrite(rec, u.ext, undefined);
       const res = await syncIdentity({
         nsWrite,
         rtWrite: makeWriteClient(env),
@@ -1308,9 +1728,8 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
         domain: u.domain,
         ext: u.ext,
         suffix: rtConfig.suffix,
-        name: nsDisplayName(rec),
-        // No principal ⇒ not a masqueraded read ⇒ a successful read with no address is a REAL removal.
-        email: emailForWrite(rec, u.ext, undefined),
+        name: nsName,
+        email: nsEmail,
       });
       if (res.action === 'synced') await invalidateOrgUsers(cache, scopeOf(env), orgid);
       // `flattenedEmails` is present only when the write destroyed extra addresses the user had entered in
@@ -1320,6 +1739,19 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
         msg: 'ns-event sync', domain: u.domain, ext: u.ext, action: res.action, changed: res.changed,
         ...(res.flattenedEmails ? { flattenedEmails: res.flattenedEmails } : {}),
       }));
+
+      // The record exists and its identity is now current, so the only question this door has left is
+      // whether it should exist AT ALL: a user who has since become ineligible (a service code, a
+      // SHARED/VOICEMAIL rename) leaves a placeholder nobody should ever activate. An ACTIVE record is
+      // answered 'active' and left alone — removal here only ever means a placeholder, which is also why
+      // the device-repair block below cannot act on a record this just deleted: it returns early for
+      // anything that is not `status: 1`.
+      if (prepopArmed(u.domain, rtConfig)) {
+        const usersAfterSync = res.action === 'synced' && res.rtUserId
+          ? (org.users ?? []).map((x) => (String(x.id) === res.rtUserId ? applySyncedIdentity(x, res.changed, nsName, nsEmail) : x))
+          : (org.users ?? []);
+        await runEventPrepop({ env, cache, domain: u.domain, ext: u.ext, read, org: { ...org, users: usersAfterSync }, rtConfig });
+      }
 
       if (cfg.deviceRepair !== 'off') {
         // Its own try/catch: a device problem must never lose the identity sync that already succeeded,
@@ -1338,6 +1770,10 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
             orgid, branchid: syncAt.branchid,
             domain: u.domain, ext: u.ext, suffix: rtConfig.suffix,
             mode: cfg.deviceRepair,
+            // From the re-read, not the payload. A `reset` user never reaches this line (handled above),
+            // but `new` and `pwd reset` do — and an account mid-setup has no settled device layout to
+            // assert. The gate lives in `repairDeviceForEvent` so it cannot be skipped by a second caller.
+            accountStatus: str(rec['account-status']),
           });
           if (rep.action === 'repaired') await invalidateOrgUsers(cache, scopeOf(env), orgid);
           if (rep.changed.length) {
@@ -1542,8 +1978,9 @@ async function deactivateOrphans(a: {
       if (!authorisesDeactivation(read)) {
         if (read.kind === 'ok') {
           // Loud and distinct on purpose: this IS direct evidence the NS list read was wrong —
-          // truncated, filtered, or otherwise incomplete — which is far more valuable than the count
-          // logging it replaces (see Task 11).
+          // truncated, filtered, stale, or otherwise incomplete — which is far more valuable than the
+          // count logging it replaces (see Task 11). It covers both candidacies: an `ok` record that is
+          // not in `reset` state is a LIVE user, whichever list read nominated it.
           console.error(JSON.stringify({ msg: 'ns-events sweep candidate still exists', domain, branchid, ext: o.ext }));
         } else if (read.kind === 'failed') {
           console.error(JSON.stringify({
@@ -1559,7 +1996,15 @@ async function deactivateOrphans(a: {
         orgid, branchid,
         domain, ext: o.ext, suffix,
       });
-      if (res.action === 'deactivated') deactivated++;
+      if (res.action === 'deactivated') {
+        deactivated++;
+        // Per extension, with the evidence that authorised it — `ns-gone` (absent from NetSapiens) or
+        // `ns-reset` (present, stripped). The summary line below carries a count and the extension list,
+        // which cannot say WHY any one of them went, and the two answer different follow-ups: a reset
+        // account is still there and about to be handed to someone new. Mirrors the per-extension line
+        // `prepop reconcile removed` already emits for the same reason.
+        console.log(JSON.stringify({ msg: 'ns-events sweep deactivated', domain, branchid, ext: o.ext, reason: o.reason, rtUserIds: res.rtUserIds }));
+      }
     } catch (e) {
       console.error(JSON.stringify({ msg: 'ns-events sweep deactivate failed', domain, branchid, ext: o.ext, error: String((e as Error)?.message ?? e).slice(0, 200) }));
     }
@@ -1583,7 +2028,7 @@ async function deactivateOrphans(a: {
  * Domains are isolated: one domain's failure never stops the rest, and each aborts independently on a
  * bad NS read (see `planOrphanSweep`).
  */
-async function runOrphanSweep(env: Env): Promise<void> {
+export async function runOrphanSweep(env: Env): Promise<void> {
   const cfg = parseNsEventsConfig(env);
   if (!cfg.armed || !cfg.identity || cfg.offboard !== 'deactivate') {
     console.log(JSON.stringify({ msg: 'ns-events sweep skipped', reason: cfg.armed ? `offboard-${cfg.offboard}` : (cfg.inertReason ?? 'not-armed') }));
@@ -1618,14 +2063,24 @@ async function runOrphanSweep(env: Env): Promise<void> {
       const orgid = orgidOf(org)!; // guarded above: branches.length > 0 ⇒ status is active/multi
 
       // null on ANY read failure — planDomainSweep refuses to act on it. Never degrade to [].
-      const nsExtensions = await client
+      // The ROWS are kept, not just the extensions: `/domains/{d}/users` carries `account-status` per
+      // row (verified against live data and the committed snapshots), which is what lets a reset account
+      // be nominated without a per-user read of every extension in the domain.
+      const nsRows = await client
         .get(`/domains/${encPath(domain)}/users`)
-        .then((raw) => (Array.isArray(raw) ? (raw as Record<string, unknown>[]).map((u) => str(u['user'] ?? u['extension'])).filter(Boolean) : null))
+        .then((raw) => (Array.isArray(raw) ? (raw as Record<string, unknown>[]) : null))
         .catch(() => null);
+      const extOf = (u: Record<string, unknown>) => str(u['user'] ?? u['extension']);
+      const nsExtensions = nsRows === null ? null : nsRows.map(extOf).filter(Boolean);
+      // Derived from the same rows, so the two lists cannot disagree about who was read. Only a
+      // NOMINATION: `deactivateOrphans` re-reads each candidate and `authorisesDeactivation` refuses any
+      // record that comes back `standard`, so a stale list row can never deactivate a live user.
+      const resetExtensions = (nsRows ?? []).filter(isResetAccount).map(extOf).filter(Boolean);
 
       // ONE budget for the whole domain — see planDomainSweep.
       const perConnection = planDomainSweep({
         nsExtensions,
+        resetExtensions,
         rtUsers: org.users ?? [],
         branchids: branches.map((b) => b.branchid),
         max: cfg.sweepMax,
@@ -1652,8 +2107,68 @@ async function runOrphanSweep(env: Env): Promise<void> {
   }
 }
 
+/**
+ * Cron: converge the Ringotel directory for every armed domain.
+ *
+ * The catch-up door. The event tier is faster but at-least-once, and no event exists for drift that
+ * predates switch-on — so without this pass a single missed delivery is permanent. This reconciles each
+ * armed domain once an hour regardless, through the same `reconcileDomainDirectory` the event tier and
+ * the apply route use, so there is one definition of what a reconcile does.
+ *
+ * Arming is `RINGOTEL_PREPOP_AUTO` (minus its `!domain` carve-outs) intersected with the
+ * `RINGOTEL_WRITE_DOMAINS` rail — all of it inside `prepopArmed`.
+ * The ONLY thing this borrows from the events feature is the service identity — `cfg.armed` is
+ * deliberately not consulted, so this still runs on a deployment with `NS_EVENTS=off`.
+ *
+ * Domains are isolated: one domain's failure never stops the rest.
+ *
+ * Runs CONCURRENTLY with `runOrphanSweep` rather than after it, and the two cannot collide: the sweep
+ * acts only on `status === 1` records and this acts only on placeholders, so no record is in both sets.
+ * Nor can a stale read cross them — a record the sweep has just deactivated keeps its `authname`, which
+ * makes it a tombstone here, and a tombstone is never removed.
+ */
+export async function runDirectoryReconcile(env: Env): Promise<void> {
+  const rtConfig = resolveRingotelConfig(env);
+  if (rtConfig.prepopAuto === null) {
+    console.log(JSON.stringify({ msg: 'prepop reconcile skipped', reason: 'RINGOTEL_PREPOP_AUTO unset' }));
+    return;
+  }
+  const cfg = parseNsEventsConfig(env);
+  if (!cfg.identity) {
+    // Inert without a service identity: there is no principal on a cron path, so this credential is the
+    // only thing that can read NetSapiens. Named rather than `cfg.inertReason`, which would report an
+    // events-feature gap (a missing base URL, say) that has nothing to do with why this door is closed.
+    console.log(JSON.stringify({ msg: 'prepop reconcile skipped', reason: 'no service identity (NS_API_KEY or NS_ADMIN_USER+NS_ADMIN_PASS)' }));
+    return;
+  }
+  const token = await getServiceToken(cfg.identity, env);
+  const client = new NsClient({ server: assertBareServer(env.NS_SERVER), token });
+  const cache = caches.default;
+
+  // Deliberately NOT `sweepScope`. That composes the domain-string grammar check with `isDomainEnabled`,
+  // i.e. the EVENTS rail — correct for the sweep, which only exists when events are armed, and wrong
+  // here: this feature is armed on its own, so a domain in `RINGOTEL_PREPOP_AUTO` but outside
+  // `NS_EVENTS_DOMAINS` would be skipped forever and silently. `'*'` means "every domain the write rail
+  // permits" (see `RingotelConfig.prepopAuto`), and `prepopArmed` below applies BOTH prepop rails to
+  // every candidate, explicit list included. The grammar check is kept on the discovered strings, on the
+  // same footing the sweep applies it: a Ringotel `address` is operator typing, and a malformed one is
+  // an NS request wasted every cycle.
+  const candidates = rtConfig.prepopAuto === '*'
+    ? (await ringotelDomains(env, cache)).filter(isValidEventDomain)
+    : rtConfig.prepopAuto;
+
+  for (const domain of candidates) {
+    if (!prepopArmed(domain, rtConfig)) continue;
+    try {
+      await reconcileDomainDirectory(env, cache, client, domain);
+    } catch (e) {
+      console.error(JSON.stringify({ msg: 'prepop reconcile domain failed', domain, error: String((e as Error)?.message ?? e).slice(0, 200) }));
+    }
+  }
+}
+
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const cors = corsHeaders(request, env);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
     const url = new URL(request.url);
@@ -2232,7 +2747,7 @@ export default {
     if (url.pathname.startsWith(NS_EVENTS_PREFIX)) {
       const evCfg = parseNsEventsConfig(env);
       if (!evCfg.armed) return json({ error: 'Not found' }, 404, cors);
-      return handleNsEvent(request, env, evCfg, _ctx, cors);
+      return handleNsEvent(request, env, evCfg, ctx, cors);
     }
 
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/app')) {
@@ -2395,12 +2910,26 @@ export default {
         // a principal's own domain, which they can read by definition.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
         const refresh = refreshRequested(url, auth, env, policies);
+        // Same door as `/rapp/users`. This route shows an org fact rather than the directory, so the
+        // reconcile it kicks is not what the caller is about to read — but the trigger is the operator
+        // asking for convergence on a domain, not a request to re-render one panel, and leaving the one
+        // per-domain refresh route out would make which routes converge an accident of what each happens
+        // to display. The lock in `reconcileDomainDirectory` absorbs the overlap with a Users-page
+        // refresh on the same domain.
+        const orgArmed = armedForRefresh([domain], refresh, resolveRingotelConfig(env));
+        if (orgArmed.length) await requireFreshAuth(auth, env);
         // hPIE is a per-user sign-in detail: it only means anything once a user has been resolved to the
         // password path, which this org-level route never does. /me/app-access emits it exactly there.
         // Strip it here so "emitted only where it is actionable" holds on BOTH routes rather than one --
         // the projection stays a dumb org fact, and the decision about what to disclose stays at the edge.
         const { hPIE: _hPIE, ...orgBody } = await orgStatusForDomain(domain, env, caches.default, { refresh });
-        return json(orgBody, 200, cors);
+        kickReconcileOnRefresh(ctx, env, orgArmed);
+        // Whether the org's SSO binding is OURS is graded HERE, by the same helper /me/app-access uses:
+        // `ssoService` is "<id>/<name>" and only the configured RINGOTEL_SSO_SERVICE says which name is
+        // ours, so a client comparing the raw string would be guessing at config it cannot see (and would
+        // claim SSO on a third-party IdP). orgStatusForDomain stays env-free, so the grade lands in the
+        // route rather than the projection. Absent when there is no org: nothing to grade.
+        return json(orgBody.active ? { ...orgBody, sso: ssoEnabled(orgBody.ssoService, env) } : orgBody, 200, cors);
       }
 
       if (url.pathname === '/rapp/users') {
@@ -2414,7 +2943,13 @@ export default {
         // a principal's own domain, which they can read by definition.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
         const refresh = refreshRequested(url, auth, env, policies);
+        const usersArmed = armedForRefresh([domain], refresh, resolveRingotelConfig(env));
+        if (usersArmed.length) await requireFreshAuth(auth, env);
         const usersRes = await usersStatusForDomain(domain, env, caches.default, { refresh });
+        // AFTER the read, deliberately — see `kickReconcileOnRefresh`. A forced refresh re-populates the
+        // org's user cache for ten minutes, and the reconcile ends by invalidating it; kicked first, the
+        // foreground read can pin a list it fetched before the creates landed.
+        kickReconcileOnRefresh(ctx, env, usersArmed);
         if (usersRes.users) {
           for (const [ext, u] of Object.entries(usersRes.users)) usersRes.users[ext] = withConnectionView(u);
         }
@@ -2432,7 +2967,14 @@ export default {
         if (allow) doms = doms.filter((d) => allow.has(d));
         if (block.size) doms = doms.filter((d) => !block.has(d));
         const refresh = refreshRequested(url, auth, env, policies);
-        return json(await orgsStatusForDomains(doms, env, caches.default, { refresh }), 200, cors);
+        // Bounded by what the CALLER can see: `doms` is their own NS-visible list after the same
+        // allow/block filters `/domains` applies, never anything they supplied. Each domain is then gated
+        // independently by `prepopArmed`, so a refresh across a mixed fleet touches only the armed part.
+        const orgsArmed = armedForRefresh(doms, refresh, resolveRingotelConfig(env));
+        if (orgsArmed.length) await requireFreshAuth(auth, env);
+        const orgsBody = await orgsStatusForDomains(doms, env, caches.default, { refresh });
+        kickReconcileOnRefresh(ctx, env, orgsArmed);
+        return json(orgsBody, 200, cors);
       }
 
       // ── Ringotel activation (the profile-page feature) ────────────────────────────────
@@ -2635,7 +3177,7 @@ export default {
         // Same scope bound as every other Ringotel route: these resolve from the fleet-wide Ringotel key
         // by domain string alone, so a caller must not be able to name a domain their NS token can't read.
         if (!auth.principal || domain !== normDomain(auth.principal.domain)) await assertDomainReadable(client, domain);
-        const { plan } = await buildPrepopPlan(client, env, caches.default, domain, isResellerScope(auth.principal?.scope));
+        const { plan } = await buildPrepopPlan(client, env, caches.default, domain);
         return json({ domain, ...plan }, 200, cors);
       }
 
@@ -2650,11 +3192,11 @@ export default {
         if (needsFreshAuth(ROUTES['/rapp/prepop/apply'].sensitivity)) await requireFreshAuth(auth, env);
         // Re-plan rather than accept a client-supplied list: the caller names the DOMAIN to reconcile,
         // never the individual users to create.
-        const { plan, org } = await buildPrepopPlan(client, env, caches.default, domain, isResellerScope(auth.principal?.scope));
-        const res = await applyDirectoryPrepop(makeWriteClient(env), org.entry.orgid, org.entry.branchid, plan.create);
-        if (res.created > 0) await invalidateOrgUsers(caches.default, scopeOf(env), org.entry.orgid);
-        console.log(JSON.stringify({ msg: 'prepop applied', domain, planned: plan.create.length, created: res.created, failed: res.failed.length }));
-        return json({ domain, planned: plan.create.length, ...res }, 200, cors);
+        const { plan, result } = await reconcileDomainDirectory(env, caches.default, client, domain);
+        // `reason` when the plan aborted: without it an abort is indistinguishable from a domain that
+        // genuinely had nothing to do, and `locked` — "another run is already converging this, look
+        // again in a moment" — reads as "the reconcile found nothing", which is the opposite advice.
+        return json({ domain, planned: plan.create.length, status: plan.status, ...(plan.reason ? { reason: plan.reason } : {}), ...result }, 200, cors);
       }
 
     if (url.pathname === '/rapp/activate' && request.method === 'POST') {
@@ -2759,6 +3301,11 @@ export default {
     ctx.waitUntil(
       runOrphanSweep(env).catch((e) =>
         console.error(JSON.stringify({ msg: 'ns-events sweep failed', error: String((e as Error)?.message ?? e).slice(0, 200) })),
+      ),
+    );
+    ctx.waitUntil(
+      runDirectoryReconcile(env).catch((e) =>
+        console.error(JSON.stringify({ msg: 'prepop reconcile failed', error: String((e as Error)?.message ?? e).slice(0, 200) })),
       ),
     );
   },

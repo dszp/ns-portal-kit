@@ -166,6 +166,59 @@ const orgUsersKey = (scope: string, orgid: string) => `${CACHE_ORIGIN}/${scope}/
 // would simply let ORG_PARAMS_TTL lapse.
 export const orgParamsKey = (scope: string, orgid: string) => `${CACHE_ORIGIN}/${scope}/org/${orgid}/params`;
 
+/**
+ * Per-domain lock for a directory reconcile. Exported for the same reason `indexRefreshLockKey` is: the
+ * selftests' in-memory Cache API stub has no TTL expiry, so a scenario has to evict it by hand where
+ * production lets `PREPOP_LOCK_TTL` lapse.
+ *
+ * The domain is percent-encoded. Every caller builds the key through this function, so the encoding is
+ * consistent by construction — and a domain string that arrived from a Ringotel `address` (operator
+ * typing, see `runDirectoryReconcile`) cannot carry a `/` that would place the lock in a different
+ * namespace than the one that will be checked.
+ */
+export const prepopLockKey = (scope: string, domain: string) => `${CACHE_ORIGIN}/${scope}/prepop-lock/${encodeURIComponent(domain)}`;
+/** Generous relative to a reconcile (a handful of NS + Ringotel round trips), short enough that a lock
+ *  stranded by an isolate that died mid-run expires rather than wedging the domain until a deploy. */
+const PREPOP_LOCK_TTL = 120; // s
+
+/**
+ * Take the reconcile lock for one domain. Returns a **run id** the holder must pass back to
+ * {@link releasePrepopLock}, or `null` when another run already holds it and this one must not plan or
+ * write.
+ *
+ * The id is what makes release safe. A lock that expired under a slow run and was then retaken by a
+ * second run would otherwise be deleted by the FIRST run's `finally` — handing a third run the lock while
+ * the second is still mid-write, which is the exact state the lock exists to prevent, arrived at through
+ * the cleanup path. Releasing by id means a stale owner's release is a no-op.
+ *
+ * ⚠️ **Best-effort, not mutual exclusion.** The Cache API has no compare-and-set, so this read-then-write
+ * can interleave with an identical one in another isolate or colo and hand the lock to both. What it
+ * actually buys is the common case that motivated it: the same operator triggering two reconciles of one
+ * domain seconds apart (a refresh on the Users page and one on the Domains page; a double-click), which
+ * lands on one colo and is serialized here. A cross-colo collision remains possible and is bounded by
+ * what a reconcile can do wrong when it happens twice — a duplicate `createUser` for one extension. The
+ * same honest limit `indexRefreshLockKey` carries; a real mutex needs a Durable Object.
+ */
+export async function takePrepopLock(cache: Cache, scope: string, domain: string): Promise<string | null> {
+  const key = prepopLockKey(scope, domain);
+  if (await cacheGet<{ run: string }>(cache, key)) return null;
+  const run = crypto.randomUUID();
+  await cachePut(cache, key, { run }, PREPOP_LOCK_TTL);
+  return run;
+}
+
+/**
+ * Release the reconcile lock, but only if `run` is still the id holding it. A no-op when the lock has
+ * expired, was never taken, or has since been retaken by someone else — so a slow run's cleanup can never
+ * unlock a domain a newer run is actively working on.
+ */
+export async function releasePrepopLock(cache: Cache, scope: string, domain: string, run: string): Promise<void> {
+  const key = prepopLockKey(scope, domain);
+  const held = await cacheGet<{ run: string }>(cache, key);
+  if (held?.run !== run) return;
+  await cache.delete(new Request(key));
+}
+
 /** THE GATE. Everything Ringotel is governed by this. */
 export function ringotelEnabled(env: RingotelEnv): boolean {
   return typeof env.RINGOTEL_API_KEY === 'string' && env.RINGOTEL_API_KEY.trim().length > 0;

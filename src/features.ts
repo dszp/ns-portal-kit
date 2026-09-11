@@ -239,7 +239,8 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
     name: 'Directory pre-population',
     description:
       'Preview and create inactive Ringotel directory entries for NetSapiens users who have none (write). ' +
-      'Inactive entries are not billable and send no mail, but this is a whole-domain operation.',
+      'Inactive entries are not billable and send no mail, but this is a whole-domain operation. ' +
+      'Automatic reconcile for armed domains runs regardless of this gate (see RINGOTEL_PREPOP_AUTO).',
     default: 'reseller',
   },
   { key: 'ringotel.activate', name: 'App activate/deactivate', description: 'Activate or deactivate the app for a user from the profile page (write).', default: 'office_manager' },

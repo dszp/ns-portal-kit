@@ -89,11 +89,16 @@ Don't use it? Don't configure it, and the rest of the portal kit works fine!
 
 Integration features include:
 
-- **Softphone app status** — a reseller banner with the app domain at a glance, a per-user column on the
-  Users page, and an app column on the domain list. NetSapiens does not know your app platform exists.
+- **Softphone app status** — a reseller banner with the app domain at a glance (the domain is a link, and
+  an `NS SSO` pill beside it says whether the org's SSO binding is the one you run), a per-user column on
+  the Users page, and an app column on the domain list. NetSapiens does not know your app platform exists.
 - **App activation and password reset, from the user's profile** — activate, deactivate, or reset a user's
   app account without leaving NetSapiens, plus a preview-and-apply tool that pre-populates a whole domain's
   directory. Integrated domains are limited to an explicit allowlist you can hardcode.
+- **Automatic app directory** — armed per domain, the kit keeps a free, inactive placeholder for every
+  NetSapiens user who would be provisioned on an SSO sign-in, renames it when NetSapiens does, and removes
+  it when the extension goes away or stops qualifying. It runs from the change-event tier, an hourly cron
+  and the portal's own refresh control. Off unless configured, and always inside the write allowlist.
 - **App sign-in details, shown to the user** — the Apps menu and the user's home page explain how *that
   specific person* signs in: which app domain, which username, and where the password comes from (their
   portal password under SSO, or the credentials email otherwise — worded from the organization's own

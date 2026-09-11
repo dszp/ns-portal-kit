@@ -8,10 +8,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveFlow, fetchDomainSnapshot, NsClient, NsApiError, can, toPrincipal, type Snapshot } from '@dszp/netsapiens-lib';
-import { indexRefreshLockKey, orgParamsKey, scopeOf } from './ringotel.js';
+import { indexRefreshLockKey, invalidateOrgUsers, orgParamsKey, prepopLockKey, releasePrepopLock, scopeOf, takePrepopLock } from './ringotel.js';
 import { domainHash, entryKey } from './onebill.js';
-import { authorisesDeactivation, emailForWrite, nsEventLimitDecision, nsEventsMissingRingotelKey, readNsUser, processNsEventUsers, ROUTES } from './worker.js';
+import { authorisesDeactivation, isResetAccount, emailForWrite, nsEventLimitDecision, nsEventsMissingRingotelKey, readNsUser, processNsEventUsers, reconcileDomainDirectory, runDirectoryReconcile, runOrphanSweep, ROUTES } from './worker.js';
 import { resolveFeaturePolicies } from './features.js';
+import { resolveRingotelConfig } from './eligibility.js';
 import { fakeD1 } from './testkit/fakeD1.js';
 import type { Principal } from '@dszp/netsapiens-lib';
 import type { NsEventsConfig } from './nsEvents.js';
@@ -62,6 +63,9 @@ const clearRefreshLock = () => memCache.store.delete(indexRefreshLockKey(scopeOf
 // scenario that CHANGES an org's params must evict it, or it keeps serving the PREVIOUS scenario's SSO
 // state. Called from every rtOrgs reassignment below, so no scenario can inherit another's org settings.
 const clearOrgParams = (orgid = 'RTORG') => memCache.store.delete(orgParamsKey(scopeOf({}), orgid));
+// And for the per-domain reconcile lock. Production lets PREPOP_LOCK_TTL lapse; here a lock left behind
+// by a scenario that asserted ON it would make every later reconcile of that domain report `locked`.
+const clearPrepopLock = (d = domain) => memCache.store.delete(prepopLockKey(scopeOf({}), d));
 
 // --- stub global fetch: /jwt → 200 valid; NS v2 reads → fixture ---
 let jwtCalls = 0;
@@ -76,6 +80,22 @@ let rtRpc: Array<{ method: string; params: any }> = []; // captured Ringotel RPC
 let nsDevices: any[] = []; // NS user devices (write-route tests)
 let nsDevicesFail = false; // when set, the devices GET returns non-2xx (no-ns-device: read-failure case)
 let nsUserRec: any = null; // NS single-user record (eligibility; write-route tests)
+/**
+ * When set, the domain `/users` LIST read serves this instead of the fixture's users — the reconcile
+ * block needs a directory it controls. The single-user read follows it too, so `confirmGone` sees the
+ * same world the plan was built from rather than `nsUserRec` answering for every extension.
+ */
+let nsUsersForDomain: any[] | null = null;
+/**
+ * Per-extension overrides for the SINGLE-user read, consulted ahead of `nsUsersForDomain`. The sweep's
+ * whole safety property is that a LIST-derived candidate is re-read one extension at a time before
+ * anything is written, so a test has to be able to make the two disagree — a list row that says `reset`
+ * and a live record that says `standard` is exactly the stale-read case the confirmation exists for.
+ */
+let nsUserOverrides: Record<string, any> | null = null;
+/** Every NS device call the stub served, as `<METHOD>:<device>` — device work is what a reset account
+ *  must never provoke, and "no write happened" is only assertable if writes are recorded. */
+const nsDeviceCalls: string[] = [];
 // Fix 2 (transient-upstream-failure) test knobs: fail JUST the `~` self-read, or JUST the specific-ext
 // eligibility read, independently — both otherwise share nsUserRec/the same regex, so without these two
 // flags there's no way to fail one without failing the other.
@@ -105,6 +125,18 @@ let nsSnapFail = false;
 const nsUnderDomain = new Set<string>();
 /** When non-zero, the stub /jwt answers with this status — a token that no longer re-validates. */
 let jwtFail = 0;
+/**
+ * One-shot barrier for the global fetch stub: the first fetch whose URL satisfies `when` parks until
+ * `open` resolves, then the barrier clears. Every stub response here is instantaneous and every cache
+ * read is an in-memory map, so an operation started in this harness runs to completion inside one
+ * microtask drain — which makes "two things genuinely in flight at once" otherwise impossible to stage,
+ * and that is exactly the state the reconcile lock and the kick-after-the-read ordering are about.
+ *
+ * `when` exists because "the next fetch" is rarely the one a scenario means: a route that forces a fresh
+ * token re-validation spends a `/jwt` call before it reaches its own work, and a barrier that caught that
+ * one would park the handler at a point that proves nothing about where the deferred kick sits.
+ */
+let fetchGate: { when: (url: string) => boolean; open: Promise<void> } | null = null;
 /** `NS:value[/site]|…` from a stub subscriber's PBX groups — the link codec's own format. */
 const obExternalId = (x: any): string => ((x.accountAttribute ?? []) as any[])
   .filter((g) => g?.key === 'PBX')
@@ -117,6 +149,7 @@ const obExternalId = (x: any): string => ((x.accountAttribute ?? []) as any[])
 const j = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
 const nf = () => new Response('[]', { status: 404 });
 (globalThis as any).fetch = async (input: string, init?: any) => {
+  if (fetchGate && fetchGate.when(String(input))) { const g = fetchGate.open; fetchGate = null; await g; }
   const uobj = new URL(String(input));
   // OneBill: the OAuth grant and the subscriber search. The default fixture's one account carries a
   // DECLARED-but-blank PBX group (the shape OneBill materialises on every record once the group is
@@ -209,7 +242,7 @@ const nf = () => new Response('[]', { status: 404 });
   const b = `/domains/${domain}`;
   if (path === b) return j(raw.domain ?? { domain });
   if (path === `${b}/timeframes`) return j(raw.timeframes ?? []);
-  if (path === `${b}/users`) return j(raw.users ?? []);
+  if (path === `${b}/users`) return j(nsUsersForDomain ?? raw.users ?? []);
   if (path === `${b}/callqueues`) return j(raw.callqueues ?? []);
   if (path === `${b}/phonenumbers`) return j(raw.phonenumbers ?? []);
   if (path === `${b}/autoattendants`) return j(raw.autoattendants ?? []);
@@ -234,7 +267,8 @@ const nf = () => new Response('[]', { status: 404 });
   // Write-route stubs: device collection (list/create), one device (get/delete), single-user read.
   m = path.match(/^\/domains\/([^/]+)\/users\/([^/]+)\/devices$/);
   if (m) {
-    if (init?.method === 'POST') { const d = JSON.parse(String(init.body ?? '{}')); return j({ device: d.device, 'device-sip-registration-password': 'GENPW1234567890' }); }
+    if (init?.method === 'POST') { const d = JSON.parse(String(init.body ?? '{}')); nsDeviceCalls.push(`POST:${d.device}`); return j({ device: d.device, 'device-sip-registration-password': 'GENPW1234567890' }); }
+    nsDeviceCalls.push(`GET:${decodeURIComponent(m[2]!)}`);
     if (nsDevicesFail) return new Response('{"error":"upstream"}', { status: 500 });
     return j(nsDevices);
   }
@@ -248,6 +282,14 @@ const nf = () => new Response('[]', { status: 404 });
     const isSelf = m[1] === '~' && m[2] === '~';
     if (isSelf && nsSelfReadFail) return new Response('{"error":"upstream"}', { status: 500 });
     if (!isSelf && nsEligReadFail) return new Response('{"error":"upstream"}', { status: 500 });
+    if (!isSelf && nsUserOverrides) {
+      const rec = nsUserOverrides[decodeURIComponent(m![2]!)];
+      if (rec) return j(rec);
+    }
+    if (!isSelf && nsUsersForDomain) {
+      const rec = nsUsersForDomain.find((u: any) => String(u.user) === decodeURIComponent(m![2]!));
+      return rec ? j(rec) : nf();
+    }
     return nsUserRec ? j(nsUserRec) : nf();
   }
   return nf();
@@ -270,7 +312,14 @@ const ok = (c: boolean, m: string) => {
 
 (async () => {
   const { default: worker } = await import('./worker.js');
-  const ctx = { waitUntil() {}, passThroughOnException() {} } as any;
+  // The ExecutionContext stub COLLECTS what the Worker defers instead of dropping it. In production
+  // `waitUntil` keeps the isolate alive past the response; here the request resolves the moment the
+  // handler returns, so a no-op stub makes every after-the-response behaviour untestable — it simply
+  // never runs. Scenarios that care await `Promise.all(waited)` and reset `waited.length = 0` first.
+  // `.catch` on the stored copy, not the original: the Worker's own handler still sees the rejection
+  // (and logs it), while an un-awaited scenario can't turn one into an unhandled rejection.
+  const waited: Promise<unknown>[] = [];
+  const ctx = { waitUntil(p: Promise<unknown>) { waited.push(Promise.resolve(p).catch(() => {})); }, passThroughOnException() {} } as any;
   const kind = raw.callqueues?.length ? 'queue' : 'user';
   const ref = raw.callqueues?.length ? String(raw.callqueues[0]!.callqueue) : String(raw.users?.[0]?.user ?? '');
   // Expected graph = the SAME assembly the Worker performs, resolved directly. Hold the input constant and
@@ -442,6 +491,27 @@ const ok = (c: boolean, m: string) => {
   ok((await roCall(`/rapp/org?domain=forbidden.example&refresh=ringotel`)).status === 403,
     '[ringotel/org] domain NOT readable in NS → 403 (standalone mode is bounded by NS scope too)');
   ok((await roCall(`/rapp/org?domain=${domain}`, sEnv)).status === 404, '[ringotel/org] no RINGOTEL_API_KEY → 404 (gate)');
+
+  // Whether the org's SSO binding is OURS is a SERVER decision — the raw `params.sso` name is not
+  // self-describing, so the client must be told rather than left to compare strings it cannot configure.
+  {
+    clearRefreshLock(); clearOrgParams();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org', params: { sso: '9/netsapiens_sso' } }];
+    const ssoEnvS = { ...rEnvS, RINGOTEL_SSO_SERVICE: 'netsapiens_sso' };
+    const bOn = await (await roCall(`/rapp/org?domain=${domain}&refresh=ringotel`, ssoEnvS)).json();
+    ok(bOn.sso === true, '[ringotel/org] binding names the CONFIGURED service → sso:true');
+    const bUnset = await (await roCall(`/rapp/org?domain=${domain}&refresh=ringotel`)).json();
+    ok(bUnset.sso === false, '[ringotel/org] RINGOTEL_SSO_SERVICE unset → sso:false (fails closed, same helper as /me/app-access)');
+    clearRefreshLock(); clearOrgParams();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org', params: { sso: '9/other_idp' } }];
+    const bOther = await (await roCall(`/rapp/org?domain=${domain}&refresh=ringotel`, ssoEnvS)).json();
+    ok(bOther.sso === false, '[ringotel/org] a DIFFERENT SSO service is not ours → sso:false');
+    const bOff = await (await roCall(`/rapp/org?domain=readable.example&refresh=ringotel`, ssoEnvS)).json();
+    ok(bOff.active === false && !('sso' in bOff), '[ringotel/org] no org ⇒ no sso field (nothing to grade)');
+    // Restore the plain org the rest of this section reads.
+    clearRefreshLock(); clearOrgParams();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+  }
 
   const ru = await roCall(`/rapp/users?domain=${domain}&refresh=ringotel`);
   const rub = await ru.json();
@@ -918,6 +988,184 @@ const ok = (c: boolean, m: string) => {
     rtBranches = savedBranches; rtUsers = savedUsers;
   }
 
+  // ── prepop preview/apply carry the WHOLE reconcile plan ───────────────────────────
+  // One connection, four extensions: a placeholder NetSapiens has renamed, a placeholder NetSapiens no
+  // longer has, a tombstone, and a user with no record at all. The fold itself is covered exhaustively in
+  // ringotelPrepop.selftest.ts — what is under test here is that the plan reaches the wire intact and that
+  // apply performs all three kinds of write through the real Ringotel write client.
+  {
+    const savedBranches = rtBranches, savedUsers = rtUsers;
+    clearRefreshLock(); clearOrgParams();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [{ id: 'RTBR', orgid: 'RTORG', address: domain }];
+    rtUsers = [
+      { id: 'PH1', extension: '1201', branchid: 'RTBR', status: -1, username: '1201', name: 'Old Name' }, // placeholder, NS renamed it
+      { id: 'PH2', extension: '1202', branchid: 'RTBR', status: -1, username: '1202', name: 'Gone' },     // placeholder, not in NS
+      { id: 'TS1', extension: '1203', branchid: 'RTBR', status: -1, authname: '1203r', name: 'Tomb' },    // tombstone
+    ];
+    nsUsersForDomain = [
+      { user: '1201', 'name-first-name': 'New', 'name-last-name': 'Name', email: 'n@example.com' },
+      { user: '1204', 'name-first-name': 'Fresh', 'name-last-name': 'User', email: 'f@example.com' },
+    ];
+
+    rtRpc = [];
+    const prev = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    ok(prev.status === 200, '[prepop/preview] 200');
+    ok(!rtRpc.some((c) => ['createUser', 'updateUser', 'deleteUser'].includes(c.method)), '[prepop/preview] planning writes nothing — preview stays a read');
+    const pj = await prev.json() as any;
+    ok(pj.status === 'ok', '[prepop/preview] a usable NS list plans rather than aborting');
+    ok((pj.create ?? []).map((c: any) => c.ext).join() === '1204', '[prepop/preview] create names the NS user with no record');
+    ok(pj.update?.[0]?.ext === '1201' && pj.update?.[0]?.changes?.name === 'New Name', '[prepop/preview] update carries the renamed placeholder');
+    ok(pj.remove?.[0]?.ext === '1202' && pj.remove?.[0]?.reason === 'ns-gone', '[prepop/preview] remove names the placeholder NetSapiens no longer has');
+    ok((pj.skipped ?? []).some((s: any) => s.ext === '1203' && s.reason === 'tombstone'), '[prepop/preview] the tombstone is reported skipped, not removed');
+
+    clearRefreshLock();
+    rtRpc = [];
+    const app = await wcall('/rapp/prepop/apply', { domain });
+    const aj = await app.json() as any;
+    ok(app.status === 200 && aj.created === 1 && aj.updated === 1 && aj.removed === 1 && aj.failed.length === 0, '[prepop/apply] applied all three');
+    const cu = rtRpc.find((c) => c.method === 'createUser');
+    ok(cu?.params.extension === '1204' && cu?.params.status === 0 && !('authname' in cu.params) && !('password' in cu.params), '[prepop/apply] the new entry is a placeholder — no SIP identity');
+    ok(rtRpc.some((c) => c.method === 'updateUser' && c.params.id === 'PH1' && c.params.name === 'New Name'), '[prepop/apply] the rename reached Ringotel');
+    ok(rtRpc.some((c) => c.method === 'deleteUser' && c.params.id === 'PH2') && !rtRpc.some((c) => c.method === 'deleteUser' && c.params.id === 'TS1'), '[prepop/apply] the placeholder was deleted; the tombstone was not');
+
+    // The `ns-gone` delete is authorised by a per-extension NetSapiens re-read, never by the list alone.
+    // Fail that read and the removal is reported failed with NO delete sent — a list that was truncated or
+    // filtered short cannot manufacture a deletion.
+    clearRefreshLock();
+    rtRpc = [];
+    nsEligReadFail = true;
+    const app2 = await wcall('/rapp/prepop/apply', { domain });
+    const aj2 = await app2.json() as any;
+    nsEligReadFail = false;
+    ok(aj2.removed === 0 && aj2.failed.some((f: any) => f.ext === '1202' && f.op === 'remove' && f.error === 'not confirmed gone'),
+       '[prepop/apply] a failed confirming read reports the removal failed, not done');
+    ok(!rtRpc.some((c) => c.method === 'deleteUser'), '[prepop/apply] ...and no deleteUser RPC was sent for it');
+
+    // A list row carrying no email FIELD is a narrowed read, not a cleared address. The update path must
+    // not push a blank over a good one — the same three-state contract `emailForWrite` enforces.
+    clearRefreshLock();
+    rtUsers = [{ id: 'PH3', extension: '1205', branchid: 'RTBR', status: -1, username: '1205', name: 'Same Name', email: 'keep@example.com' }];
+    nsUsersForDomain = [{ user: '1205', 'name-first-name': 'Same', 'name-last-name': 'Name' }];
+    const narrow = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    const nj = await narrow.json() as any;
+    ok(nj.update?.length === 0 && nj.create?.length === 0, '[prepop/preview] a row with no email field is not an email removal');
+    ok((nj.skipped ?? []).some((x: any) => x.ext === '1205' && x.reason === 'already-present'), '[prepop/preview] ...the record reads as in-sync, not as some other refusal');
+
+    // The route hands the RULE an unknown device count — `buildPrepopPlan` drops it rather than counting
+    // devices per user across a domain — so with `RINGOTEL_EXCLUDE_NO_DEVICES` armed a SHARED-named
+    // placeholder must be kept, not removed on an inference. The rule itself is covered in
+    // ringotelPrepop.selftest.ts; this pins the CALL SITE, which is the half that supplies the unknown.
+    clearRefreshLock();
+    rtUsers = [{ id: 'PH4', extension: '1206', branchid: 'RTBR', status: -1, username: '1206', name: 'SHARED LINE', email: 's@example.com' }];
+    nsUsersForDomain = [{ user: '1206', 'name-first-name': 'SHARED', 'name-last-name': 'LINE', email: 's@example.com' }];
+    const noDev = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, { ...wEnv, RINGOTEL_EXCLUDE_NO_DEVICES: '1' }, resellerTok, 'GET');
+    const ndj = await noDev.json() as any;
+    ok(ndj.remove.length === 0 && (ndj.skipped ?? []).some((x: any) => x.ext === '1206' && x.reason === 'soft' && /device count unknown/.test(String(x.detail ?? ''))),
+       '[prepop/preview] a soft name + an uncounted device count keeps the placeholder — a fabricated 0 must not authorise a delete');
+
+    // `RINGOTEL_RESELLER_OVERRIDE` lets a reseller force ONE activation they are watching. It must NOT
+    // reach the reconcile planner: "would this user auto-provision on SSO login" is a fact about the user,
+    // not about who is looking, and a reseller-scoped preview that created SHARED/VOICEMAIL placeholders
+    // would hand the cron — which runs on the service identity — a directory to remove them from again.
+    // The token here is a Reseller and the override is `all`, which is what used to turn this into a create.
+    clearRefreshLock();
+    rtUsers = [];
+    nsUsersForDomain = [{ user: '1207', 'name-first-name': 'SHARED', 'name-last-name': 'VOICEMAIL', email: 'sv@example.com' }];
+    const ovr = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, { ...wEnv, RINGOTEL_RESELLER_OVERRIDE: 'all' }, resellerTok, 'GET');
+    const oj = await ovr.json() as any;
+    ok(ovr.status === 200 && (oj.create ?? []).length === 0, '[prepop/preview] a reseller override never creates a soft-named entry — the reconcile has no principal');
+    ok((oj.skipped ?? []).some((x: any) => x.ext === '1207' && x.reason === 'soft'), '[prepop/preview] ...it is reported skipped/soft, the same answer every other door gets');
+
+    // ── "List in Directory" off is a soft exclusion (RINGOTEL_UNLISTED_USERS) ────────────────────
+    // NetSapiens' own per-user switch for "do not show this person in the directory". A user hidden there
+    // is not someone to pre-populate a directory with, so the default grades it `soft` — the same tier a
+    // SHARED/VOICEMAIL name gets, and reversible per deployment.
+    clearRefreshLock();
+    rtUsers = [];
+    nsUsersForDomain = [{ user: '1208', 'name-first-name': 'Hidden', 'name-last-name': 'Person', email: 'h@example.com', 'directory-name-visible-in-list-enabled': 'no' }];
+    const unl = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    const uj = await unl.json() as any;
+    ok((uj.create ?? []).length === 0, '[prepop/preview] a user with List in Directory off gets no placeholder');
+    ok((uj.skipped ?? []).some((x: any) => x.ext === '1208' && x.reason === 'soft' && /not listed/.test(String(x.detail ?? ''))),
+       '[prepop/preview] ...and is reported soft, naming the directory flag as the reason');
+
+    // `ignore` is the opt-out: the deployment does not treat the flag as a signal at all.
+    clearRefreshLock();
+    const unlIgn = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, { ...wEnv, RINGOTEL_UNLISTED_USERS: 'ignore' }, resellerTok, 'GET');
+    const uij = await unlIgn.json() as any;
+    ok((uij.create ?? []).map((c: any) => c.ext).join() === '1208', '[prepop/preview] RINGOTEL_UNLISTED_USERS=ignore creates the same user');
+
+    // THREE-STATE, like email: a row that never carried the field is unknown, and unknown never fires the
+    // rule. A narrowed read must not look like "hidden".
+    clearRefreshLock();
+    nsUsersForDomain = [{ user: '1209', 'name-first-name': 'Plain', 'name-last-name': 'Person', email: 'p@example.com' }];
+    const unlAbsent = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    const uaj = await unlAbsent.json() as any;
+    ok((uaj.create ?? []).map((c: any) => c.ext).join() === '1209', '[prepop/preview] a row WITHOUT the directory field still creates — unknown is not unlisted');
+
+    // The other three states of the mapper, so "unknown" is proven to be exactly the two it is not.
+    // `yes` is the ordinary answer for a listed user and must read as listed, not as "we saw the field".
+    clearRefreshLock();
+    nsUsersForDomain = [{ user: '1211', 'name-first-name': 'Listed', 'name-last-name': 'Person', email: 'l@example.com', 'directory-name-visible-in-list-enabled': 'yes' }];
+    const unlYes = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    ok(((await unlYes.json() as any).create ?? []).map((c: any) => c.ext).join() === '1211', '[prepop/preview] "yes" ⇒ listed ⇒ create');
+
+    // A value we do not recognise is UNKNOWN, not hidden — the same answer as an absent field. A parser
+    // that fell back to "not yes ⇒ hidden" would turn every shape surprise into a domain-wide exclusion.
+    clearRefreshLock();
+    nsUsersForDomain = [{ user: '1212', 'name-first-name': 'Odd', 'name-last-name': 'Value', email: 'o@example.com', 'directory-name-visible-in-list-enabled': 'maybe' }];
+    const unlOdd = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    ok(((await unlOdd.json() as any).create ?? []).map((c: any) => c.ext).join() === '1212', '[prepop/preview] an unrecognised value ⇒ unknown ⇒ create, never a silent exclusion');
+
+    // The v1 spelling on its own.
+    clearRefreshLock();
+    nsUsersForDomain = [{ user: '1213', 'name-first-name': 'Legacy', 'name-last-name': 'Hidden', email: 'lh@example.com', dir_list: 'no' }];
+    const unlV1 = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    const v1j = await unlV1.json() as any;
+    ok((v1j.create ?? []).length === 0 && (v1j.skipped ?? []).some((x: any) => x.ext === '1213' && x.reason === 'soft'),
+       '[prepop/preview] the `dir_list` spelling alone is read the same way');
+
+    // ...and a PRESENT-but-blank v2 key must not shadow it. `||` rather than `??` between the two
+    // spellings is what makes the second one still get its turn; `??` would read the empty string as an
+    // answer and report this user as unknown.
+    clearRefreshLock();
+    nsUsersForDomain = [{ user: '1214', 'name-first-name': 'Blank', 'name-last-name': 'Then', email: 'bt@example.com', 'directory-name-visible-in-list-enabled': '', dir_list: 'no' }];
+    const unlBoth = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    const bothj = await unlBoth.json() as any;
+    ok((bothj.create ?? []).length === 0 && (bothj.skipped ?? []).some((x: any) => x.ext === '1214' && x.reason === 'soft'),
+       '[prepop/preview] a blank v2 field does not shadow a `dir_list` answer');
+
+    // The reconcile direction: an EXISTING placeholder for a user who has since been hidden is removed as
+    // `ineligible`. Allowed here precisely because the verdict did not rest on a device count nobody
+    // counted — wEnv leaves RINGOTEL_EXCLUDE_NO_DEVICES off, so the soft-removal guard does not apply.
+    clearRefreshLock();
+    ok(resolveRingotelConfig(wEnv as any).excludeNoDevices === false, '[prepop/preview] (fixture check) the no-device heuristic is off, so a soft removal is permitted');
+    rtUsers = [{ id: 'PH5', extension: '1210', branchid: 'RTBR', status: -1, username: '1210', name: 'Hidden Later', email: 'hl@example.com' }];
+    nsUsersForDomain = [{ user: '1210', 'name-first-name': 'Hidden', 'name-last-name': 'Later', email: 'hl@example.com', 'directory-name-visible-in-list-enabled': 'no' }];
+    const unlRem = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    const urj = await unlRem.json() as any;
+    ok(urj.remove?.some((r: any) => r.ext === '1210' && r.reason === 'ineligible'),
+       '[prepop/preview] a placeholder for a now-unlisted user is planned for removal as ineligible');
+
+    // A FAILED list read must abort, never degrade to "NetSapiens has nobody" — which would plan the whole
+    // directory for removal.
+    clearRefreshLock();
+    nsUsersForDomain = null;
+    nsSnapFail = true;
+    const failed = await wcall(`/rapp/prepop/preview?domain=${domain}`, null, wEnv, resellerTok, 'GET');
+    const fj = await failed.json() as any;
+    nsSnapFail = false;
+    ok(fj.status === 'abort' && fj.reason === 'ns-list-unavailable' && fj.remove.length === 0, '[prepop/preview] a failed NS list read aborts the plan (never an empty list)');
+
+    // This block force-freshed the directory several times, so the org's user list is cached as ITS
+    // scenario. Evict it, or the next block's read route answers from a directory that never held ext 100.
+    clearRefreshLock(); clearOrgParams();
+    await invalidateOrgUsers(memCache as any, scopeOf({}), 'RTORG');
+    nsUsersForDomain = null;
+    rtBranches = savedBranches; rtUsers = savedUsers;
+  }
+
   // Indicator (read) GET /rapp/user → single-user status.
   {
     rtUsers = [{ id: 'ux', extension: '100', branchid: 'RTBR', status: 1, state: 1, devs: [{ id: 'd', st: 1 }] }];
@@ -1122,7 +1370,7 @@ const ok = (c: boolean, m: string) => {
     nsDevicesFail = false;
     nsDevices = [];
     const baseCfg: Omit<NsEventsConfig, 'offboard' | 'deviceRepair'> = {
-      intent: 'on', armed: true, domains: [domain], writeRail: [domain],
+      intent: 'on', armed: true, domains: [domain], domainsExcept: [], writeRail: [domain],
       baseUrl: 'https://w.dev', pathSecret: 'x', models: ['subscriber'],
       renewHorizonSeconds: 100, targetLifetimeSeconds: 200, allowIps: [], geoSupport: 'yes',
       maxEvents: 40, diagRaw: false, sweepMax: 200, identity: { kind: 'api', token: 'evt-token' },
@@ -1139,7 +1387,9 @@ const ok = (c: boolean, m: string) => {
 
     // 2) Identity sync + 3) device repair: the re-read succeeds with a name differing from the Ringotel
     // record's stored name (forces syncIdentity to write) — both must act on the same B2 record.
-    nsUserRec = { user: ext, email: `u@${domain}`, 'first-name': 'New', 'last-name': 'Name' };
+    // `account-status` is now load-bearing on this path: device repair refuses anything but `standard`
+    // (see the reset block below), so the fixture has to say what state the account is in.
+    nsUserRec = { user: ext, email: `u@${domain}`, 'first-name': 'New', 'last-name': 'Name', 'account-status': 'standard' };
     rtRpc = [];
     const origLog = console.log;
     const lines: string[] = [];
@@ -1170,6 +1420,516 @@ const ok = (c: boolean, m: string) => {
       Array.isArray(deviceLine?.changed) && deviceLine.changed.includes('sip-identity'),
       '[ns-event] device repair finds and reports on the record on the connection it actually sits on (B2), not the first bound connection',
     );
+
+    // ── the event door: placeholders follow NetSapiens at subscriber-event time on armed domains ──
+    // ONE connection here, deliberately: creating a record needs exactly one, and these scenarios are
+    // about WHAT the door does rather than which connection it picks (the two-connection cases above own
+    // that). The refresh lock and the org-params entry are cleared for the same reason they were at the
+    // top of this block — the two-connection directory just cached would otherwise be served to every
+    // call below.
+    clearOrgParams(); clearRefreshLock();
+    rtBranches = [{ id: 'B1', orgid: 'RTORG', address: domain }];
+    const armedEnv = { ...evtEnv, RINGOTEL_WRITE_DOMAINS: '*', RINGOTEL_PREPOP_AUTO: '*' };
+    const cfgOff = { ...baseCfg, offboard: 'deactivate' as const, deviceRepair: 'off' as const };
+
+    // 1) create: NS has a qualifying user, Ringotel has no record
+    rtUsers = []; rtRpc = [];
+    nsUserRec = { user: '801', 'first-name': 'Eve', 'last-name': 'Adams', email: 'eve@example.com' };
+    await processNsEventUsers(armedEnv as any, cfgOff, [{ domain, ext: '801' }]);
+    const cu801 = rtRpc.find((c) => c.method === 'createUser');
+    ok(!!cu801 && cu801.params.extension === '801' && cu801.params.status === 0 && !('authname' in cu801.params) && !('password' in cu801.params),
+       '[event door] 200 + no record + qualifies ⇒ placeholder created, no SIP identity');
+
+    // 2) unarmed domain ⇒ today's behaviour: skip no-app-record, create nothing
+    rtUsers = []; rtRpc = [];
+    await processNsEventUsers({ ...evtEnv, RINGOTEL_WRITE_DOMAINS: '*' } as any, cfgOff, [{ domain, ext: '801' }]);
+    ok(!rtRpc.some((c) => c.method === 'createUser'), '[event door] unarmed ⇒ nothing is created');
+
+    // 3) 404 with a placeholder ⇒ deleted (not deactivated)
+    rtUsers = [{ id: 'PH802', extension: '802', branchid: 'B1', status: -1, username: '802', name: 'Gone' }]; rtRpc = [];
+    nsUserRec = null;
+    await processNsEventUsers(armedEnv as any, cfgOff, [{ domain, ext: '802' }]);
+    ok(rtRpc.some((c) => c.method === 'deleteUser' && c.params.id === 'PH802') && !rtRpc.some((c) => c.method === 'deactivateUser'),
+       '[event door] 404 + placeholder ⇒ deleteUser');
+
+    // 3b) …and the same 404 + placeholder on an UNARMED domain is left completely alone. Arming is the
+    // only thing between this door and a delete, and the offboard path beside it must not pick the
+    // placeholder up either — it deactivates ACTIVE records, and a placeholder is not one.
+    rtUsers = [{ id: 'PH802', extension: '802', branchid: 'B1', status: -1, username: '802', name: 'Gone' }]; rtRpc = [];
+    nsUserRec = null;
+    await processNsEventUsers({ ...evtEnv, RINGOTEL_WRITE_DOMAINS: '*' } as any, cfgOff, [{ domain, ext: '802' }]);
+    ok(!rtRpc.some((c) => c.method === 'deleteUser'), '[event door] unarmed + 404 + placeholder ⇒ no deleteUser');
+    ok(!rtRpc.some((c) => c.method === 'deactivateUser'), '[event door] unarmed + 404 + placeholder ⇒ no deactivateUser either');
+
+    // 4) 404 with an ACTIVE record ⇒ still deactivates, never deletes (offboarding unchanged)
+    rtUsers = [{ id: 'A803', extension: '803', branchid: 'B1', status: 1, username: '803r', authname: '803r', name: 'Live' }]; rtRpc = [];
+    await processNsEventUsers(armedEnv as any, cfgOff, [{ domain, ext: '803' }]);
+    ok(rtRpc.some((c) => c.method === 'deactivateUser' && c.params.id === 'A803') && !rtRpc.some((c) => c.method === 'deleteUser'),
+       '[event door] 404 + active ⇒ deactivate, not delete');
+
+    // 5) 404 with a tombstone ⇒ untouched
+    rtUsers = [{ id: 'T804', extension: '804', branchid: 'B1', status: -1, authname: '804r', name: 'Tomb' }]; rtRpc = [];
+    await processNsEventUsers(armedEnv as any, cfgOff, [{ domain, ext: '804' }]);
+    ok(!rtRpc.some((c) => c.method === 'deleteUser' || c.method === 'deactivateUser'), '[event door] 404 + tombstone ⇒ no write');
+
+    // 6) 200, placeholder exists, user now hard-excluded ⇒ removed
+    rtUsers = [{ id: 'PH805', extension: '805', branchid: 'B1', status: -1, username: '805', name: 'Was Person' }]; rtRpc = [];
+    nsUserRec = { user: '805', 'first-name': 'Was', 'last-name': 'Person', email: 'w@example.com', srv_code: '11' };
+    await processNsEventUsers(armedEnv as any, cfgOff, [{ domain, ext: '805' }]);
+    ok(rtRpc.some((c) => c.method === 'deleteUser' && c.params.id === 'PH805'), '[event door] 200 + placeholder + now ineligible ⇒ deleteUser');
+
+    // 7) 200, placeholder, name changed ⇒ the existing identity sync renames it (unchanged path), and the
+    // door adds no second write of its own: the reconcile is handed the record as the sync just left it.
+    rtUsers = [{ id: 'PH806', extension: '806', branchid: 'B1', status: -1, username: '806', name: 'Old', email: 'o@example.com' }]; rtRpc = [];
+    nsUserRec = { user: '806', 'first-name': 'New', 'last-name': 'Name', email: 'o@example.com' };
+    await processNsEventUsers(armedEnv as any, cfgOff, [{ domain, ext: '806' }]);
+    const uu806 = rtRpc.filter((c) => c.method === 'updateUser');
+    ok(uu806.length === 1 && uu806[0]!.params.id === 'PH806' && uu806[0]!.params.name === 'New Name',
+       '[event door] name drift on a placeholder is synced once — the door does not re-write what the sync just wrote');
+
+    // 8) 200, TWO placeholders at one ext ⇒ the reconcile's own verdict is 'ambiguous' — permanently
+    // unreconcilable (the cron and the next event land on the same verdict forever), so it must not
+    // collapse into the ordinary silent 'none' the in-sync case gets. Both placeholders carry the SAME
+    // name NetSapiens reports, so the (unrelated, pre-existing) identity sync ahead of this door is a
+    // no-op — isolating the assertion to what the prepop reconcile itself does with an ambiguous ext:
+    // no create/remove/update of its own, and the ambiguity logged with the extension.
+    rtUsers = [
+      { id: 'PHA', extension: '807', branchid: 'B1', status: -1, username: '807', name: 'Dup Licate' },
+      { id: 'PHB', extension: '807', branchid: 'B1', status: -1, username: '807', name: 'Dup Licate' },
+    ];
+    rtRpc = [];
+    nsUserRec = { user: '807', 'first-name': 'Dup', 'last-name': 'Licate' }; // no email field ⇒ sync skips email too
+    const origLogAmb = console.log;
+    const ambLines: string[] = [];
+    console.log = (...a: unknown[]) => {
+      ambLines.push(String(a[0]));
+      origLogAmb(...a);
+    };
+    try {
+      await processNsEventUsers(armedEnv as any, cfgOff, [{ domain, ext: '807' }]);
+    } finally {
+      console.log = origLogAmb;
+    }
+    ok(!rtRpc.some((c) => ['createUser', 'updateUser', 'deleteUser', 'deactivateUser'].includes(c.method)),
+       '[event door] two placeholders at one ext ⇒ ambiguous, no write (identity sync is a no-op; the ambiguous reconcile writes nothing)');
+    const ambLine = ambLines
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((l) => l && l.msg === 'ns-event prepop ambiguous' && l.ext === '807');
+    ok(!!ambLine && ambLine.domain === domain, '[event door] the ambiguous verdict is logged, not silently swallowed');
+
+    // ── a RESET NetSapiens account is offboarded exactly like a deleted one ────────────────────────
+    // "Reset User" strips the name, email, password and softphone devices and parks the account in setup
+    // state; the v2 record reads `account-status: reset`. Nothing about that person is left, so the app
+    // record they still hold is the same wasted seat a deleted user's is — and with device repair in
+    // `heal` mode the old behaviour would have RE-CREATED the `<ext>r` device NetSapiens had just taken
+    // away. Live case: one extension reset in production, its app record still active, its device gone.
+    const logLines = async (fn: () => Promise<void>) => {
+      const orig = console.log;
+      const out: any[] = [];
+      console.log = (...a: unknown[]) => { try { out.push(JSON.parse(String(a[0]))); } catch { /* not ours */ } orig(...a); };
+      try { await fn(); } finally { console.log = orig; }
+      return out;
+    };
+    const resetRec = (ext: string) => ({ user: ext, domain, 'account-status': 'reset', 'first-name': '', 'last-name': '', email: '' });
+
+    // 9) reset + offboard=deactivate ⇒ the active record is DEACTIVATED, and nothing is written onto it
+    rtUsers = [{ id: 'A810', extension: '810', branchid: 'B1', status: 1, username: '810r', authname: '810r', name: 'Jane Doe' }];
+    rtRpc = []; nsDeviceCalls.length = 0; nsDevices = [];
+    nsUserRec = resetRec('810');
+    const resetLines = await logLines(() => processNsEventUsers(armedEnv as any, { ...baseCfg, offboard: 'deactivate', deviceRepair: 'heal' }, [{ domain, ext: '810' }]));
+    ok(rtRpc.some((c) => c.method === 'deactivateUser' && c.params.id === 'A810'), '[ns-event reset] offboard=deactivate ⇒ the reset account\'s app record is deactivated');
+    ok(!rtRpc.some((c) => c.method === 'updateUser'), '[ns-event reset] ...and nothing is synced onto it — no updateUser at all');
+    ok(!rtRpc.some((c) => c.method === 'deleteUser'), '[ns-event reset] ...and it is never DELETED — a reset account gets recycled for the next hire');
+    ok(nsDeviceCalls.length === 0, '[ns-event reset] ...and no NS device is touched, let alone created, even with device repair in heal mode');
+    const offLine = resetLines.find((l) => l && l.msg === 'ns-event offboard' && l.ext === '810');
+    ok(offLine?.action === 'deactivated' && offLine?.reason === 'ns-reset', '[ns-event reset] the offboard line names the reason as ns-reset, distinct from a 404');
+
+    // 10) reset + offboard=off ⇒ NOTHING is written, in either direction. The device-repair refusal is
+    // independent of the offboard switch: turning offboarding off must not turn healing a reset account
+    // back on, which is the failure mode that would put a working SIP credential on a stripped account.
+    rtUsers = [{ id: 'A811', extension: '811', branchid: 'B1', status: 1, username: '811r', authname: '811r', name: 'Jane Doe' }];
+    rtRpc = []; nsDeviceCalls.length = 0; nsDevices = [];
+    nsUserRec = resetRec('811');
+    const skipLines = await logLines(() => processNsEventUsers(armedEnv as any, { ...baseCfg, offboard: 'off', deviceRepair: 'heal' }, [{ domain, ext: '811' }]));
+    ok(!rtRpc.some((c) => ['deactivateUser', 'updateUser', 'createUser', 'deleteUser'].includes(c.method)), '[ns-event reset] offboard=off ⇒ no Ringotel write of any kind');
+    ok(nsDeviceCalls.length === 0, '[ns-event reset] offboard=off ⇒ still no NS device work — the repair gate is independent of the offboard switch');
+    const skipLine = skipLines.find((l) => l && l.msg === 'ns-event skip' && l.ext === '811');
+    ok(skipLine?.reason === 'ns-reset', '[ns-event reset] ...and the skip is logged with reason ns-reset rather than passing silently');
+
+    // 11) an account mid-SETUP (`new`, `pwd reset`) is not an offboarding — identity still syncs, but the
+    // device is not ours to assert while the account has no usable password.
+    rtUsers = [{ id: 'A812', extension: '812', branchid: 'B1', status: 1, username: 'WRONG', authname: 'WRONG', name: 'Old Name' }];
+    rtRpc = []; nsDeviceCalls.length = 0; nsDevices = [];
+    nsUserRec = { user: '812', domain, 'account-status': 'pwd reset', 'first-name': 'Jane', 'last-name': 'Doe' };
+    await processNsEventUsers(armedEnv as any, { ...baseCfg, offboard: 'deactivate', deviceRepair: 'heal' }, [{ domain, ext: '812' }]);
+    ok(!rtRpc.some((c) => c.method === 'deactivateUser'), '[ns-event reset] "pwd reset" is NOT a reset — the account is not offboarded');
+    const syncedName = rtRpc.find((c) => c.method === 'updateUser' && c.params.name === 'Jane Doe');
+    ok(!!syncedName, '[ns-event reset] ...its identity still syncs');
+    ok(nsDeviceCalls.length === 0 && !rtRpc.some((c) => c.method === 'updateUser' && c.params.authname), '[ns-event reset] ...but device repair refuses it — no device call, no SIP identity write');
+
+    // 12) `standard` is untouched by all of this: the ordinary path still syncs AND still heals.
+    rtUsers = [{ id: 'A813', extension: '813', branchid: 'B1', status: 1, username: 'WRONG', authname: 'WRONG', name: 'Old Name' }];
+    rtRpc = []; nsDeviceCalls.length = 0; nsDevices = [];
+    nsUserRec = { user: '813', domain, 'account-status': 'standard', 'first-name': 'Jane', 'last-name': 'Doe' };
+    await processNsEventUsers(armedEnv as any, { ...baseCfg, offboard: 'deactivate', deviceRepair: 'heal' }, [{ domain, ext: '813' }]);
+    ok(!rtRpc.some((c) => c.method === 'deactivateUser'), '[ns-event reset] a standard account is never deactivated by this feature');
+    ok(nsDeviceCalls.some((c) => c === 'POST:813r'), '[ns-event reset] ...and device repair still creates its missing device — the gate admits the ordinary case');
+    ok(rtRpc.some((c) => c.method === 'updateUser' && c.params.authname === '813r'), '[ns-event reset] ...and still corrects its SIP identity');
+  }
+
+  // ── the cron door: converges what the event tier missed; inert unless armed ──
+  // Events are at-least-once and nothing predates switch-on, so the event tier alone leaves drift that
+  // no event will ever carry. What is proven here is that the hourly pass reaches it — and that it stays
+  // inert until `RINGOTEL_PREPOP_AUTO` arms the domain, which is the only thing between a cron and a
+  // fleet-wide write. The env is built out rather than reusing `evtEnv` above: this door reads the
+  // service identity out of the ENV (`NS_API_KEY`), where the event tier is handed a parsed config.
+  {
+    clearOrgParams(); clearRefreshLock();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [{ id: 'B1', orgid: 'RTORG', address: domain }];
+    // Ringotel holds a placeholder for an extension NetSapiens no longer has; NetSapiens holds a
+    // qualifying user Ringotel has never heard of. One run must converge both directions.
+    rtUsers = [{ id: 'PH901', extension: '901', branchid: 'B1', status: -1, username: '901', name: 'Gone' }];
+    nsUsersForDomain = [{ user: '902', 'name-first-name': 'Missed', 'name-last-name': 'Event', email: 'm@example.com' }];
+    const cronEnv = {
+      NS_SERVER: 'mock.local', RINGOTEL_API_KEY: 'rt-key',
+      NS_EVENTS: 'on', NS_EVENTS_BASE_URL: 'https://w.dev', NS_EVENTS_PATH_SECRET: 'x', NS_EVENTS_DOMAINS: domain,
+      NS_API_KEY: 'evt-token', RINGOTEL_WRITE_DOMAINS: '*',
+    };
+
+    rtRpc = [];
+    await runDirectoryReconcile(cronEnv as any);
+    ok(!rtRpc.some((c) => ['createUser', 'deleteUser', 'updateUser'].includes(c.method)), '[cron door] unarmed ⇒ no writes');
+
+    rtRpc = [];
+    // The per-extension removal line is captured on this run: `removed: 1` in the domain summary is an
+    // unanswerable question once the record is gone, and a fleet pass that removed one placeholder each
+    // across five domains is exactly what produced that question.
+    const origCronLog = console.log;
+    const cronLines: string[] = [];
+    console.log = (...a: unknown[]) => { cronLines.push(String(a[0])); origCronLog(...a); };
+    try {
+      await runDirectoryReconcile({ ...cronEnv, RINGOTEL_PREPOP_AUTO: domain } as any);
+    } finally {
+      console.log = origCronLog;
+    }
+    ok(rtRpc.some((c) => c.method === 'createUser' && c.params.extension === '902'), '[cron door] armed ⇒ the missed user is created');
+    ok(rtRpc.some((c) => c.method === 'deleteUser' && c.params.id === 'PH901'), '[cron door] and the orphaned placeholder is removed');
+    const removedLine = cronLines
+      .map((l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return null; } })
+      .find((l) => l && l.msg === 'prepop reconcile removed');
+    ok(!!removedLine, '[cron door] a removal emits its own log line, not just a count in the summary');
+    ok(removedLine?.ext === '901' && removedLine?.domain === domain, '[cron door] ...naming the extension and the domain it was removed from');
+    ok(removedLine?.reason === 'ns-gone', '[cron door] ...and the verdict that authorised the delete');
+    ok(
+      cronLines.some((l) => { try { return (JSON.parse(l) as Record<string, unknown>).msg === 'prepop reconcile'; } catch { return false; } }),
+      '[cron door] and the domain summary line is still emitted beside it',
+    );
+    const order = rtRpc.map((c) => c.method);
+    ok(order.indexOf('getUsers') !== -1 && order.indexOf('getUsers') < order.indexOf('createUser'), '[cron door] Ringotel is read before anything is written');
+
+    // `'*'` arms by DISCOVERY rather than by an enumerated list, so the write rail is the only thing
+    // bounding how far a fleet-wide setting reaches — the branch worth a test of its own. `NS_EVENTS=off`
+    // on both calls is the second claim: this door is armed by its own rail and borrows nothing from the
+    // events feature except the service identity.
+    rtRpc = [];
+    await runDirectoryReconcile({ ...cronEnv, NS_EVENTS: 'off', RINGOTEL_PREPOP_AUTO: '*', RINGOTEL_WRITE_DOMAINS: 'other.example' } as any);
+    ok(!rtRpc.some((c) => ['createUser', 'deleteUser', 'updateUser'].includes(c.method)), '[cron door] "*" is still bounded by the write rail');
+
+    rtRpc = [];
+    await runDirectoryReconcile({ ...cronEnv, NS_EVENTS: 'off', RINGOTEL_PREPOP_AUTO: '*' } as any);
+    ok(rtRpc.some((c) => c.method === 'createUser' && c.params.extension === '902'), '[cron door] "*" reaches a discovered domain with the events feature off');
+
+    // `!domain` subtracts from that wildcard — the fleet-wide rail with a carve-out (a demo or lab domain
+    // nobody wants converged). Identical env to the run directly above, which creates and deletes; the
+    // single exclusion is the only difference, so a write here would mean the carve-out is decorative.
+    rtRpc = [];
+    await runDirectoryReconcile({ ...cronEnv, NS_EVENTS: 'off', RINGOTEL_PREPOP_AUTO: `*,!${domain}` } as any);
+    ok(!rtRpc.some((c) => ['createUser', 'deleteUser', 'updateUser'].includes(c.method)), '[cron door] "*,!domain" carves the domain out of the wildcard — nothing is written for it');
+
+    // Module-level stub state: leaving a domain user list set here would serve it to every later block.
+    nsUsersForDomain = null;
+  }
+
+  // ── the sweep door: the hourly converger picks up reset accounts too ──────────────────────────────
+  // Events are at-least-once and nothing predates switch-on, so the sweep is the half that has to
+  // converge. It now has two kinds of candidate — an extension NetSapiens no longer has, and one it has
+  // in `reset` state — and both are confirmed by a per-extension re-read before anything is written.
+  {
+    clearOrgParams(); clearRefreshLock();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [{ id: 'B1', orgid: 'RTORG', address: domain }];
+    const sweepEnv = {
+      NS_SERVER: 'mock.local', RINGOTEL_API_KEY: 'rt-key',
+      NS_EVENTS: 'on', NS_EVENTS_BASE_URL: 'https://w.dev', NS_EVENTS_PATH_SECRET: 'x', NS_EVENTS_DOMAINS: domain,
+      NS_API_KEY: 'evt-token', RINGOTEL_WRITE_DOMAINS: '*', NS_EVENTS_OFFBOARD: 'deactivate',
+    };
+
+    // 100 is a live user; 3010 was reset (name and email stripped, record still there). Both hold an
+    // ACTIVE app record on the same connection — only the reset one may lose it.
+    nsUsersForDomain = [
+      { user: '100', 'name-first-name': 'Live', 'name-last-name': 'Person', email: `live@${domain}`, 'account-status': 'standard' },
+      { user: '3010', 'name-first-name': '', 'name-last-name': '', email: '', 'account-status': 'reset' },
+    ];
+    rtUsers = [
+      { id: 'A100', extension: '100', branchid: 'B1', status: 1, username: '100r', authname: '100r', name: 'Live Person' },
+      { id: 'A3010', extension: '3010', branchid: 'B1', status: 1, username: '3010r', authname: '3010r', name: 'Gone Person' },
+    ];
+    rtRpc = []; nsDeviceCalls.length = 0;
+    await runOrphanSweep(sweepEnv as any);
+    ok(rtRpc.some((c) => c.method === 'deactivateUser' && c.params.id === 'A3010'), '[sweep] an active app record whose NS user is in reset state is deactivated');
+    ok(!rtRpc.some((c) => c.method === 'deactivateUser' && c.params.id === 'A100'), '[sweep] ...and the live user beside it is untouched');
+    ok(!rtRpc.some((c) => c.method === 'deleteUser'), '[sweep] ...and nothing is deleted — offboarding is reversible by design');
+
+    // The confirmation is the whole safety property: a LIST row saying `reset` is an inference (a
+    // truncated, filtered or simply stale page), and the per-extension re-read is what turns it into a
+    // fact. Here the list says reset and the live record says standard — the candidate must survive.
+    nsUsersForDomain = [
+      { user: '100', 'name-first-name': 'Live', 'name-last-name': 'Person', email: `live@${domain}`, 'account-status': 'standard' },
+      { user: '4010', 'name-first-name': '', 'name-last-name': '', email: '', 'account-status': 'reset' },
+    ];
+    nsUserOverrides = { '4010': { user: '4010', domain, 'account-status': 'standard', 'name-first-name': 'Back', 'name-last-name': 'Again' } };
+    rtUsers = [{ id: 'A4010', extension: '4010', branchid: 'B1', status: 1, username: '4010r', authname: '4010r', name: 'Back Again' }];
+    rtRpc = [];
+    const origErr = console.error;
+    const errLines: any[] = [];
+    console.error = (...a: unknown[]) => { try { errLines.push(JSON.parse(String(a[0]))); } catch { /* not ours */ } origErr(...a); };
+    try {
+      await runOrphanSweep(sweepEnv as any);
+    } finally {
+      console.error = origErr;
+      nsUserOverrides = null;
+    }
+    ok(!rtRpc.some((c) => c.method === 'deactivateUser'), '[sweep] a candidate the re-read reports as `standard` is REFUSED — a stale list can never deactivate a live user');
+    ok(errLines.some((l) => l && l.msg === 'ns-events sweep candidate still exists' && l.ext === '4010'), '[sweep] ...and the refusal is logged loudly, because it is direct evidence the list read was wrong');
+
+    // Module-level stub state: leaving these set would serve them to every later block.
+    nsUsersForDomain = null;
+    rtUsers = [];
+  }
+
+  // ── the refresh door: a forced refresh on an armed domain also reconciles it, in the background ──
+  // A forced refresh is already an operator capability (`ringotel.refresh`) that re-digs the fleet
+  // directory, so it is the natural place for "and converge this domain while you are at it" — it closes
+  // the wait between an operator noticing drift and the hourly cron. What is proven here is that the kick
+  // is AFTER the response (the read's status is decided without it), that it inherits both gates rather
+  // than adding a third (no refresh ⇒ nothing; no `ringotel.refresh` ⇒ nothing), and that an unarmed
+  // domain leaves the refresh behaving exactly as it did before this existed.
+  {
+    clearOrgParams(); clearRefreshLock();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [{ id: 'B1', orgid: 'RTORG', address: domain }];
+    rtUsers = []; rtRpc = []; waited.length = 0;
+    nsUsersForDomain = [{ user: '951', 'name-first-name': 'Via', 'name-last-name': 'Refresh', email: 'v@example.com' }];
+    // Carries the service identity (`NS_API_KEY`) the cron door uses: the reconcile outlives the request,
+    // so it must never run on the caller's `ns_t`.
+    const envWithEvents = {
+      NS_SERVER: 'mock.local', NS_PORTAL_ISS: ISS, RINGOTEL_API_KEY: 'rt-key',
+      NS_API_KEY: 'evt-token', RINGOTEL_WRITE_DOMAINS: '*',
+    };
+    const officeManagerTok = mkTok({ user_scope: 'Office Manager' }); // below ringotel.refresh (reseller)
+    const rget = (path: string, tok: string, e: any) =>
+      worker.fetch(new Request(`https://w.dev${path}`, { headers: { Authorization: `Bearer ${tok}` } }), e as any, ctx);
+
+    const armed = { ...envWithEvents, RINGOTEL_PREPOP_AUTO: '*' };
+    // The deferral itself is the observable, rather than "no write had landed yet": both the route and the
+    // kicked reconcile are chains of instantly-resolving stub fetches, so which one gets there first is an
+    // accident of how many awaits each happens to have, not a property of the design.
+    const rfd = await rget(`/rapp/users?domain=${domain}&refresh=1`, resellerTok, armed);
+    ok(rfd.status === 200, '[refresh door] the read answers normally');
+    ok(waited.length === 1, '[refresh door] the reconcile was DEFERRED, not awaited — the read did not wait on it');
+    await Promise.all(waited);
+    ok(rtRpc.some((c) => c.method === 'createUser' && c.params.extension === '951'), '[refresh door] and the reconcile ran after the response');
+    // The cache race, asserted on WHEN the kick is registered rather than on RPC order. The reconcile ends
+    // by invalidating the org's user cache and a forced refresh re-populates that same cache for ten
+    // minutes; kicked first, the two race and the foreground read can `put` a list it fetched before the
+    // creates landed and then serve it, pinned. RPC order cannot show this either way: the reconcile has
+    // many more awaits ahead of its first `createUser` (token mint, NS reads, org resolution, plan) than
+    // the foreground read has ahead of its `getUsers`, so `createUser` sorts after `getUsers` regardless
+    // of which one actually wins the cache race. `waited.length` is what discriminates — it is what proves
+    // nothing has been deferred while the read is still in flight, because the kick runs synchronously at
+    // whatever point in the handler it sits.
+    rtRpc = []; waited.length = 0; clearRefreshLock(); clearPrepopLock();
+    let openRead!: () => void;
+    // Park the RINGOTEL read inside `usersStatusForDomain` — past the forced re-validation's own /jwt
+    // call, which would otherwise take the barrier and stop the handler before the kick's position is
+    // observable at all. The deferred reconcile's first upstream call is a NetSapiens one, so it cannot
+    // take this barrier either.
+    fetchGate = { when: (u) => u.includes('shell.ringotel.co'), open: new Promise<void>((r) => { openRead = r; }) };
+    const pending = rget(`/rapp/users?domain=${domain}&refresh=1`, resellerTok, armed);
+    await new Promise((r) => setTimeout(r, 0)); // the handler is now parked in its first upstream read
+    ok(waited.length === 0, '[refresh door] nothing is deferred while the foreground read is still in flight');
+    openRead();
+    const pr = await pending;
+    ok(pr.status === 200 && waited.length === 1, '[refresh door] the kick is registered only once that read has returned');
+    await Promise.all(waited);
+
+    rtRpc = []; waited.length = 0; clearRefreshLock(); clearPrepopLock();
+    await rget(`/rapp/users?domain=${domain}`, resellerTok, armed);
+    await Promise.all(waited);
+    ok(!rtRpc.some((c) => c.method === 'createUser'), '[refresh door] a plain read (no refresh=1) does not reconcile');
+
+    rtRpc = []; waited.length = 0; clearRefreshLock();
+    await rget(`/rapp/users?domain=${domain}&refresh=1`, officeManagerTok, armed);
+    await Promise.all(waited);
+    ok(!rtRpc.some((c) => c.method === 'createUser'), '[refresh door] a caller without ringotel.refresh gets no reconcile (refreshRequested already says no)');
+
+    rtRpc = []; waited.length = 0; clearRefreshLock();
+    await rget(`/rapp/users?domain=${domain}&refresh=1`, resellerTok, { ...armed, RINGOTEL_PREPOP_AUTO: '' });
+    await Promise.all(waited);
+    ok(!rtRpc.some((c) => c.method === 'createUser'), '[refresh door] unarmed domain ⇒ refresh behaves exactly as before');
+
+    // The per-domain ORG route carries the same door. It displays an org fact rather than the directory,
+    // so this is the case that proves the trigger is "an operator asked for convergence on this domain",
+    // not "re-render what is on screen".
+    rtRpc = []; waited.length = 0; clearRefreshLock(); clearPrepopLock();
+    const rfg = await rget(`/rapp/org?domain=${domain}&refresh=1`, resellerTok, armed);
+    ok(rfg.status === 200, '[refresh door] /rapp/org answers normally');
+    await Promise.all(waited);
+    ok(rtRpc.some((c) => c.method === 'createUser' && c.params.extension === '951'), '[refresh door] /rapp/org reconciles its one domain too');
+
+    // The same door on the LIST route, which defers ONE task covering every domain the caller can
+    // actually see — the scope bound is the caller's own NS-visible list, never a client-supplied one.
+    // TWO visible domains here, which is the only way the fan-out shape is observable at all: with one,
+    // "a task per domain" and "one task for all of them" are the same number. `second.example` has no
+    // Ringotel org, so it is also the failing domain of the pair.
+    rtRpc = []; waited.length = 0; clearRefreshLock(); clearPrepopLock();
+    nsEditDomain = true;
+    const origErr = console.error;
+    const errLines: string[] = [];
+    console.error = (...a: unknown[]) => { errLines.push(String(a[0])); origErr(...a); };
+    let rfo: Response;
+    try {
+      rfo = await rget(`/rapp/orgs?refresh=1`, resellerTok, armed);
+      ok(rfo.status === 200, '[refresh door] /rapp/orgs answers normally');
+      // ONE deferred task however many domains are armed: a `waitUntil` per domain would turn one click
+      // on a large fleet into N concurrent reconciles sharing a single invocation's subrequest budget.
+      ok(waited.length === 1, '[refresh door] a fleet refresh defers ONE task, not one per domain');
+      await Promise.all(waited);
+    } finally {
+      console.error = origErr;
+      nsEditDomain = false;
+    }
+    ok(rtRpc.some((c) => c.method === 'createUser' && c.params.extension === '951'), '[refresh door] /rapp/orgs reconciles each visible armed domain');
+    // The failure is reported WITH its domain, which is what distinguishes the per-domain catch inside the
+    // loop from the task-level one outside it: only the inner catch knows which domain it was, and only
+    // the inner catch lets the loop reach the next domain at all.
+    const failLine = errLines.map((l) => { try { return JSON.parse(l) as any; } catch { return null; } })
+      .find((l) => l && l.msg === 'prepop reconcile (refresh) failed');
+    ok(failLine?.domain === 'second.example', '[refresh door] a domain that fails is isolated and named — the loop covers the rest');
+
+    // Module-level stub state: leaving a domain user list set here would serve it to every later block.
+    // A `read` route that can initiate Ringotel writes must not do so on a CACHED token verdict: a
+    // server-side logout leaves one valid for up to its TTL, and the whole point of `needsFreshAuth` is
+    // that a logged-out session cannot mutate. The gate is on the KICK, not the route — raising all three
+    // routes to `sensitive` would tax every plain read with a live /jwt round trip to cover the case
+    // where a refresh is forced AND something in front of the caller is armed.
+    // Two tokens, each warmed while /jwt still answers 200 so the INITIAL auth serves from cache and the
+    // failure that follows can only have come from the forced re-validation. Their own nonces, so the
+    // negative verdict this caches reaches nothing else in the suite.
+    const gateTokA = mkTok({ user_scope: 'Reseller', nonce: 'refresh-fresh-gate-a' });
+    const gateTokB = mkTok({ user_scope: 'Reseller', nonce: 'refresh-fresh-gate-b' });
+    await rget(`/rapp/users?domain=${domain}`, gateTokA, armed);
+    await rget(`/rapp/users?domain=${domain}`, gateTokB, armed);
+    rtRpc = []; waited.length = 0; clearRefreshLock(); clearPrepopLock();
+    jwtFail = 401;
+    try {
+      const blocked = await rget(`/rapp/users?domain=${domain}&refresh=1`, gateTokA, armed);
+      ok(blocked.status === 401, `[refresh door] an armed refresh on a token that no longer re-validates is refused (${blocked.status})`);
+      ok(waited.length === 0, '[refresh door] and no reconcile is deferred — the writes never start');
+      const unarmed = await rget(`/rapp/users?domain=${domain}&refresh=1`, gateTokB, { ...armed, RINGOTEL_PREPOP_AUTO: '' });
+      ok(unarmed.status === 200, '[refresh door] the same refresh on an UNARMED domain answers normally — no fresh check is charged');
+      ok(waited.length === 0, '[refresh door] (and still defers nothing)');
+    } finally {
+      jwtFail = 0;
+    }
+
+    nsUsersForDomain = null;
+    rtRpc = []; waited.length = 0; clearRefreshLock(); clearPrepopLock();
+  }
+
+  // ── the reconcile lock: one run per domain at a time, whichever door reached it ──
+  // Every door plans by READING the directory and then writing what is missing, so two runs that overlap
+  // both see an extension as absent and both create it — and Ringotel will hold two records for one
+  // extension. The doors are independent by design (an event, the cron, an operator's refresh, an
+  // explicit apply), so the serialization lives on the one function they all pass through.
+  {
+    clearOrgParams(); clearRefreshLock(); clearPrepopLock();
+    rtOrgs = [{ id: 'RTORG', domain, name: 'RT Org' }];
+    rtBranches = [{ id: 'B1', orgid: 'RTORG', address: domain }];
+    rtUsers = []; rtRpc = [];
+    nsUsersForDomain = [{ user: '961', 'name-first-name': 'Only', 'name-last-name': 'Once', email: 'o@example.com' }];
+    const lockEnv = { NS_SERVER: 'mock.local', RINGOTEL_API_KEY: 'rt-key', RINGOTEL_WRITE_DOMAINS: '*' };
+    const svcClient = new NsClient({ server: 'mock.local', token: 'svc-token' });
+    const run = (d = domain) => reconcileDomainDirectory(lockEnv as any, memCache as any, svcClient, d);
+
+    // Park the first run inside its first upstream read — past `takePrepopLock`, before anything is
+    // planned — so the second one starts while the lock is genuinely held. Firing both at once instead
+    // would interleave inside takePrepopLock's own read-then-write, which is the cross-colo race the
+    // Cache API cannot close and the doc comment admits to: testing the admitted gap as though it were
+    // the feature would only encode the limitation as an expectation.
+    let openGate!: () => void;
+    fetchGate = { when: () => true, open: new Promise<void>((r) => { openGate = r; }) };
+    const first = run();
+    await new Promise((r) => setTimeout(r, 0)); // let `first` reach the gated read and stop there
+    ok(memCache.store.has(prepopLockKey(scopeOf({}), domain)), '[reconcile lock] (setup) the in-flight run holds the lock');
+    const second = await run();
+    ok(second.plan.status === 'abort' && second.plan.reason === 'locked', '[reconcile lock] a run that starts while another holds the lock aborts as "locked"');
+    ok(second.result.created === 0 && second.result.updated === 0 && second.result.removed === 0, '[reconcile lock] and writes nothing itself');
+
+    openGate();
+    const firstRes = await first;
+    ok(firstRes.plan.status === 'ok', '[reconcile lock] the run that took the lock is unaffected');
+    // The whole point, stated as the bug it prevents: one extension, two overlapping runs, ONE record.
+    ok(rtRpc.filter((c) => c.method === 'createUser').length === 1, '[reconcile lock] 961 is created exactly once across both runs');
+
+    // Released on the way out, not left to the TTL: the next run plans normally.
+    rtRpc = [];
+    const third = await run();
+    ok(third.plan.status === 'ok', '[reconcile lock] the lock is released after a completed run');
+
+    // …and released when the run THROWS. `nobranch.example` has no Ringotel org, which buildPrepopPlan
+    // raises as a 404 before anything is planned — a real failure path rather than a stubbed one, and the
+    // case that would otherwise wedge a domain for the full TTL every time it recurred.
+    rtRpc = [];
+    let threw = false;
+    await run('nobranch.example').catch(() => { threw = true; });
+    ok(threw, '[reconcile lock] (setup) a domain with no app organization throws');
+    ok(!memCache.store.has(prepopLockKey(scopeOf({}), 'nobranch.example')), '[reconcile lock] the lock is released even when the run throws');
+
+    // A run id, not a bare flag: the lock is released BY OWNER. A run that overran the TTL and whose lock
+    // was then retaken by another would otherwise have its `finally` unlock a domain the newer run is
+    // still writing to — the exact state the lock exists to prevent, reached through the cleanup path.
+    const ownerDom = 'owner.example';
+    const runA = await takePrepopLock(memCache as any, scopeOf({}), ownerDom);
+    await releasePrepopLock(memCache as any, scopeOf({}), ownerDom, runA!);
+    const runB = await takePrepopLock(memCache as any, scopeOf({}), ownerDom);
+    ok(!!runA && !!runB && runA !== runB, '[reconcile lock] each holder gets its own run id');
+    await releasePrepopLock(memCache as any, scopeOf({}), ownerDom, runA!);
+    ok(memCache.store.has(prepopLockKey(scopeOf({}), ownerDom)), '[reconcile lock] a stale owner\'s release does not remove the newer holder\'s lock');
+    ok((await takePrepopLock(memCache as any, scopeOf({}), ownerDom)) === null, '[reconcile lock] ...so the domain is still closed to a third run');
+    await releasePrepopLock(memCache as any, scopeOf({}), ownerDom, runB!);
+    ok(!memCache.store.has(prepopLockKey(scopeOf({}), ownerDom)), '[reconcile lock] and the real holder releases it');
+
+    // The apply route must be able to SAY "locked". Without the reason on the wire, an abort is
+    // indistinguishable from a domain that had nothing to do — opposite advice to the operator.
+    rtRpc = [];
+    const held = await takePrepopLock(memCache as any, scopeOf({}), domain);
+    const lockedApply = await wcall('/rapp/prepop/apply', { domain });
+    const lj = await lockedApply.json() as { status?: string; reason?: string; created?: number };
+    ok(lockedApply.status === 200 && lj.status === 'abort' && lj.reason === 'locked' && lj.created === 0,
+       '[reconcile lock] /rapp/prepop/apply reports reason "locked" rather than an empty plan');
+    ok(!rtRpc.some((c) => ['createUser', 'updateUser', 'deleteUser'].includes(c.method)), '[reconcile lock] ...and wrote nothing');
+    await releasePrepopLock(memCache as any, scopeOf({}), domain, held!);
+
+    nsUsersForDomain = null;
+    rtRpc = []; clearPrepopLock(); clearPrepopLock('nobranch.example'); clearRefreshLock();
   }
 
   // ── emailForWrite: the three-state email contract, incl. the masquerade fail-closed rule ──
@@ -1263,6 +2023,25 @@ const ok = (c: boolean, m: string) => {
     ok(authorisesDeactivation({ kind: 'ok', rec: { x: 1 } }) === false, '[authorisesDeactivation] ok (the candidate still exists) → false — the list that produced it was wrong');
     ok(authorisesDeactivation({ kind: 'failed' }) === false, '[authorisesDeactivation] failed, no status → false — an unresolved read must never be mistaken for a deletion');
     ok(authorisesDeactivation({ kind: 'failed', status: 500 }) === false, '[authorisesDeactivation] failed, with status → still false');
+    // …and the second case that authorises one: a user NetSapiens still holds, in `reset` state. The
+    // record exists, so `gone` can never describe it — but "Reset User" strips the name, email, password
+    // and softphone devices, which is an offboarding by every observable measure. The evidence is this
+    // re-read, never the event payload.
+    ok(authorisesDeactivation({ kind: 'ok', rec: { 'account-status': 'reset' } }) === true, '[authorisesDeactivation] ok + account-status reset → true — a reset account is offboarded like a deleted one');
+    ok(authorisesDeactivation({ kind: 'ok', rec: { 'account-status': 'standard' } }) === false, '[authorisesDeactivation] ok + account-status standard → false — a live user is never deactivated by a stale list');
+    ok(authorisesDeactivation({ kind: 'ok', rec: { 'account-status': 'pwd reset' } }) === false, '[authorisesDeactivation] ok + account-status "pwd reset" → false — a password reset is not an offboarding');
+    ok(authorisesDeactivation({ kind: 'failed' }) === false, '[authorisesDeactivation] a failed read is still false, reset or not — an unresolved read authorises nothing');
+  }
+
+  // ── isResetAccount: the whole reset rule, as one pure predicate ──────────────────────────────────
+  {
+    ok(isResetAccount({ 'account-status': 'reset' }) === true, '[isResetAccount] reset → true');
+    ok(isResetAccount({ 'account-status': ' Reset ' }) === true, '[isResetAccount] trimmed and case-insensitive, like every other account-status read in this repo');
+    ok(isResetAccount({ 'account-status': 'standard' }) === false, '[isResetAccount] standard → false');
+    ok(isResetAccount({ 'account-status': 'new' }) === false, '[isResetAccount] new (never set up) → false — it is not an offboarding');
+    ok(isResetAccount({ 'account-status': 'pwd reset' }) === false, '[isResetAccount] "pwd reset" → false — the substring must not match');
+    ok(isResetAccount({}) === false, '[isResetAccount] a record with no account-status → false; absence of evidence is not evidence');
+    ok(isResetAccount({ 'account-status': 42 }) === false, '[isResetAccount] a non-string value → false');
   }
 
   // ── nsEventLimitDecision: the receiver's rate-limit / verification decision (fix-wave F4) ────────

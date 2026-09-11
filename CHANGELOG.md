@@ -22,6 +22,46 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-09-11
+
+### Added
+
+- **A user reset in NetSapiens is offboarded like a deleted one** (`NS_EVENTS_OFFBOARD`). The *Reset User* action strips a user's name, email, password and soft-phone devices and parks the account in setup state for the next hire — everything except the app seat, which NetSapiens does not own and cannot strip. With offboarding set to `deactivate`, their app record is now deactivated on the change event and by the hourly sweep, on the same evidence rule a deletion uses: a re-read of the user, never the event payload, and never the record on its own. The sweep nominates reset accounts from the `account-status` the domain user list already carries, then re-reads each candidate before writing, so a stale list row cannot deactivate a live user. The record is deactivated, never deleted — a reset account that gets recycled reactivates normally.
+- **A change event for a reset user writes nothing else**, whatever `NS_EVENTS_OFFBOARD` is set to. The re-read grades the account before the identity sync, the directory reconcile and the device repair, and all three are skipped. Setting offboarding to `off` means "do not deactivate"; it has never meant "sync a stripped account instead". The hourly reconcile grades the record rather than the account status, and refuses a nameless one — which is what a reset leaves behind.
+
+### Changed
+
+- **Device self-heal now repairs only an `account-status: standard` user** (`NS_EVENTS_DEVICE_REPAIR`). `new`, `pwd reset` and `reset` are refused in both `report` and `heal` mode, and nothing is read or written for them. An account mid-setup has no settled device layout to re-assert, and a reset one has had its devices deliberately removed — in `heal` mode the old behaviour re-created the `<ext>r` device NetSapiens had just taken away, which hands a departed person's account a working SIP credential. The gate is independent of `NS_EVENTS_OFFBOARD`, so turning offboarding off cannot turn this back on.
+- **The app-directory reconcile no longer syncs from a NetSapiens record with no display name.** A nameless record has always been refused as the basis for CREATING a placeholder; it is now refused as the basis for updating one too, because the one field such a record can still write is the email, and the shape that produces it is a reset user whose address has just been stripped. Removing a placeholder is unaffected: an ineligible user is still removed whatever their name.
+- **The sweep logs every deactivated extension by name** — one `ns-events sweep deactivated` line per extension carrying the domain, the connection, the record ids and the evidence (`ns-gone` or `ns-reset`), beside the existing per-connection summary. The two evidences take different follow-ups: a deleted user is gone, a reset account is still there and about to be handed to someone new.
+
+## [0.8.3] — 2026-09-11
+
+### Changed
+
+- **The toolbar app-status item links the app domain rather than the status text**, and shows an NS SSO / NS SSO off pill from the org's binding as the server grades it. Whether a binding is the deployment's own SSO service is decided on the server against `RINGOTEL_SSO_SERVICE`, the same comparison the app sign-in details use, so a third-party IdP never reads as SSO — and with that setting unconfigured the pill reads `SSO off`, because SSO is never claimed on evidence the deployment has not supplied.
+- **The app-directory reconcile logs every removed extension by name** — one `prepop reconcile removed` line per deletion, carrying the domain, the extension and the verdict that authorised it (`ns-gone` or `ineligible`), beside the existing per-domain summary rather than instead of it. A count is enough for a create or an update, because the record is still there to inspect; a delete leaves nothing behind, so `removed: 1` across several domains is an unanswerable question afterwards. Failed operations are likewise logged one per extension and operation, where previously only the count reached the summary.
+
+## [0.8.2] — 2026-09-11
+
+### Added
+
+- **The two domain rails accept `!name` exclusions after a `*`** (`RINGOTEL_PREPOP_AUTO`, `NS_EVENTS_DOMAINS`). `*,!lab.example.com` means every domain the deployment permits except that one — the shape you want when a rail is armed fleet-wide but a demo, lab or pilot domain must be left alone, which previously forced you to abandon the wildcard and enumerate everything else by hand. An exclusion is only valid alongside `*`: a `!name` on its own, or mixed into a CSV list, is a startup config error naming the setting, because "everything except this" and "only this" are opposite readings of the same list. Exclusions are trimmed, lower-cased and matched case-insensitively, and must be valid domain names. A `*` with no exclusions behaves exactly as before.
+  **The two rails are independent — excluding a domain on one does NOT exclude it on the other.** Carve out on both, or neither, deliberately. An exclusion on `RINGOTEL_PREPOP_AUTO` stops the app-directory reconcile for that domain on all three of its doors: the `subscriber` event tier, the hourly cron, and the refresh control on the Domains and Users pages. No placeholder is created, renamed or removed there. An exclusion on `NS_EVENTS_DOMAINS` acts on the subscription instead: no subscription is created for the domain, an event delivery that arrives for it is refused at the receiver, and the offboarding sweep skips it — and a subscription that already existed for a newly excluded domain is deleted on the next reconcile, on the same rule that already applies to dropping a domain from the list.
+  `RINGOTEL_WRITE_DOMAINS` deliberately does **not** take exclusions, and now refuses a `!name` token with a startup error instead of reading it as a literal domain. It is the outer bound every other rail is narrowed against, and "everything except X" as an outer bound is a fail-open default in a deny-list's clothing: a domain added to the fleet tomorrow would land inside it.
+
+## [0.8.1] — 2026-09-10
+
+### Added
+
+- **A user whose NetSapiens *List in Directory* option is off is soft-excluded** (`RINGOTEL_UNLISTED_USERS`). Hiding someone from the domain directory is a deliberate "this is not a person you look up", so by default they get no directory placeholder and no account created on an SSO sign-in — the same treatment a shared-line or voicemail name gets, and reversible the same two ways: set `RINGOTEL_UNLISTED_USERS` to `ignore` to stop considering the flag, or add `unlisted` to `RINGOTEL_RESELLER_OVERRIDE` to let a reseller override it per activation. `all` in that setting now includes it. A user whose record does not carry the field is unaffected: unknown is not hidden. An already-activated user is never blocked from signing in, and an existing placeholder for a user who has since been hidden is removed by the reconcile — unless `RINGOTEL_EXCLUDE_NO_DEVICES` is on, in which case the removal is refused, because the reconcile does not read device counts and a soft removal that could depend on one is never acted on.
+
+## [0.8.0] — 2026-09-10
+
+### Added
+
+- **Automatic app-directory reconcile** (`RINGOTEL_PREPOP_AUTO`). For an armed domain the kit keeps a free placeholder app user (created with *Activate* off — the vendor charges only for activated users) for every NetSapiens user who would be provisioned on SSO login, renames it when the NetSapiens name or email changes, and removes it when the extension is deleted or stops qualifying. It runs from the `subscriber` event tier immediately, from the hourly cron as a catch-up, and from the refresh control on the Domains and Users pages. Records that were ever active are never touched. The pre-population preview now reports the update and remove lists beside the create list, and apply performs all three. Default off; always bounded by `RINGOTEL_WRITE_DOMAINS`.
+
 ### Changed
 
 - **The default device-suffix legend follows NetSapiens: `t` is SNAPmobile Tablet and `tm` is the TeamMate Teams connector** (`@dszp/netsapiens-lib` 0.10.0). If your connectors still register as `<ext>t` and `NS_DEVICE_SUFFIXES` is unset, they stop counting as Teams-connected on upgrade: set the legend and mark `t` `teams:true` beside `tm`.
@@ -29,6 +69,7 @@ release. The version at `/health` always matches a heading here.
 
 ### Fixed
 
+- The console's **Status banner endpoint** check no longer reports FAIL when the endpoint answers 2xx with an empty message — `{}`, `[]`, `""`, or a known key holding an empty string. That is the documented way a notice comes down, and the portal draws nothing without error, so the check now passes and says the endpoint is working with no notice for the signed-in user. A non-empty reply carrying none of the accepted keys still fails, since that is the silent misconfiguration the check exists to catch.
 - A `handoff` menu entry is drawn as an anchor that is the row's direct child, so the portal's own dropdown hover applies; the form sits hidden beside it and the token still travels only in the POST body.
 
 ## [0.7.1] — 2026-09-06
@@ -66,8 +107,6 @@ release. The version at `/health` always matches a heading here.
 - **The domain inventory cache-key shape segment moved from `v2` to `v3`.** The suffix legend is baked
   into a cached inventory read, so entries built before it are orphaned rather than served as current. The
   first account panel after upgrading costs a fresh NetSapiens read per domain.
-
-### Fixed
 
 ### Added
 

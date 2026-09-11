@@ -407,17 +407,37 @@ function rtEmailOf(u: User): string {
  * forever: no later event could ever produce a difference. Clearing writes `''` flat, after which slot
  * [0] is `''` and the next event is a genuine no-op, so this still converges in one step.
  */
-function emailDiffers(existing: User, email: string): boolean {
+export function emailDiffers(existing: User, email: string): boolean {
   const want = email.trim();
   const stored = rtEmailValues(existing);
   if (want === '') return stored.some((v) => v !== '');
   return want !== (stored[0] ?? '');
 }
 
-const rtNameOf = (u: User): string => {
+export const rtNameOf = (u: User): string => {
   const v = (u as Rec)['name'];
   return typeof v === 'string' ? v.trim() : '';
 };
+
+/**
+ * A PLACEHOLDER is a directory-only record: never activated, so it never took the SIP identity. Ringotel
+ * stores one as `status: -1` with `username` auto-filled to the **bare extension** (`1042`) and NO
+ * `authname`. A record `deactivateUser` produced (a tombstone) keeps its `authname` (`1042r`).
+ *
+ * The SIP identity is what separates "ours to create and delete" from "a person who once had service",
+ * and it can sit in EITHER field — `resolveCanonicalUser` treats `username === <ext><suffix>` as owning it
+ * exactly like `authname`. So a record carrying `1042r` in `username` is a once-provisioned user whatever
+ * its `authname` reads, and keying on `authname` alone would have made it deletable. Nothing else on the
+ * record is evidence either way: `status` alone cannot tell a placeholder from a tombstone.
+ */
+export function isPlaceholder(u: User): boolean {
+  const r = u as Rec;
+  if (Number(r['status']) === 1) return false;
+  const authname = typeof r['authname'] === 'string' ? r['authname'].trim() : '';
+  if (authname) return false;
+  const username = typeof r['username'] === 'string' ? r['username'].trim() : '';
+  return username === '' || username === String(r['extension'] ?? '').trim();
+}
 
 /**
  * Push the current NetSapiens identity (display name + email) onto the EXISTING canonical Ringotel user —
@@ -524,8 +544,21 @@ export async function deactivateAppOnly(opts: ActivationOpts): Promise<Deactivat
  *  `'device-password-blank'` (heal mode only — device confirmed present, password unreadable), or
  *  `'sip-identity'` — the drift observed, in report mode, or corrected, in heal mode. */
 export interface RepairDeviceResult {
-  action: 'ok' | 'repaired' | 'would-repair' | 'absent' | 'inactive';
+  action: 'ok' | 'repaired' | 'would-repair' | 'absent' | 'inactive' | 'account-not-standard';
   changed: string[];
+}
+
+/**
+ * Is this NetSapiens account in ordinary service? Trimmed, case-insensitive, and **fail-closed**: an
+ * absent or unreadable `account-status` is not `standard`.
+ *
+ * The vocabulary observed on this platform is `standard` · `new` · `reset` · `pwd reset`, and only the
+ * first describes an account whose device layout is settled. Same rule `appAccess.ts`'s `nsLoginUsable`
+ * applies to the SSO path, for the same reason: an account without a usable password is one NetSapiens
+ * is still mid-way through, and asserting things about it is guessing.
+ */
+export function isStandardAccount(accountStatus: string | undefined): boolean {
+  return (accountStatus ?? '').trim().toLowerCase() === 'standard';
 }
 
 /**
@@ -539,7 +572,8 @@ export interface RepairDeviceResult {
  * that rotating on a per-request path churns the credential and races a re-registration — and an event
  * path is per-request.
  *
- * Gated on `status === 1` for the same reason `syncIdentity` treats a missing record as `'absent'`:
+ * Gated on the NS `account-status` FIRST (`standard` only — see the guard's own comment), then on
+ * `status === 1` for the same reason `syncIdentity` treats a missing record as `'absent'`:
  * provisioning is a deliberate, human- or login-initiated act, never a side effect of an NS field edit.
  * Creating an NS device for a non-app user *is* provisioning.
  *
@@ -547,8 +581,22 @@ export interface RepairDeviceResult {
  * be compared, and writing it every time would turn every event into a write.
  */
 export async function repairDeviceForEvent(
-  opts: ActivationOpts & { mode: 'report' | 'heal' },
+  opts: ActivationOpts & {
+    mode: 'report' | 'heal';
+    /** NS `account-status` for this user, from the re-read the caller already made. Required — and
+     *  `undefined` is a legal value meaning "not known", which is refused. Making the caller pass it
+     *  explicitly is the point: the gate below cannot be skipped by forgetting a field. */
+    accountStatus: string | undefined;
+  },
 ): Promise<RepairDeviceResult> {
+  // ⚠️ FIRST, ahead of every read this function makes, and independent of `mode` and of
+  // `NS_EVENTS_OFFBOARD`. A "Reset User" in NetSapiens strips the account's name, email, password and
+  // softphone devices; in `heal` mode the code below would cheerfully re-create `<ext>r` and push a
+  // fresh SIP credential onto the shell of a person who has left. `new` and `pwd reset` are refused on
+  // the same argument — the account is mid-setup, and its device layout is not ours to assert.
+  // Reported rather than silent: an operator watching a fleet scan needs to see WHY a user was passed
+  // over, and `account-status` is the only field that explains it.
+  if (!isStandardAccount(opts.accountStatus)) return { action: 'account-not-standard', changed: ['account-status'] };
   const existing = resolveCanonical(opts); // may throw 409 on a genuine tie — the caller logs and drops
   if (!existing) return { action: 'absent', changed: [] };
   if (Number(existing.status) !== 1) return { action: 'inactive', changed: [] };

@@ -1,6 +1,6 @@
 /** Offline test for the Ringotel activation orchestration (device-ensure + create/update/deactivate/
  *  reset) with recording mock clients, plus the write-domain safety rail. pnpm test:ringotelwrite */
-import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter, syncIdentity, generateSipPassword, deactivateAppOnly, repairDeviceForEvent, resolveCanonical } from './ringotelActivation.js';
+import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter, syncIdentity, generateSipPassword, deactivateAppOnly, repairDeviceForEvent, resolveCanonical, isPlaceholder } from './ringotelActivation.js';
 import type { User } from '@dszp/ringotel-lib';
 
 let pass = 0, fail = 0;
@@ -717,7 +717,7 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const { dw, calls: dcalls } = mockDevices();           // device 100r MISSING
     const { rw, calls } = mockRt();
     const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
-    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'repaired' && r.changed.includes('device-created'), 'heal creates a missing NS device for an ACTIVE app user');
     ok(dcalls.includes('createDevice:100r'), 'the device is actually created');
     const up = calls.find((c) => c.m === 'updateUser');
@@ -728,7 +728,7 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const { dw, calls: dcalls } = mockDevices({ '100r': 'PW' });
     const { rw, calls } = mockRt();
     const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
-    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'ok' && r.changed.length === 0, 'a correct device + matching SIP identity is a no-op');
     ok(calls.length === 0, 'no Ringotel write when nothing is wrong (an event must not cost a write)');
     ok(!dcalls.some((c) => c.startsWith('updateDevice')), 'still no rotation on the happy path');
@@ -737,7 +737,7 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const { dw } = mockDevices({ '100r': 'PW' });
     const { rw, calls } = mockRt();
     const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: 'WRONG', authname: 'WRONG' })];
-    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'repaired' && r.changed.includes('sip-identity'), 'a mismatched Ringotel username/authname is corrected');
     const up = calls.find((c) => c.m === 'updateUser')!;
     ok(up.args.username === '100r' && up.args.authname === '100r', 'the corrected values are the device AOR');
@@ -747,7 +747,7 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const { dw, calls: dcalls } = mockDevices();           // device MISSING
     const { rw, calls } = mockRt();
     const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
-    const r = await repairDeviceForEvent({ ...base(), mode: 'report', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'report', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'would-repair' && r.changed.includes('device-missing'), 'report mode names the drift');
     ok(!dcalls.some((c) => c.startsWith('createDevice')), 'report mode NEVER creates a device');
     ok(calls.length === 0, 'report mode performs no Ringotel write at all');
@@ -759,7 +759,7 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const { dw, calls: dcalls } = mockDevices({ '100r': '' }); // device EXISTS, stored password reads blank
     const { rw, calls } = mockRt();
     const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
-    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'repaired' && r.changed.includes('device-password-blank') && !r.changed.includes('device-missing'), 'heal mode tags a present-but-blank-password device distinctly from a genuinely missing one');
     ok(!dcalls.some((c) => c.startsWith('createDevice')), 'the device is NOT re-created — it already existed');
     const up = calls.find((c) => c.m === 'updateUser');
@@ -772,7 +772,7 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const { dw } = mockDevices({ '100r': '' });
     const { rw, calls } = mockRt();
     const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
-    const r = await repairDeviceForEvent({ ...base(), mode: 'report', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'report', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'would-repair' && r.changed.includes('device-missing') && !r.changed.includes('device-password-blank'), 'report mode keeps the ambiguous case tagged device-missing');
     ok(calls.length === 0, 'report mode performs no Ringotel write at all');
   }
@@ -780,14 +780,43 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const { dw, calls: dcalls } = mockDevices();
     const { rw, calls } = mockRt();
     const users = [rtUser({ id: 'U1', ext: '100', status: 0, username: '100r', authname: '100r' })];
-    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'inactive' && calls.length === 0 && dcalls.length === 0, 'an INACTIVE Ringotel user is never a provisioning trigger — no device work at all');
   }
   {
     const { dw, calls: dcalls } = mockDevices();
     const { rw, calls } = mockRt();
-    const r = await repairDeviceForEvent({ ...base(), mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: [] as any });
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: 'standard', mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: [] as any });
     ok(r.action === 'absent' && calls.length === 0 && dcalls.length === 0, 'no Ringotel record ⇒ absent, and no NS device is provisioned');
+  }
+
+  // ── the account-state gate: only a `standard` account is ever repaired ────────
+  // Independent of NS_EVENTS_OFFBOARD, and ahead of every read this function makes. A NetSapiens user in
+  // `reset` state has had their devices deliberately stripped; re-creating `<ext>r` would hand a departed
+  // person's shell a working SIP credential, and in `heal` mode that is one POST away. `new` and
+  // `pwd reset` are refused on the same argument — the account is mid-setup and its device layout is not
+  // ours to assert. Absent/unreadable status is refused too: the only way to be sure is to be told.
+  {
+    for (const st of ['reset', 'new', 'pwd reset', 'RESET', ' reset ', undefined] as (string | undefined)[]) {
+      for (const mode of ['heal', 'report'] as const) {
+        const { dw, calls: dcalls } = mockDevices();       // device 100r MISSING — heal would create it
+        const { rw, calls } = mockRt();
+        const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: 'WRONG', authname: 'WRONG' })];
+        const r = await repairDeviceForEvent({ ...base(), accountStatus: st, mode, nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+        const label = `${JSON.stringify(st)} / ${mode}`;
+        ok(r.action === 'account-not-standard' && r.changed.join(',') === 'account-status', `account-status ${label} ⇒ refused, naming account-status`);
+        ok(dcalls.length === 0, `account-status ${label} ⇒ no NS device call at all — not even the read`);
+        ok(calls.length === 0, `account-status ${label} ⇒ no Ringotel write`);
+      }
+    }
+  }
+  {
+    // …and the gate does not swallow the ordinary case it sits in front of.
+    const { dw, calls: dcalls } = mockDevices();
+    const { rw } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, username: '100r', authname: '100r' })];
+    const r = await repairDeviceForEvent({ ...base(), accountStatus: ' Standard ', mode: 'heal', nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'repaired' && dcalls.includes('createDevice:100r'), 'a `standard` account still repairs — matched trimmed and case-insensitively, like every other account-status test in this repo');
   }
 
   // ── attached secondaries are never canonical ──────────────────────────────────
@@ -819,6 +848,16 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     // else in the function would stop a lone secondary being provisioned over.
     const none = resolveCanonical({ users: [secondary], branchid: 'B1', ext: '100', suffix: 'r' });
     ok(none === undefined, 'resolveCanonical: a lone attached secondary resolves to nothing, not to itself');
+  }
+
+  // ── isPlaceholder: which records the directory tooling may create and delete ────────────────────────
+  {
+    const rt = (o: Record<string, unknown>): User => o as User;
+    ok(isPlaceholder(rt({ id: 'P', extension: '1042', status: -1, username: '1042' })), 'isPlaceholder: status !== 1, no authname, username = bare extension ⇒ placeholder');
+    ok(isPlaceholder(rt({ id: 'P', extension: '1042', status: 0 })), 'isPlaceholder: neither username nor authname is a placeholder too');
+    ok(!isPlaceholder(rt({ id: 'T', extension: '1042', status: -1, authname: '1042r' })), 'isPlaceholder: a tombstone (authname) is NOT a placeholder');
+    ok(!isPlaceholder(rt({ id: 'A', extension: '1042', status: 1, username: '1042' })), 'isPlaceholder: an ACTIVE record is NOT a placeholder');
+    ok(!isPlaceholder(rt({ id: 'S', extension: '1042', status: -1, username: '1042r' })), 'isPlaceholder: the SIP identity in `username` alone disqualifies it');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -117,6 +117,12 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(body.includes('force:true') && body.includes('Force-activate') && body.includes('_isRes'), '[bundle] reseller runtime force-activate override present');
     ok(body.includes('"label":"App"'), '[bundle] gated bundle carries the deployment label from RINGOTEL_LABEL');
     ok(body.includes('"appBase":"https://app.example.com"'), '[bundle] https app-base carried into _KC');
+    // The toolbar item's shape, asserted per claim rather than as one merged grep: the DOMAIN carries the
+    // dashboard link now, and the SSO pill is drawn from the server's `sso` verdict (both states), never
+    // from the client re-deriving the service-name comparison it cannot see the config for.
+    ok(body.includes('NS SSO off'), '[bundle] banner carries the SSO-off pill text');
+    ok(body.includes('r.sso===true'), '[bundle] banner branches on the SERVER-graded r.sso (no client-side re-derivation)');
+    ok(/appDomain[^\n]*href/.test(body), '[bundle] the app domain is the anchor that carries the dashboard href');
   }
   {
     const r = await call('/kit/portal.js', realOM);

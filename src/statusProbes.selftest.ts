@@ -361,6 +361,44 @@ globalThis.fetch = modeFetch;
   globalThis.fetch = modeFetch;
 }
 
+// ── the status banner: "no message" is graded by CAUSE (2026-09-10) ──────────────────────────────
+// A live endpoint whose global notice had been switched off answered 200 with a JSON body carrying an
+// empty message, and the console called that FAIL while the portal was rendering exactly what the
+// contract says: nothing. CONFIG documents an empty string as "show nothing". Only a non-empty object
+// with none of the accepted keys — the silent misconfiguration this probe was written for — stays a fail.
+{
+  const ENV = { NS_SERVER: 'mock.local', STATUS_BANNER_WEBHOOK: 'https://notices.example.com/hook' } as any;
+  const bannerWith = async (body: string | null, status = 200) => {
+    globalThis.fetch = (async () => new Response(body, { status, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+    const rs = await runProbes(ENV, CTX);
+    return byId(rs, 'status-banner');
+  };
+  const noNotice = /no notice for the signed-in user/;
+
+  let r = await bannerWith('');
+  ok(r.state === 'pass' && /empty body/.test(r.detail), 'empty body ⇒ pass (a notice taken down)');
+  r = await bannerWith('{"banner_message":""}');
+  ok(r.state === 'pass' && noNotice.test(r.detail), 'known key holding an empty string ⇒ pass, worded as "working, nothing for you"');
+  r = await bannerWith('{"message":"   "}');
+  ok(r.state === 'pass' && noNotice.test(r.detail), 'known key holding whitespace ⇒ the same pass');
+  r = await bannerWith('{}');
+  ok(r.state === 'pass' && noNotice.test(r.detail), 'an empty object ⇒ pass — no field name could have been guessed wrong');
+  r = await bannerWith('[]');
+  ok(r.state === 'pass' && noNotice.test(r.detail), 'an empty array (n8n "no items") ⇒ pass');
+  r = await bannerWith('""');
+  ok(r.state === 'pass' && noNotice.test(r.detail), 'a JSON empty string ⇒ pass');
+  r = await bannerWith('{"notice":"Maintenance tonight"}');
+  ok(r.state === 'fail' && /no message could be found/.test(r.detail), 'a non-empty object with none of the accepted keys ⇒ still FAIL');
+  ok(/message, banner_message, text, banner/.test(r.detail), 'and the fail names the four accepted keys');
+  r = await bannerWith('{"banner_message":"Maintenance tonight"}');
+  ok(r.state === 'pass' && /Maintenance tonight/.test(r.detail), 'a known key with a message ⇒ pass, quoting it');
+  r = await bannerWith('Plain text notice');
+  ok(r.state === 'pass' && /Plain text notice/.test(r.detail), 'plain text ⇒ pass, quoting it');
+  r = await bannerWith('', 503);
+  ok(r.state === 'fail' && /HTTP 503/.test(r.detail), 'non-2xx ⇒ fail, naming the status');
+  globalThis.fetch = modeFetch;
+}
+
 globalThis.fetch = realFetch;
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

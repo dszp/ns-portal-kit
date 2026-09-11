@@ -10,6 +10,7 @@ import {
   resolveRingotelConfig,
   ringotelConfigError,
   RingotelConfigError,
+  prepopArmed,
   type RingotelConfig,
 } from './eligibility.js';
 
@@ -139,9 +140,25 @@ ok(resolveRingotelConfig({ RINGOTEL_EXCLUDE_NO_DEVICES: '1' }).excludeNoDevices 
 ok(resolveRingotelConfig({ RINGOTEL_EXCLUDE_NO_DEVICES: 'true' }).excludeNoDevices === true, 'no-device true via "true"');
 ok(resolveRingotelConfig({ RINGOTEL_EXCLUDE_NO_DEVICES: 'false' }).excludeNoDevices === false, 'no-device false via "false"');
 ok(resolveRingotelConfig({ RINGOTEL_RESELLER_OVERRIDE: 'names, exts' }).resellerOverride.has('names') && resolveRingotelConfig({ RINGOTEL_RESELLER_OVERRIDE: 'names,exts' }).resellerOverride.has('exts'), 'reseller-override parsed CSV');
-ok(resolveRingotelConfig({ RINGOTEL_RESELLER_OVERRIDE: 'all' }).resellerOverride.size === 3, '"all" expands to every soft category');
+ok(resolveRingotelConfig({ RINGOTEL_RESELLER_OVERRIDE: 'all' }).resellerOverride.size === 4, '"all" expands to every soft category');
+ok(resolveRingotelConfig({ RINGOTEL_RESELLER_OVERRIDE: 'all' }).resellerOverride.has('unlisted'), '..."all" includes the newest category, so adding one cannot silently narrow an existing config');
+ok(resolveRingotelConfig({ RINGOTEL_RESELLER_OVERRIDE: 'unlisted' }).resellerOverride.has('unlisted'), '"unlisted" is an accepted category name');
 ok(JSON.stringify(resolveRingotelConfig({ RINGOTEL_WRITE_DOMAINS: 'demo.example, two.example' }).writeDomains) === JSON.stringify(['demo.example', 'two.example']), 'writeDomains parsed CSV (lowercased)');
 ok(resolveRingotelConfig({ RINGOTEL_WRITE_DOMAINS: '*' }).writeDomains === '*', 'writeDomains "*" ⇒ all scope-permitted');
+
+// The write rail takes NO `!domain` exclusions, and must say so rather than absorb one. Left to the plain
+// CSV parse, `*,!x` becomes the literal list ['*','!x'] — no real domain equals either, so every write is
+// refused while the console's "is the rail configured?" check (a non-empty list) calls it satisfied. A
+// silent fail-closed under a healthy-looking badge is the one outcome worse than a startup error.
+{
+  for (const bad of ['*,!demo.example', 'one.example,!two.example', '!demo.example']) {
+    let msg = '';
+    try { resolveRingotelConfig({ RINGOTEL_WRITE_DOMAINS: bad }); } catch (e) { msg = (e as Error).message; }
+    ok(msg.includes('RINGOTEL_WRITE_DOMAINS'), `writeDomains refuses "${bad}" with an error naming the setting (got: ${msg || 'no throw'})`);
+  }
+  const stillFine = resolveRingotelConfig({ RINGOTEL_WRITE_DOMAINS: 'one.example,two.example' }).writeDomains;
+  ok(Array.isArray(stillFine) && stillFine.length === 2, '...while an ordinary CSV rail is untouched');
+}
 
 const pd = resolveRingotelConfig({ RINGOTEL_EXCLUDE_EXTS_BY_DOMAIN: JSON.stringify({ 'acme.example': { remove: ['900'] } }) });
 ok(pd.excludeExtsByDomain['acme.example']?.remove?.[0] === '900', 'per-domain exts JSON parsed');
@@ -153,11 +170,88 @@ ok(t2, 'bad per-domain-exts JSON throws');
 let t3 = false; try { resolveRingotelConfig({ RINGOTEL_ACTIVATION_SUFFIX: '   ' }); } catch (e) { t3 = e instanceof RingotelConfigError; }
 ok(t3, 'blank suffix throws (loud)');
 
+// ── RINGOTEL_UNLISTED_USERS: how a user with *List in Directory* off is graded ──────────────
+// Unset must mean `soft`, not off: the library defaults the same way, and a deployment that never sets
+// this still wants an unlisted user treated like a shared-line name.
+ok(resolveRingotelConfig({}).unlistedUsers === 'soft', 'RINGOTEL_UNLISTED_USERS unset ⇒ soft');
+ok(resolveRingotelConfig({ RINGOTEL_UNLISTED_USERS: '' }).unlistedUsers === 'soft', 'blank ⇒ soft (same as unset)');
+ok(resolveRingotelConfig({ RINGOTEL_UNLISTED_USERS: '  ' }).unlistedUsers === 'soft', 'whitespace-only ⇒ soft');
+ok(resolveRingotelConfig({ RINGOTEL_UNLISTED_USERS: 'soft' }).unlistedUsers === 'soft', 'explicit "soft" ⇒ soft');
+ok(resolveRingotelConfig({ RINGOTEL_UNLISTED_USERS: 'ignore' }).unlistedUsers === 'ignore', '"ignore" ⇒ the flag is not considered');
+ok(resolveRingotelConfig({ RINGOTEL_UNLISTED_USERS: ' IGNORE ' }).unlistedUsers === 'ignore', '...trimmed and case-insensitive, like every other value here');
+let t4 = false; try { resolveRingotelConfig({ RINGOTEL_UNLISTED_USERS: 'off' }); } catch (e) { t4 = e instanceof RingotelConfigError; }
+ok(t4, 'an unknown RINGOTEL_UNLISTED_USERS value throws (fail-closed — "off" is not a silent synonym for ignore)');
+
 ok(ringotelConfigError({}) === null, 'valid (empty) config ⇒ no error');
 ok(ringotelConfigError({ RINGOTEL_RESELLER_OVERRIDE: 'bogus' }) !== null, 'bad config ⇒ error message');
 
+// Integration: an unlisted user is soft-excluded by the DEFAULT env, and eligible again under `ignore`.
+// This is the whole wiring — env string → RingotelConfig.unlistedUsers → the library rule.
+ok(evaluateEligibility(user({ listedInDirectory: false }), admin, resolveRingotelConfig({})).activatable === false,
+   'resolved default config soft-excludes a user with List in Directory off');
+ok(evaluateEligibility(user({ listedInDirectory: false }), admin, resolveRingotelConfig({ RINGOTEL_UNLISTED_USERS: 'ignore' })).activatable === true,
+   '...and "ignore" makes the same user eligible again');
+ok(evaluateEligibility(user(), admin, resolveRingotelConfig({})).activatable === true,
+   '...while a user that never carried the field is untouched (unknown is not unlisted)');
+
 // Integration: the resolved DEFAULT config soft-excludes a SHARED box.
 ok(evaluateEligibility(user({ names: ['Shared', 'VM'] }), admin, resolveRingotelConfig({})).activatable === false, 'resolved default config soft-excludes a SHARED box');
+
+{
+  const base = { RINGOTEL_WRITE_DOMAINS: '*' };
+  ok(resolveRingotelConfig(base).prepopAuto === null, 'RINGOTEL_PREPOP_AUTO unset ⇒ null (off)');
+  ok(resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: '' }).prepopAuto === null, 'blank ⇒ null (off)');
+  ok(resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: '*' }).prepopAuto === '*', '"*" ⇒ every write-rail domain');
+  const list = resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: ' Acme.Example , beta.example ' }).prepopAuto;
+  ok(Array.isArray(list) && list.join(',') === 'acme.example,beta.example', 'CSV ⇒ trimmed, lower-cased list');
+  let threw = false;
+  try { resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: 'acme.example,*' }); } catch { threw = true; }
+  ok(threw, '"*" mixed with names is a config error, not a silent widen');
+}
+
+// ── `*` with `!domain` exclusions ────────────────────────────────────────────────────────────────
+// "Every domain except these" is the only way to express a fleet-wide rail with a carve-out. The
+// wildcard sentinel is KEPT (`prepopAuto === '*'`) so every existing `=== '*'` consumer stays valid;
+// the exclusions ride alongside in `prepopAutoExcept` and are applied by `prepopArmed`, which is the
+// one predicate every consumer of this rail already routes through.
+{
+  const base = { RINGOTEL_WRITE_DOMAINS: '*' };
+  const cfg = resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: '*,!a.example' });
+  ok(cfg.prepopAuto === '*', '"*,!a.example" still resolves the wildcard sentinel — existing `=== "*"` checks stay valid');
+  ok(cfg.prepopAutoExcept.join(',') === 'a.example', '...with the exclusion carried alongside it');
+  ok(!prepopArmed('a.example', cfg), 'an excluded domain is NOT armed under the wildcard');
+  ok(prepopArmed('b.example', cfg), '...while every other domain still is');
+
+  const plain = resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: '*' });
+  ok(plain.prepopAuto === '*' && plain.prepopAutoExcept.length === 0, 'a bare "*" carries no exclusions and behaves exactly as before');
+
+  const ci = resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: '*, ! A.Example ' });
+  ok(ci.prepopAutoExcept.join(',') === 'a.example', 'exclusions are trimmed and lower-cased');
+  ok(!prepopArmed('A.EXAMPLE', ci), '...and matched case-insensitively');
+
+  const dupes = resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: '*,!a.example,!a.example' });
+  ok(!prepopArmed('a.example', dupes), 'a duplicated exclusion is fine, not an error');
+
+  // A `!` with nothing to subtract FROM is meaningless, and the two shapes it could mean (everything, or
+  // nothing) are opposites — so it is a loud config error naming the setting, never a guess.
+  for (const bad of ['!a.example', 'a.example,!b.example']) {
+    let msg = '';
+    try { resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: bad }); } catch (e) { msg = (e as Error).message; }
+    ok(msg.includes('RINGOTEL_PREPOP_AUTO'), `"${bad}" is a config error naming the setting (got: ${msg || 'no throw'})`);
+  }
+
+  let badName = '';
+  try { resolveRingotelConfig({ ...base, RINGOTEL_PREPOP_AUTO: '*,!bad domain' }); } catch (e) { badName = (e as Error).message; }
+  ok(badName.includes('RINGOTEL_PREPOP_AUTO'), `an exclusion that is not a valid domain shape is refused (got: ${badName || 'no throw'})`);
+}
+{
+  ok(prepopArmed('acme.example', { prepopAuto: '*', prepopAutoExcept: [], writeDomains: '*' }), '* ∩ * arms every domain');
+  ok(!prepopArmed('acme.example', { prepopAuto: null, prepopAutoExcept: [], writeDomains: '*' }), 'unset never arms');
+  ok(prepopArmed('acme.example', { prepopAuto: ['acme.example'], prepopAutoExcept: [], writeDomains: '*' }), 'listed + open rail arms');
+  ok(!prepopArmed('acme.example', { prepopAuto: ['acme.example'], prepopAutoExcept: [], writeDomains: ['other.example'] }), 'listed but outside the write rail does NOT arm — the rail wins');
+  ok(!prepopArmed('acme.example', { prepopAuto: '*', prepopAutoExcept: [], writeDomains: [] }), '* with an empty write rail arms nothing (fail-closed)');
+  ok(prepopArmed('ACME.example', { prepopAuto: ['acme.example'], prepopAutoExcept: [], writeDomains: ['acme.example'] }), 'domain comparison is case-insensitive');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

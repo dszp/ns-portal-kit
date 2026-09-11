@@ -219,7 +219,9 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // was a floor that passed by coincidence, so deleting a row did not trip it. Bump this deliberately
   // when adding one; the drift guard in statusModel.selftest.ts is what proves the table matches
   // `interface Env`. 74 with PORTAL_HANDOFF_ORIGINS, the origin allow-list a `handoff` menu entry needs.
-  ok(SETTINGS.length === 74, `sanity: the descriptor table has exactly 74 rows (got ${SETTINGS.length})`);
+  // 75 with RINGOTEL_PREPOP_AUTO, the arming rail for the automatic directory reconcile. 76 with
+  // RINGOTEL_UNLISTED_USERS, which grades NetSapiens' *List in Directory* switch.
+  ok(SETTINGS.length === 76, `sanity: the descriptor table has exactly 76 rows (got ${SETTINGS.length})`);
   // Every row is rendered now: there is one deployment shape, so no setting is inapplicable to it.
   ok(doc.settings.length === SETTINGS.length,
     `every row is rendered (${doc.settings.length} of ${SETTINGS.length})`);

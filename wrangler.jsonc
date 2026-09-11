@@ -63,6 +63,12 @@
     //        ONLY stored NetSapiens credential this Worker has, and it exists solely because an event
     //        arrives with nobody attached. Prefer a dedicated least-privilege key restricted by
     //        allowed-models / domain / ip-address.
+    //
+    // ── OPTIONAL: automatic Ringotel app-directory reconcile (gated by RINGOTEL_API_KEY) ──────────
+    // Unset ⇒ off; placeholders are only created when someone runs the pre-population routes by hand.
+    // See CONFIG.md#RINGOTEL_PREPOP_AUTO. Needs the same service identity as NS_EVENTS above (NS_API_KEY,
+    // or NS_ADMIN_USER + NS_ADMIN_PASS) even with NS_EVENTS off — the cron door reads NetSapiens with it too.
+    //   "RINGOTEL_PREPOP_AUTO": "acme.example.com",  // CSV, or "*" for everything the write rail allows
 
     // REQUIRED for delegated/portal auth: the Manager Portal host that issues your ns_t.
     // There is deliberately no default — a default issuer would mean accepting tokens minted by a
@@ -144,6 +150,14 @@
   // acceptances and the group rows both. 0004 and 0005 delete nothing. See CONFIG.md -> ONEBILL_DB.
   //
   // "d1_databases": [{ "binding": "ONEBILL_DB", "database_name": "<your-db-name>", "database_id": "<id>" }],
+
+  // The scheduled handler, which both optional features above run from: the event-subscription
+  // reconcile and its offboarding sweep, and the hourly app-directory reconcile. Every one of them
+  // no-ops while its own setting is unset, so declaring this early costs nothing and means arming a
+  // feature later is a vars change rather than a config change you have to remember. Any cadence works;
+  // an off-the-hour minute avoids the platform's busiest slot.
+  //
+  // "triggers": { "crons": ["17 * * * *"] },
 
   "observability": { "enabled": true, "logs": { "head_sampling_rate": 1 } }
 

@@ -264,8 +264,9 @@ async function nsEventsProbe(env: StatusEnv, identityPassed: boolean): Promise<P
  *
  * The last column is the one worth having. A subscription whose domain is no longer in `NS_EVENTS_DOMAINS`
  * is still LIVE: the deployment is being posted events for a domain it has been told to stop handling, and
- * nothing else on this page surfaces that. Under a wildcard every domain is configured by definition, so
- * the column says so rather than implying a check happened.
+ * nothing else on this page surfaces that. Under a bare wildcard every domain is configured by definition,
+ * so the column says so rather than implying a check happened — but a `!domain` carve-out IS a check, and
+ * a still-live subscription for an excluded domain is reported like any other unconfigured one.
  *
  * Subscriptions belonging to something else are counted, never listed: they are another integration's, the
  * count is the whole useful fact about them, and a table of foreign post URLs is somebody else's business
@@ -275,13 +276,19 @@ const SUB_ROW_CAP = 200;
 
 function subscriptionTable(ours: { domain?: string; model?: string; expiresAt?: string }[], others: number, cfg: NsEventsConfig): ProbeTable {
   const configured = cfg.domains === '*' ? null : new Set(cfg.domains.map((d) => d.toLowerCase()));
+  // A `!domain` carve-out under a wildcard is EXACTLY the case this column exists for: the operator has
+  // said stop, and a subscription created before that is still delivering. Checked ahead of the wildcard
+  // branch, which would otherwise report "every domain is configured" over the top of the exclusion.
+  const excluded = new Set(cfg.domainsExcept.map((d) => d.toLowerCase()));
   const sorted = [...ours].sort((a, b) => (a.domain ?? '').localeCompare(b.domain ?? ''));
   const shown = sorted.slice(0, SUB_ROW_CAP);
   const rows = shown.map((s) => {
     const domain = s.domain ?? '(no domain filter)';
-    const inConfig = configured === null
-      ? 'every domain is configured'
-      : configured.has(domain.toLowerCase()) ? 'yes' : 'NO — this deployment is still being sent its events';
+    const inConfig = excluded.has(domain.toLowerCase())
+      ? 'NO — this deployment is still being sent its events'
+      : configured === null
+        ? 'every domain is configured'
+        : configured.has(domain.toLowerCase()) ? 'yes' : 'NO — this deployment is still being sent its events';
     return [domain, s.model ?? '—', s.expiresAt ?? 'no expiry set', inConfig];
   });
 
@@ -339,20 +346,37 @@ async function statusBannerProbe(env: StatusEnv, ctx: ProbeCtx): Promise<ProbeOu
   if (!raw.trim()) return { state: 'pass', detail: 'Reachable, and answered 2xx with an empty body — which is how a notice is taken down. No banner will be drawn.' };
 
   // Same acceptance the injected code applies: a bare string, or JSON carrying one of the known keys.
+  //
+  // "No message" is graded two ways, because it has two causes with opposite fixes. An endpoint that
+  // SPEAKS the contract and chose to send nothing — `{}`, `[]`, `""`, or a known key holding an empty
+  // string — is the documented way a notice comes down for this caller (CONFIG: "an empty string
+  // means show nothing"), and the injected code renders nothing without error. That is a pass, worded
+  // so the operator learns the endpoint is reachable and simply has nothing for THEM right now. An
+  // endpoint that answers with a non-empty object carrying NONE of the known keys is the silent failure
+  // this probe exists for: it works, it renders nothing, and the author guessed a fifth field name.
   let msg = '';
+  let spokeContract = false;
   try {
     const j: unknown = JSON.parse(raw);
-    if (typeof j === 'string') msg = j;
+    if (typeof j === 'string') { msg = j; spokeContract = true; }
+    else if (Array.isArray(j)) spokeContract = j.length === 0;
     else if (j && typeof j === 'object') {
+      const o = j as Record<string, unknown>;
+      spokeContract = Object.keys(o).length === 0;
       for (const k of BANNER_KEYS) {
-        const v = (j as Record<string, unknown>)[k];
-        if (typeof v === 'string' && v.trim()) { msg = v; break; }
+        const v = o[k];
+        if (typeof v !== 'string') continue;
+        spokeContract = true;
+        if (v.trim()) { msg = v; break; }
       }
-    }
-  } catch { msg = raw; }
+    } else spokeContract = j === null;
+  } catch { msg = raw; spokeContract = true; }
 
   msg = String(msg || '').trim();
   if (!msg) {
+    if (spokeContract) {
+      return { state: 'pass', detail: 'Reachable, and answered 2xx with an empty message — the endpoint is working, and has no notice for the signed-in user right now. No banner will be drawn.' };
+    }
     return { state: 'fail', detail: `The endpoint answered 2xx, but no message could be found in the reply. Send plain text, or JSON with one of: ${BANNER_KEYS.join(', ')}.` };
   }
   const shown = msg.length > 120 ? `${msg.slice(0, 120)}…` : msg;

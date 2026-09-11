@@ -11,18 +11,18 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
 
 // ── the abort guards ──────────────────────────────────────────────────────────
 {
-  const p = planOrphanSweep({ nsExtensions: null, rtUsers: [rt({ id: 'U1', ext: '100' })], branchid: 'B1', max: 200 });
+  const p = planOrphanSweep({ nsExtensions: null, resetExtensions: [], rtUsers: [rt({ id: 'U1', ext: '100' })], branchid: 'B1', max: 200 });
   ok(p.status === 'abort' && p.reason === 'ns-list-unavailable', 'a FAILED NS list aborts — "could not read" must never look like "nobody exists"');
 }
 {
-  const p = planOrphanSweep({ nsExtensions: [], rtUsers: [rt({ id: 'U1', ext: '100' })], branchid: 'B1', max: 200 });
+  const p = planOrphanSweep({ nsExtensions: [], resetExtensions: [], rtUsers: [rt({ id: 'U1', ext: '100' })], branchid: 'B1', max: 200 });
   ok(p.status === 'abort' && p.reason === 'ns-list-empty', 'an EMPTY NS list aborts — otherwise one odd read deactivates an entire domain');
 }
 
 // ── the orphan set ────────────────────────────────────────────────────────────
 {
   const p = planOrphanSweep({
-    nsExtensions: ['100', '101'],
+    nsExtensions: ['100', '101'], resetExtensions: [],
     rtUsers: [rt({ id: 'U1', ext: '100' }), rt({ id: 'U2', ext: '999' })],
     branchid: 'B1', max: 200,
   });
@@ -31,7 +31,7 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
 }
 {
   const p = planOrphanSweep({
-    nsExtensions: ['100'],
+    nsExtensions: ['100'], resetExtensions: [],
     rtUsers: [rt({ id: 'U1', ext: '999', status: 0 })],
     branchid: 'B1', max: 200,
   });
@@ -39,7 +39,7 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
 }
 {
   const p = planOrphanSweep({
-    nsExtensions: ['100'],
+    nsExtensions: ['100'], resetExtensions: [],
     rtUsers: [rt({ id: 'U9', ext: '999', branchid: 'OTHER' })],
     branchid: 'B1', max: 200,
   });
@@ -48,7 +48,7 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
 {
   // Two records at one extension collapse to one deactivation target; deactivateAppOnly handles both.
   const p = planOrphanSweep({
-    nsExtensions: ['100'],
+    nsExtensions: ['100'], resetExtensions: [],
     rtUsers: [rt({ id: 'U1', ext: '999' }), rt({ id: 'U2', ext: '999' })],
     branchid: 'B1', max: 200,
   });
@@ -56,7 +56,7 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
 }
 {
   const p = planOrphanSweep({
-    nsExtensions: ['100'],
+    nsExtensions: ['100'], resetExtensions: [],
     rtUsers: [rt({ id: 'U1', ext: '901' }), rt({ id: 'U2', ext: '902' }), rt({ id: 'U3', ext: '903' })],
     branchid: 'B1', max: 2,
   });
@@ -65,14 +65,14 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
 {
   // NS extensions arrive as strings or numbers depending on the record; both must match.
   const p = planOrphanSweep({
-    nsExtensions: ['100', ' 101 '],
+    nsExtensions: ['100', ' 101 '], resetExtensions: [],
     rtUsers: [rt({ id: 'U1', ext: '101' })],
     branchid: 'B1', max: 200,
   });
   ok(p.status === 'ok' && p.orphans.length === 0, 'extension comparison trims whitespace on the NS side');
 }
 {
-  const p = planOrphanSweep({ nsExtensions: ['100'], rtUsers: [{ extension: '999', branchid: 'B1', status: 1 }], branchid: 'B1', max: 200 });
+  const p = planOrphanSweep({ nsExtensions: ['100'], resetExtensions: [], rtUsers: [{ extension: '999', branchid: 'B1', status: 1 }], branchid: 'B1', max: 200 });
   ok(p.status === 'ok' && p.orphans.length === 0, 'a record with no id is skipped — there is nothing to deactivate');
 }
 
@@ -83,7 +83,7 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
   // orphan every hour, deactivateAppOnly would find and deactivate it, and reactivation writes the record
   // straight back.
   const p = planOrphanSweep({
-    nsExtensions: ['100A'],
+    nsExtensions: ['100A'], resetExtensions: [],
     rtUsers: [rt({ id: 'U1', ext: '100a' })],
     branchid: 'B1', max: 200,
   });
@@ -93,7 +93,7 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
   // A genuine orphan still keeps its ORIGINAL Ringotel casing in the emitted entry — deactivateAppOnly
   // matches via `usersForExt`, which this fix deliberately leaves untouched (case-sensitive).
   const p = planOrphanSweep({
-    nsExtensions: ['100'],
+    nsExtensions: ['100'], resetExtensions: [],
     rtUsers: [rt({ id: 'U1', ext: '999XYZ' })],
     branchid: 'B1', max: 200,
   });
@@ -103,7 +103,7 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
 // ── attached secondaries are never swept ──────────────────────────────────────
 {
   const p = planOrphanSweep({
-    nsExtensions: ['100'],
+    nsExtensions: ['100'], resetExtensions: [],
     rtUsers: [
       { id: 'S1', extension: '900', branchid: 'B1', status: 2, userid: 'P1' }, // attached secondary, ext absent from NS
       { id: 'U1', extension: '901', branchid: 'B1', status: 1 },               // ordinary orphan
@@ -125,13 +125,83 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
   // `userid` guard deleted, since that line already excludes it for an unrelated reason — this one
   // does not have that escape hatch.
   const p = planOrphanSweep({
-    nsExtensions: ['100'], // the secondary's extension ('900') is absent from NS, same as a real orphan
+    // the secondary's extension ('900') is absent from NS, same as a real orphan
+    nsExtensions: ['100'], resetExtensions: [],
     rtUsers: [{ id: 'S2', extension: '900', branchid: 'B1', status: 1, userid: 'P1' }],
     branchid: 'B1',
     max: 200,
   });
   ok(p.status === 'ok' && p.orphans.length === 0,
      'sweep: an ACTIVE attached secondary (status: 1) is still never an orphan — the userid guard alone must exclude it');
+}
+
+// ── a RESET NetSapiens account is a candidate, exactly like a departed one ─────
+// "Reset User" strips the name, email, password and softphone devices and parks the account in setup
+// state. The person is gone; only the shell remains. The seat it still holds in the app directory is the
+// same waste a deleted user's is, so the planner treats it the same way — and the per-candidate re-read
+// in the Worker is what turns a LIST-derived reset into an authorised deactivation.
+{
+  const p = planOrphanSweep({
+    nsExtensions: ['100', '3010'],
+    resetExtensions: ['3010'],
+    rtUsers: [rt({ id: 'U1', ext: '100' }), rt({ id: 'U2', ext: '3010' })],
+    branchid: 'B1', max: 200,
+  });
+  const o = p.status === 'ok' ? p.orphans : [];
+  ok(o.length === 1 && o[0]!.ext === '3010' && o[0]!.rtUserIds[0] === 'U2', 'an extension PRESENT in NS but in reset state is a sweep candidate');
+  ok(o[0]?.reason === 'ns-reset', '...tagged ns-reset, not ns-gone — the two candidacies are different evidence and the log must say which');
+}
+{
+  const p = planOrphanSweep({
+    nsExtensions: ['100'],
+    resetExtensions: [],
+    rtUsers: [rt({ id: 'U1', ext: '999' })],
+    branchid: 'B1', max: 200,
+  });
+  ok(p.status === 'ok' && p.orphans[0]?.reason === 'ns-gone', 'an extension ABSENT from NS is still tagged ns-gone');
+}
+{
+  // Case and whitespace are normalised on BOTH lists or the reset set silently misses — the same
+  // spelling-difference hazard fix-wave F2 found on the membership test.
+  const p = planOrphanSweep({
+    nsExtensions: ['100A'],
+    resetExtensions: [' 100a '],
+    rtUsers: [rt({ id: 'U1', ext: '100A' })],
+    branchid: 'B1', max: 200,
+  });
+  ok(p.status === 'ok' && p.orphans.length === 1 && p.orphans[0]!.ext === '100A', 'the reset set is matched case-insensitively and trimmed, like the membership test beside it');
+}
+{
+  // A reset account whose app record is already inactive is nothing to do — replay-safe, same as a
+  // departed one. Without this the sweep would re-plan it every hour forever.
+  const p = planOrphanSweep({
+    nsExtensions: ['100', '3010'],
+    resetExtensions: ['3010'],
+    rtUsers: [rt({ id: 'U2', ext: '3010', status: 0 })],
+    branchid: 'B1', max: 200,
+  });
+  ok(p.status === 'ok' && p.orphans.length === 0, 'a reset account whose record is already inactive is not a candidate');
+}
+{
+  // The reset set never widens what the abort guards allow: a failed read is still a refusal, even if
+  // some extensions were reported reset by a previous, successful run's state.
+  const p = planOrphanSweep({ nsExtensions: null, resetExtensions: ['3010'], rtUsers: [rt({ id: 'U2', ext: '3010' })], branchid: 'B1', max: 200 });
+  ok(p.status === 'abort' && p.reason === 'ns-list-unavailable', 'a failed NS list still aborts, reset candidates included');
+}
+{
+  // The domain-wide door carries the reset set to every connection, on the same argument the extension
+  // list is carried: a reset account is reset on all of them.
+  const plans = planDomainSweep({
+    nsExtensions: ['100', '3010', '3011'],
+    resetExtensions: ['3010', '3011'],
+    rtUsers: [
+      { id: 'a', extension: '3010', branchid: 'B1', status: 1 },
+      { id: 'b', extension: '3011', branchid: 'B2', status: 1 },
+    ],
+    branchids: ['B1', 'B2'], max: 200,
+  });
+  const every = plans.flatMap((p) => (p.plan.status === 'ok' ? p.plan.orphans.map((o) => o.ext) : [])).sort();
+  ok(every.join(',') === '3010,3011', 'planDomainSweep carries the reset set to every connection');
 }
 
 // ── the per-DOMAIN cap is shared across connections ────────────────────────────
@@ -144,18 +214,18 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
   ];
 
   // Budget of 2 across TWO connections: B1 consumes both, B2 gets none and is reported truncated.
-  const plans = planDomainSweep({ nsExtensions, rtUsers, branchids: ['B1', 'B2'], max: 2 });
+  const plans = planDomainSweep({ nsExtensions, resetExtensions: [], rtUsers, branchids: ['B1', 'B2'], max: 2 });
   const total = plans.reduce((n, p) => n + (p.plan.status === 'ok' ? p.plan.orphans.length : 0), 0);
   ok(total === 2, 'sweep cap: a domain with 2 connections deactivates at most `max` in total, not max PER connection');
   ok(plans.some((p) => p.plan.status === 'ok' && p.plan.truncated), 'sweep cap: exhausting the budget reports truncation');
 
   // A generous budget sweeps everything on both connections.
-  const all = planDomainSweep({ nsExtensions, rtUsers, branchids: ['B1', 'B2'], max: 200 });
+  const all = planDomainSweep({ nsExtensions, resetExtensions: [], rtUsers, branchids: ['B1', 'B2'], max: 200 });
   const every = all.flatMap((p) => (p.plan.status === 'ok' ? p.plan.orphans.map((o) => o.ext) : [])).sort();
   ok(every.join(',') === '901,902,903', 'sweep: every connection is swept when the budget allows');
 
   // An abort on the domain-wide NS read must stop EVERY connection, not just the first.
-  const aborted = planDomainSweep({ nsExtensions: null, rtUsers, branchids: ['B1', 'B2'], max: 200 });
+  const aborted = planDomainSweep({ nsExtensions: null, resetExtensions: [], rtUsers, branchids: ['B1', 'B2'], max: 200 });
   // Assert the REASON, not just that it aborted. Degrading a failed read to `[]` still aborts, via
   // planOrphanSweep's own empty-list guard — so a status-only assertion cannot tell the two apart and
   // would pass with the failed-read propagation removed entirely.

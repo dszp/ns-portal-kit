@@ -153,6 +153,60 @@ const FULL: NsEventsEnv = {
   const c = parseNsEventsConfig({ ...FULL, NS_EVENTS_DOMAINS: undefined });
   ok(!c.armed && c.domains !== '*' && c.domains.length === 0, 'no domains configured ⇒ inert (does NOT inherit the rail)');
 }
+
+// ── `*` with `!domain` exclusions ────────────────────────────────────────────────────────────────
+// Same grammar as RINGOTEL_PREPOP_AUTO, and the same representation choice: the `'*'` sentinel is kept
+// so every existing `cfg.domains === '*'` consumer stays valid, and the carve-out rides alongside in
+// `domainsExcept`. `isDomainEnabled` is where it is applied — the ONE predicate that already backs the
+// receiver's authorisation check, `sweepScope`, and through it both the sweep and the reconcile — so an
+// excluded domain is refused on every path rather than on the ones someone remembered.
+{
+  const c = parseNsEventsConfig({ ...FULL, NS_EVENTS_DOMAINS: '*,!a.example' });
+  ok(c.armed && c.domains === '*', '"*,!a.example" still resolves the wildcard sentinel and arms the feature');
+  ok(c.domainsExcept.join(',') === 'a.example', '...with the exclusion carried alongside it');
+  ok(!isDomainEnabled(c, 'a.example'), 'an excluded domain is NOT enabled, even with a wide-open "*" write rail');
+  ok(isDomainEnabled(c, 'b.example'), '...while every other domain still is');
+
+  const plain = parseNsEventsConfig({ ...FULL, NS_EVENTS_DOMAINS: '*' });
+  ok(plain.domains === '*' && plain.domainsExcept.length === 0, 'a bare "*" carries no exclusions and behaves exactly as before');
+
+  const ci = parseNsEventsConfig({ ...FULL, NS_EVENTS_DOMAINS: '*, ! A.Example ' });
+  ok(ci.domainsExcept.join(',') === 'a.example', 'exclusions are trimmed and lower-cased');
+  ok(!isDomainEnabled(ci, 'A.Example'), '...and matched case-insensitively');
+
+  const dupes = parseNsEventsConfig({ ...FULL, NS_EVENTS_DOMAINS: '*,!a.example,!a.example' });
+  ok(!isDomainEnabled(dupes, 'a.example'), 'a duplicated exclusion is fine, not an error');
+
+  // The sweep and the subscription reconcile both compose through sweepScope, so proving it there proves
+  // both: no sweep pass and no `create` for a domain the operator has carved out.
+  const scope = sweepScope(c, ['a.example', 'b.example', 'c.example']);
+  ok(scope.join(',') === 'b.example,c.example', 'sweepScope omits an excluded domain from a discovered list');
+
+  // An excluded domain must also be refused at the DOOR — a live subscription from before the exclusion
+  // keeps posting, and the authorisation check is the only thing standing between it and a write.
+  const excludedToken = await derivePathToken(c.pathSecret, 'a.example');
+  const v = await verifyEventRequest(
+    new Request(`https://portal.example.com${NS_EVENTS_PREFIX}${excludedToken}/a.example`, { method: 'POST' }),
+    c,
+    '203.0.113.7',
+  );
+  ok(!v.ok && v.reason === 'domain-not-enabled', 'even a correctly-derived token for an excluded domain is refused as domain-not-enabled');
+
+  // worker.selftest has no scenario that drives desiredSubscriptions, so the "plans no create" claim is
+  // asserted here, at the level the decision is actually made.
+  const desired = await desiredSubscriptions(c, ['a.example', 'b.example']);
+  ok(desired.length === 1 && desired[0]!.domain === 'b.example', 'desiredSubscriptions plans nothing for an excluded domain');
+
+  for (const bad of ['!a.example', 'a.example,!b.example']) {
+    let msg = '';
+    try { parseNsEventsConfig({ ...FULL, NS_EVENTS_DOMAINS: bad }); } catch (e) { msg = (e as Error).message; }
+    ok(msg.includes('NS_EVENTS_DOMAINS'), `"${bad}" is a config error naming the setting (got: ${msg || 'no throw'})`);
+  }
+
+  let badName = '';
+  try { parseNsEventsConfig({ ...FULL, NS_EVENTS_DOMAINS: '*,!bad domain' }); } catch (e) { badName = (e as Error).message; }
+  ok(badName.includes('NS_EVENTS_DOMAINS'), `an exclusion that is not a valid domain shape is refused (got: ${badName || 'no throw'})`);
+}
 {
   let threw = '';
   try {

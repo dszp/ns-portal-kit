@@ -170,6 +170,23 @@ separate steps so a domain-wide change can be previewed. Its placeholders carry 
 because a record owning the `<ext><suffix>` SIP identity is precisely what collides when an extension is
 later reassigned.
 
+**The reconcile is one rule behind four doors.** `planExtensionReconcile` grades a single extension — the
+NetSapiens user, or its absence, against every app record carrying that extension — and is the only place a
+create / update / remove decision is made. `planDirectoryReconcile` folds it over a domain behind abort
+guards, so a listing that came back unusable produces no plan rather than a plan full of deletions, and
+`applyDirectoryReconcile` performs it. `reconcileDomainDirectory` is the single entry point and holds a
+per-domain lock, so the four doors can never act on one domain at once: the `subscriber` event tier
+(immediate), the hourly cron (`runDirectoryReconcile`, the catch-up for events that never fired and users
+that predate switch-on), `/rapp/prepop/preview` and `/rapp/prepop/apply` (which re-plan server-side — the
+caller names a *domain*, never an individual change), and the refresh control on the Domains and Users
+pages, which kicks a reconcile after the response on a freshly re-validated token. `RINGOTEL_PREPOP_AUTO`
+says which domains run on their own, always intersected with the write rail, and the cron and event doors
+read NetSapiens through the stored service identity because neither has a caller to act as. Two evidence
+rules bound the blast radius: a removal inferred from a user's *absence* is re-read against NetSapiens for
+that one extension immediately before it happens (`ReconcileWriter.confirmGone`), so a short or filtered
+listing cannot become a deletion; and a record that was ever active is never touched here — offboarding
+owns those.
+
 ## OneBill account reconciliation
 
 The [OneBill](https://www.onebillsoftware.com/) integration lines up billing accounts against
@@ -284,11 +301,17 @@ treats `~` as a self-reference wildcard, and percent-encoding is no defence sinc
 leaves `~` untouched); an explicit domain allowlist that can never exceed `RINGOTEL_WRITE_DOMAINS`; and an
 always-on in-isolate rate limiter ahead of verification. Anything unverifiable is dropped, never applied.
 
-The sync writer is deliberately narrow: it may only **update identity** on an existing app record. It never
-activates, deactivates, creates, or de-duplicates — because an SSO integration running beside this Worker
+The sync writer is deliberately narrow, and everything it may do is named by a setting. Always: **update
+identity** on an existing app record. With `NS_EVENTS_OFFBOARD` on: **deactivate** — never delete — the
+record of a user NetSapiens has deleted or reset, on a re-read of that user rather than on the payload.
+With `RINGOTEL_PREPOP_AUTO` armed for the domain: create, rename and remove **placeholders**, through the
+same `reconcileDomainDirectory` the cron uses, and only ever records that were never active. What it never
+does is **activate** a user or de-duplicate records — because an SSO integration running beside this Worker
 is a concurrent writer with no shared lock, and two writers both re-resolving and deleting duplicates can
-delete the record the other just activated. Provisioning stays a deliberate act, never a side effect of a
-field edit.
+delete the record the other just activated. Provisioning a person stays a deliberate act, never a side
+effect of a field edit. Device self-heal (`NS_EVENTS_DEVICE_REPAIR`) writes on the NetSapiens side rather
+than the app's, and only for a user NetSapiens reports as `account-status: standard`: an account mid-setup
+or stripped by a reset has no settled device layout to re-assert.
 
 Reconciliation is a pure planner over the API's own listing — there is no local registry, so a failed read
 **aborts the run** rather than degrading into "nothing exists" and mass-creating. Subscriptions whose URL

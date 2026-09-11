@@ -815,15 +815,21 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'Off — the looser default heuristic applies.',
     affects: ['ringotel.activate'] },
 
+  { name: 'RINGOTEL_UNLISTED_USERS', group: 'eligibility', kind: 'config',
+    defaultValue: 'soft', gatedBy: 'RINGOTEL_API_KEY', example: 'ignore',
+    what: 'How a NetSapiens user whose *List in Directory* option is off is graded for app provisioning and directory pre-population. `soft` (default) — excluded like a shared-line name: no placeholder, no auto-provision on sign-in, and manual activation from the portal is refused, unless a reseller override allows `unlisted`. `ignore` — the flag is not considered.',
+    whenUnset: 'A user whose List in Directory option is off is soft-excluded: no placeholder, no auto-provision on sign-in, and manual activation is refused unless a reseller override includes `unlisted`.',
+    affects: ['ringotel.activate', 'ringotel.prepop'] },
+
   { name: 'RINGOTEL_RESELLER_OVERRIDE', group: 'eligibility', kind: 'config',
     gatedBy: 'RINGOTEL_API_KEY', example: 'names,exts',
-    what: 'Comma-separated soft-exclusion categories (names, exts, no_devices, or all) a reseller is allowed to override per activation, on top of the deployment defaults.',
+    what: 'Comma-separated soft-exclusion categories (names, exts, no_devices, unlisted, or all) a reseller is allowed to override per activation, on top of the deployment defaults.',
     whenUnset: 'Empty — resellers cannot override any soft-exclusion category.',
     affects: ['ringotel.activate'] },
 
   { name: 'RINGOTEL_WRITE_DOMAINS', group: 'eligibility', kind: 'config',
     importance: 'critical', gatedBy: 'RINGOTEL_API_KEY', example: 'acme.12345.service',
-    what: 'The write rail: the only domains in which activate / deactivate / password-reset may run. `*` means every domain the token permits.',
+    what: 'The write rail: the only domains in which activate / deactivate / password-reset may run. `*` means every domain the token permits. Unlike the rails narrowed against it (RINGOTEL_PREPOP_AUTO, NS_EVENTS_DOMAINS) it takes NO `!name` exclusions and refuses one with a startup error: "everything except X" as the OUTER bound is a fail-open default, since a domain added to the fleet tomorrow would land inside it.',
     whenUnset: 'Every write is refused — empty is fail-closed, not unrestricted.',
     affects: ['ringotel.activate', 'ringotel.resetPassword', 'ringotel.prepop', 'me.resetPassword', 'events'] },
 
@@ -833,12 +839,18 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'Off — directory pre-population skips soft-excluded users, the same as activation does.',
     affects: ['ringotel.prepop'] },
 
+  { name: 'RINGOTEL_PREPOP_AUTO', group: 'eligibility', kind: 'config',
+    gatedBy: 'RINGOTEL_API_KEY', example: '*,!lab.example.com',
+    what: 'Domains whose app directory is reconciled automatically: placeholders are created for users who would auto-provision on SSO login, renamed when NetSapiens changes, and removed when the extension is deleted or stops qualifying. Runs from the subscriber event tier, the hourly cron, and the refresh control. "*" = every domain RINGOTEL_WRITE_DOMAINS permits; a CSV names domains. Add "!name" entries after a "*" to carve domains out of it — `*,!lab.example.com` is every permitted domain except that one. An exclusion is only valid alongside "*"; on its own it is a config error, because "everything except X" and "only X" are opposite readings of the same list. Always intersected with the write rail. The event tier and the cron read NetSapiens with no caller to act as, so both also need the service identity (NS_API_KEY, or NS_ADMIN_USER + NS_ADMIN_PASS) — the cron needs it even with NS_EVENTS off, and without it does nothing.',
+    whenUnset: 'Off — placeholders are created only when someone runs the pre-population routes.',
+    affects: ['ringotel.prepop', 'ns-events'] },
+
   // ── appaccess: the self-service surface a signed-in user sees about their own app access ─────────
   { name: 'RINGOTEL_SSO_SERVICE', group: 'appaccess', kind: 'config',
     gatedBy: 'RINGOTEL_API_KEY', example: 'netsapiens_sso',
-    what: 'The app SSO service name this deployment answers for — the part after the "/" in the organisation\'s `params.sso` — used to tell a user whether SSO sign-in is available to them. ⚠️ Setting this does not enable single sign-on. It turns on the portal side of it only: the indicators, the settings, the user-lifecycle handling. SSO itself needs its own separate Worker and enablement by the app platform pointed at that Worker, neither of which this deployment can see or verify. The SSO card on the Integrations tab has the full chain.',
-    whenUnset: 'Never claims SSO for any org, even one with an SSO service bound — fail closed. An org can have an SSO service bound to a completely different identity provider than the one you run, so inferring it from a binding would send a user to somebody else\'s login.',
-    affects: ['me.appAccess'] },
+    what: 'The app SSO service name this deployment answers for — the part after the "/" in the organisation\'s `params.sso` — used to tell a user whether SSO sign-in is available to them, and to grade the NS SSO pill on the toolbar app-status item. ⚠️ Setting this does not enable single sign-on. It turns on the portal side of it only: the indicators, the settings, the user-lifecycle handling. SSO itself needs its own separate Worker and enablement by the app platform pointed at that Worker, neither of which this deployment can see or verify. The SSO card on the Integrations tab has the full chain.',
+    whenUnset: 'Never claims SSO for any org, even one with an SSO service bound — fail closed. An org can have an SSO service bound to a completely different identity provider than the one you run, so inferring it from a binding would send a user to somebody else\'s login. The toolbar pill reads `NS SSO off` for the same reason.',
+    affects: ['me.appAccess', 'ringotel.orgStatus'] },
 
   { name: 'SSO_AUTO_ACTIVATE', group: 'appaccess', kind: 'config',
     gatedBy: 'RINGOTEL_API_KEY', example: 'acme.example,demo.example',
@@ -991,8 +1003,8 @@ export const SETTINGS: SettingDef[] = [
     affects: ['events'] },
 
   { name: 'NS_EVENTS_DOMAINS', group: 'events', kind: 'config',
-    importance: 'important', gatedBy: 'RINGOTEL_API_KEY', example: 'acme.example',
-    what: 'Which domains get an event subscription. `*` = every domain the Ringotel write rail (`RINGOTEL_WRITE_DOMAINS`) permits, discovered at reconcile time; otherwise a comma-separated list, further narrowed to the write rail.',
+    importance: 'important', gatedBy: 'RINGOTEL_API_KEY', example: '*,!lab.example.com',
+    what: 'Which domains get an event subscription. `*` = every domain the Ringotel write rail (`RINGOTEL_WRITE_DOMAINS`) permits, discovered at reconcile time; otherwise a comma-separated list, further narrowed to the write rail. Add `!name` entries after a `*` to carve domains out of it — `*,!lab.example.com` is every permitted domain except that one. An exclusion is only valid alongside `*`; on its own it is a config error. An excluded domain gets no subscription, is refused at the event receiver, and is skipped by the sweep — and an existing subscription for it is deleted on the next reconcile, since it is ours and no longer wanted.',
     whenUnset: 'Inert — no domain gets a subscription even if NS_EVENTS is on. `*` must be chosen deliberately, it is never a default. This value is a request, not a report: what is actually subscribed lives in NetSapiens, and only the event-subscription check on the Checks tab can tell you — including a subscription still live for a domain this list no longer names.',
     affects: ['events'] },
 
@@ -1058,13 +1070,13 @@ export const SETTINGS: SettingDef[] = [
 
   { name: 'NS_EVENTS_OFFBOARD', group: 'events', kind: 'config',
     defaultValue: 'off', importance: 'important', gatedBy: 'RINGOTEL_API_KEY', example: 'deactivate',
-    what: '`off` (default) or `deactivate` — whether an NS-deleted user\'s app record is deactivated, applied by both the live event handler and the cron sweep. Full deletion is deliberately not offered here; it needs a verified "how long orphaned" clock that does not exist yet.',
-    whenUnset: 'Off — an NS deletion is never reflected in the app directory automatically.',
+    what: '`off` (default) or `deactivate` — whether a departed user\'s app record is deactivated, applied by both the live event handler and the cron sweep. Departure means either a deleted user (confirmed 404) or one NetSapiens reports as `account-status: reset`, which strips their name, email, password and devices. Full deletion is deliberately not offered here; it needs a verified "how long orphaned" clock that does not exist yet.',
+    whenUnset: 'Off — neither an NS deletion nor a reset user is reflected in the app directory automatically. A change event for a reset user still syncs nothing and repairs nothing, whatever this is set to.',
     affects: ['events'] },
 
   { name: 'NS_EVENTS_DEVICE_REPAIR', group: 'events', kind: 'config',
     defaultValue: 'off', gatedBy: 'RINGOTEL_API_KEY', example: 'heal',
-    what: '`off` (default), `report`, or `heal` — whether a user-change event also triggers desk-phone/softphone device self-heal.',
+    what: '`off` (default), `report`, or `heal` — whether a user-change event also triggers desk-phone/softphone device self-heal. Only an account NetSapiens reports as `account-status: standard` is ever repaired: `new`, `reset` and `pwd reset` are refused in both modes, because an account mid-setup (or stripped by a reset) has no settled device layout to re-assert.',
     whenUnset: 'Off — device self-heal never runs from an event.',
     affects: ['events'] },
 

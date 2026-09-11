@@ -915,6 +915,10 @@ The only domains in which activate / deactivate / password-reset may run.
 - **Example** `acme.12345.service` (CSV), or `*` for every domain the caller's scope permits
 - **Unset** ⚠️ **Every write is refused.** Empty is fail-closed, not unrestricted. Set it deliberately.
 - **It also bounds change events** — `NS_EVENTS_DOMAINS` can never exceed it.
+- ⚠️ **No `!name` exclusions here.** The narrowing rails (`RINGOTEL_PREPOP_AUTO`, `NS_EVENTS_DOMAINS`)
+  accept them; this one refuses a `!` token with a startup error. It is the outer bound every other rail
+  is narrowed against, and "everything except X" as an outer bound is a fail-open default in a deny-list's
+  clothing — a domain added to the fleet tomorrow would land inside it. List what writes are permitted in.
 - **It names real customer domains**, so prefer a secret over a committed var. See [Where each value
   goes](#where-each-value-goes).
 
@@ -971,12 +975,39 @@ Tighten the name matcher: a name-matched user is excluded only if it *also* has 
 - **It never excludes a no-device user on its own.** A normal-named user with no devices stays
   activatable, because activation is what creates the device.
 
+<a id="RINGOTEL_UNLISTED_USERS"></a>
+
+### `RINGOTEL_UNLISTED_USERS` · `vars` · default `soft` · gated by `RINGOTEL_API_KEY`
+
+How a user whose NetSapiens **List in Directory** option is off is graded for app provisioning and
+directory pre-population.
+
+- **`soft`** (the default) — excluded the way a shared-line name is: no directory placeholder, no account
+  created on an SSO sign-in, and **manual activation from the portal is refused** with the reason given.
+  Every soft tier refuses activation, not only this one.
+- **`ignore`** — the flag is not considered at all.
+
+Three ways to let an unlisted user through, and they are not interchangeable:
+
+| | What it does | Scope |
+|---|---|---|
+| `RINGOTEL_UNLISTED_USERS: ignore` | Stops considering the flag entirely. | Every door, every domain. |
+| `unlisted` in [`RINGOTEL_RESELLER_OVERRIDE`](#RINGOTEL_RESELLER_OVERRIDE) | A reseller may override the exclusion for one activation they are watching. | Manual activation only — the reconcile has no caller to be a reseller. |
+| [`RINGOTEL_PREPOP_INCLUDE_SOFT`](#RINGOTEL_PREPOP_INCLUDE_SOFT) | Soft verdicts stop being exclusions for pre-population, so an unlisted user **does** get a placeholder and an existing one is kept. | Directory pre-population only — activation still refuses. |
+
+- **Example** `ignore`
+- **Unset** `soft`.
+- **Only a user NetSapiens says is hidden is excluded.** A record that does not carry the field reads as
+  unknown, not as hidden, so a narrowed or projected read never turns into an exclusion.
+- Any other value is a configuration error. `off` and `0` are not synonyms for `ignore` — a typo that
+  silently dropped an exclusion would be indistinguishable from meaning it.
+
 <a id="RINGOTEL_RESELLER_OVERRIDE"></a>
 
 ### `RINGOTEL_RESELLER_OVERRIDE` · `vars` · gated by `RINGOTEL_API_KEY`
 
-Which soft-exclusion categories a reseller may override per activation: `names`, `exts`, `no_devices`, or
-`all`.
+Which soft-exclusion categories a reseller may override per activation: `names`, `exts`, `no_devices`,
+`unlisted`, or `all`.
 
 - **Example** `names,exts`
 - **Unset** Empty — resellers cannot override any soft category.
@@ -992,11 +1023,23 @@ When pre-populating the app directory, also create entries for **soft-excluded**
 - **Unset** Off — pre-population skips soft-excluded users, the same as activation does. Those extensions
   are not people, and a directory full of entries nobody should activate is noise.
 
-**About directory pre-population** (`ringotel.prepop`, default `reseller`). It creates **inactive**
-directory entries for NetSapiens users who have none, so the directory reflects your organization before
-anyone is activated. Bounded by `RINGOTEL_WRITE_DOMAINS`, and exposed as two routes: a **preview** listing
-what it would create along with every skip and its reason, and an **apply** that performs it. Apply
-re-plans server-side — the caller names a *domain*, never the individual users.
+**About directory pre-population** (`ringotel.prepop`, default `reseller`). It keeps the app directory in
+step with NetSapiens: **inactive** directory entries for users who have none, so the directory reflects
+your organization before anyone is activated, plus the two corrections that follow from the same rule.
+Bounded by `RINGOTEL_WRITE_DOMAINS`, and exposed as two routes:
+
+- **Preview** reports what it would **create**, **update** and **remove**, along with every skip and the
+  reason for it.
+- **Apply** performs all three. It re-plans server-side — the caller names a *domain*, never the
+  individual users or the individual changes.
+
+**Updates** are name and email drift: a user NetSapiens has renamed gets the new name on their directory
+entry. **Removals are placeholders only** — never an activated user, and never an entry that carries SIP
+credentials. A removal inferred from a user's **absence** is re-read against NetSapiens for that specific
+extension immediately before it happens, so a listing that came back short or filtered cannot turn into a
+deletion; a removal for a user who is still there but no longer qualifies was decided from that user's own
+record and is not re-read. An active user who has left NetSapiens is a different question, answered by
+offboarding.
 
 Users with **no email address** *are* included: a missing address blocks activation, not a directory
 entry, and such a user can still be activated later via SSO. Hard-excluded users never are.
@@ -1007,6 +1050,35 @@ those fields in afterwards.
 
 **Soft exclusions are creation-only.** They decide whether an account may be *created*; they never block a
 user who already has a working one from being shown how to sign in.
+
+<a id="RINGOTEL_PREPOP_AUTO"></a>
+
+### `RINGOTEL_PREPOP_AUTO` · `vars` · gated by `RINGOTEL_API_KEY`
+
+Domains whose app directory is kept in step with NetSapiens **automatically**.
+
+- **Example** `*` — every domain `RINGOTEL_WRITE_DOMAINS` permits. A CSV names specific domains.
+- **Carve domains out of `*`** with `!name` entries: `*,!lab.example.com` is every permitted domain
+  except that one. An exclusion is only valid **alongside** `*` — on its own, or mixed into a CSV list,
+  it is a startup config error, because "everything except this" and "only this" are opposite readings
+  of the same list and guessing either one would be a silent fleet-wide change. An exclusion here stops
+  the directory reconcile for that domain on all three of its doors — the event tier, the hourly cron
+  and the refresh control — and **nothing else**: it does not imply an exclusion on
+  [`NS_EVENTS_DOMAINS`](#NS_EVENTS_DOMAINS), which still subscribes the domain and still accepts its
+  events. Carve out on both rails, or neither, deliberately.
+- **Unset** Off — placeholders are created only when someone runs the pre-population routes.
+
+For an armed domain the kit keeps a free **placeholder** (an app user created with *Activate* off — the
+vendor charges only for activated users) for every NetSapiens user who would be provisioned on SSO login,
+and removes it when the extension is deleted or stops qualifying. Name and email follow NetSapiens. Three
+things drive it: the `subscriber` event tier (immediate, see `NS_EVENTS`), the hourly cron (catches events
+that never fired and users that predate switch-on), and the refresh control on the Domains and Users pages
+(a forced refresh on an armed domain also reconciles it, at the cost of one live `/jwt` check before the
+read answers). Placeholders never carry SIP credentials; a later activation or SSO sign-in fills those in
+on the same record. Records that were once active are never touched here — offboarding owns those. Always
+intersected with `RINGOTEL_WRITE_DOMAINS`. The event tier and the cron read NetSapiens with no caller to
+act as, so both also need the service identity (`NS_API_KEY`, or `NS_ADMIN_USER` + `NS_ADMIN_PASS`) —
+the cron needs it even with `NS_EVENTS` off, and without it does nothing.
 
 ---
 
@@ -1027,12 +1099,13 @@ not configured — no SSO claimed, no create-on-login assumed, no download links
 ### `RINGOTEL_SSO_SERVICE` · `vars` · gated by `RINGOTEL_API_KEY`
 
 The NAME half of the SSO service your app fleet is bound to — the part after the `/` in the organisation's
-`params.sso` — used to tell a user whether SSO sign-in is available to them.
+`params.sso` — used to tell a user whether SSO sign-in is available to them, and to grade the
+**NS SSO** pill on the toolbar app-status item.
 
 - **Example** `netsapiens_sso`
 - **Unset** ⚠️ **Never claim SSO for any org**, even one with an SSO service bound. A binding could point
   at a third-party identity provider, and claiming SSO wrongly tells a user to try a password that will
-  not work.
+  not work. The toolbar pill reads **NS SSO off** for the same reason.
 - ⚠️ **Setting this does not enable single sign-on.** It turns on the portal-side surface around it. SSO
   additionally requires its own separate Worker deployment and enablement by the app platform's support
   pointed at that Worker — neither of which this deployment can see or verify. The console's Integrations
@@ -1120,9 +1193,16 @@ subscriptions in depth](#events-reference). All settings below are gated by `RIN
 
 Which domains get a subscription.
 
-- **Example** `acme.example` (CSV), or `*`
+- **Example** `acme.example` (CSV), or `*`, or `*,!lab.example.com`
 - **`*`** means every domain the write rail permits, discovered at reconcile time. It can never exceed
   `RINGOTEL_WRITE_DOMAINS`, and it must be chosen deliberately — it is never a default.
+- **Carve domains out of `*`** with `!name` entries: `*,!lab.example.com` is every permitted domain
+  except that one. An exclusion is only valid **alongside** `*` — on its own, or mixed into a CSV list,
+  it is a startup config error. An excluded domain gets no subscription, is refused at the event
+  receiver, and is skipped by the offboarding sweep; a subscription that already existed for it is
+  **deleted** on the next reconcile, on the same rule as dropping a domain from the list. It does **not**
+  imply an exclusion on [`RINGOTEL_PREPOP_AUTO`](#RINGOTEL_PREPOP_AUTO) — the hourly cron still
+  reconciles that domain's app directory. Carve out on both rails, or neither, deliberately.
 - **Unset** Inert: no domain gets a subscription even with `NS_EVENTS=on`.
 - **Dropping a domain removes its subscription** on the next reconcile. So does emptying the list — see
   [retiring the feature](#events-reference).
@@ -1206,13 +1286,25 @@ dropped.
 
 ### `NS_EVENTS_OFFBOARD` · `vars` · default `off`
 
-`off` or `deactivate` — whether a user deleted in NetSapiens has their app record deactivated.
+`off` or `deactivate` — whether a user who has left NetSapiens has their app record deactivated.
 
-- Deletion is confirmed only by a 404 on re-read, never by the event payload.
+- Two things count as leaving. A **deleted** user, confirmed only by a 404 on re-read. And a user
+  NetSapiens reports as **`account-status: reset`** — the "Reset User" action strips their name, email,
+  password and soft-phone devices and parks the account in setup state for the next hire, so nothing of
+  the person is left except the app seat, which NetSapiens does not own and cannot strip.
+- The evidence is always a re-read of the user, never the event payload.
 - Fires immediately from the change event, and again on the hourly sweep, which also cleans up records
-  orphaned before this feature shipped.
+  orphaned before this feature shipped. The sweep reads `account-status` from the domain user list to
+  nominate reset accounts, then re-reads each one before writing: a record that comes back `standard` is
+  refused and logged, so a stale list can never deactivate a live user.
 - Full deletion is deliberately not offered: it needs a verified "how long orphaned" clock that does not
-  exist yet.
+  exist yet. Deactivation is reversible; a reset account that gets recycled reactivates normally.
+- **A change event for a reset user writes nothing else, whatever this is set to.** The re-read grades
+  the account ahead of the identity sync, the directory reconcile and the device repair, and all three
+  are skipped — see [`NS_EVENTS_DEVICE_REPAIR`](#NS_EVENTS_DEVICE_REPAIR). Setting this to `off` means
+  "do not deactivate"; it has never meant "sync a stripped account instead". The hourly directory
+  reconcile grades the record rather than the account status, and refuses a nameless one — which is what
+  a reset leaves behind.
 
 <a id="NS_EVENTS_DEVICE_REPAIR"></a>
 
@@ -1222,6 +1314,11 @@ dropped.
 
 - **`report`** logs the drift without writing. **`heal`** recreates the device and re-pushes its
   credentials.
+- ⚠️ **Only an `account-status: standard` user is ever repaired.** `new`, `reset` and `pwd reset` are
+  refused in both modes and nothing is read or written for them. An account mid-setup has no settled
+  device layout to re-assert, and a reset one has had its devices deliberately removed — healing it
+  would hand a departed person's account a working SIP credential. This gate is independent of
+  [`NS_EVENTS_OFFBOARD`](#NS_EVENTS_OFFBOARD).
 - ⚠️ **It adds requests per event**, and `heal` adds a write on top when it repairs something. See
   [cost](#events-reference).
 
@@ -2005,7 +2102,8 @@ limit, but potentially over a free plan's. Size `NS_EVENTS_MAX_EVENTS` according
 `PORTAL_FEATURES`, `PORTAL_RELEASE_NOTES_URL`, `STATUS_BANNER_WEBHOOK`, `RINGOTEL_APP_BASE_URL`,
 `PORTAL_MENUS`, `PORTAL_APPS_HIDE`, `RINGOTEL_BASE_URL`, `RINGOTEL_PRESENCE`, `RINGOTEL_OVERRIDES`,
 `RINGOTEL_ROTATE_SIP_ON_ACTIVATE`, `RINGOTEL_ACTIVATION_SUFFIX`, `RINGOTEL_EXCLUDE_*`,
-`RINGOTEL_RESELLER_OVERRIDE`, `RINGOTEL_PREPOP_INCLUDE_SOFT`, `RINGOTEL_SSO_SERVICE`, `SSO_AUTO_ACTIVATE`,
+`RINGOTEL_UNLISTED_USERS`, `RINGOTEL_RESELLER_OVERRIDE`, `RINGOTEL_PREPOP_INCLUDE_SOFT`,
+`RINGOTEL_PREPOP_AUTO`, `RINGOTEL_SSO_SERVICE`, `SSO_AUTO_ACTIVATE`,
 `PORTAL_APP_DOWNLOADS`, `NS_EVENTS`, `NS_EVENTS_BASE_URL`, `NS_EVENTS_MODELS`,
 `NS_EVENTS_TARGET_LIFETIME`, `NS_EVENTS_RENEW_HORIZON`, `NS_EVENTS_GEO_SUPPORT`, `NS_EVENTS_MAX_EVENTS`,
 `NS_EVENTS_SWEEP_MAX`, `NS_EVENTS_DIAG_RAW`, `NS_EVENTS_OFFBOARD`, `NS_EVENTS_DEVICE_REPAIR`,

@@ -81,7 +81,7 @@ Each answer becomes configuration, and each default is the *quiet* option rather
 | Which domains should be visible? | `ALLOWED_DOMAINS` is an app-layer bound **on top of** each caller's own NetSapiens scope. Without it, the deployment is bounded only by what each user could already see — which is correct, but it is also the operator's only lever for a cautious first rollout. |
 | Should app activation **writes** be enabled, and for which domains? | `RINGOTEL_WRITE_DOMAINS` mutates a **third-party** app system: activating users, deactivating them, resetting passwords. **Empty means every write is refused**, which is the safe state; `*` means every in-scope domain. Note activation now **replaces the SIP password of a softphone device it did not create** (`RINGOTEL_ROTATE_SIP_ON_ACTIVATE`, default on) — correct, but it will break anything else still registering with that credential, so the operator should be told rather than surprised. |
 | Should **change-event subscriptions** be enabled? | This is the only thing that puts a stored NetSapiens credential on this Worker, and it also publishes a callback URL and needs a cron trigger. In exchange, a user renamed or re-emailed in NetSapiens reaches the app directory without anyone clicking anything. Off unless all of its settings are present. |
-| Should **directory pre-population** be enabled, and who may run it? | It creates *inactive* app-directory entries in bulk for users who have none — a write, gated by `ringotel.prepop` (default `reseller`) and bounded by `RINGOTEL_WRITE_DOMAINS`. Harmless in itself, but it is the operator's directory and they should expect it to fill up. |
+| Should **directory pre-population** be enabled, and who may run it? | It creates *inactive* app-directory entries in bulk for users who have none — a write, gated by `ringotel.prepop` (default `reseller`) and bounded by `RINGOTEL_WRITE_DOMAINS`. Harmless in itself, but it is the operator's directory and they should expect it to fill up. Ask separately whether it should also run **unattended**: `RINGOTEL_PREPOP_AUTO` arms the same reconcile per domain from the change-event tier, an hourly cron and the portal's refresh control — which also means it *removes* a placeholder when a user stops qualifying. Off unless set, and never wider than `RINGOTEL_WRITE_DOMAINS`. |
 | Should the **OneBill billing reconciliation** be enabled? | It reads a third-party billing system with four credentials the operator has to issue, and it needs a **custom-field group declared in OneBill** before it can store anything ([SETUP.md § Set up the OneBill custom-field group first](./SETUP.md#onebill-group)). Both halves are theirs, not yours. Ask separately whether they want the *comparison* — that needs `ONEBILL_RECURRING_RULES`, a rulebook naming their own offers, which only they can write. |
 | Who may **accept a billing gap**? | `onebill.write` (default `superadmin`) covers setting a link *and* recording that a billing-vs-inventory gap is normal. That second one is a judgement about a customer's invoice with an append-only audit trail attached, so the operator names who signs it, not you. |
 | Who should see each feature? | Defaults are deliberate (`callflow.view` = `reseller`, the write features = `office_manager`). Widening a gate is a policy change about who can act on customers. |
@@ -331,12 +331,16 @@ Each rung proves something the previous one did not.
   *created*; it never hides a user who already has one. Do not use it as a way to hide people.
 - **System/service users and non-3-4-digit extensions can never be activated**, by anyone, including a
   reseller override. If activation "does nothing" for such a user, that is the rule working.
-- **Deletion is covered now, but off by default.** `NS_EVENTS_OFFBOARD=deactivate` deactivates a user's
-  app record when NetSapiens deletes them — confirmed only by a 404 on re-read, never by the event
-  payload, since the `subscriber` model carries no removal flag and a deleted user has no record left to
-  re-read. It fires immediately from the change event, and again on the hourly sweep, which also cleans
-  up records orphaned before this feature shipped. Leave it `off` and a deleted user keeps their
-  app-directory entry — and, if it was active, keeps costing money — exactly as before.
+- **Departure is covered now, but off by default.** `NS_EVENTS_OFFBOARD=deactivate` deactivates a user's
+  app record when they leave NetSapiens, which means two things: a **deleted** user, confirmed only by a
+  404 on re-read, never by the event payload, since the `subscriber` model carries no removal flag and a
+  deleted user has no record left to re-read; and a user NetSapiens reports as **`account-status: reset`**,
+  whose name, email, password and softphone devices the *Reset User* action has stripped for the next
+  hire. The record is deactivated, never deleted, so a recycled account reactivates normally. It fires
+  immediately from the change event, and again on the hourly sweep, which also cleans up records orphaned
+  before this feature shipped. Leave it `off` and a departed user keeps their app-directory entry — and,
+  if it was active, keeps costing money — exactly as before. **A change event for a reset user writes
+  nothing else whatever this is set to**: no identity sync, no device repair, no placeholder change.
 - **A cron trigger is per environment.** Add it to one `env` block and the others receive events but never
   reconcile — subscriptions drift out of date with nothing reporting it.
 - **Turning subscriptions off now unsubscribes — but only while credentials remain.** Dropping *one*

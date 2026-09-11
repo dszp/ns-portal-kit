@@ -804,14 +804,25 @@ var ic=document.createElement('i');ic.className='icon icon-cloud';
 sp.appendChild(ic);sp.appendChild(document.createTextNode(' '));
 if(r.active){
 var lnk=!!(r.orgId&&_KC.appBase);
-var a=document.createElement(lnk?'a':'span');a.style.fontWeight='bold';a.style.color='darkgreen';a.textContent=nm+' Active';
-if(lnk){a.href=_KC.appBase+'/account/en-US/#/orgs/'+encodeURIComponent(r.orgId)+'/dashboard';a.target='_blank';a.rel='noopener noreferrer'}
+var hf=lnk?_KC.appBase+'/account/en-US/#/orgs/'+encodeURIComponent(r.orgId)+'/dashboard':'';
+// The DOMAIN carries the dashboard link now: it is the thing an operator clicks through on, and the
+// status text is a statement rather than a destination. With no domain to hang it on the label takes the
+// link back, so the dashboard never becomes unreachable just because the org has no domain to show.
+var ld=lnk&&!r.appDomain;
+var a=document.createElement(ld?'a':'span');a.style.fontWeight='bold';a.style.color='darkgreen';a.textContent=nm+' Active';
+if(ld){a.href=hf;a.target='_blank';a.rel='noopener noreferrer'}
 if(r.appDomain)a.title=_KC.label+' domain: '+r.appDomain;
 sp.appendChild(a);
-if(r.appDomain){var dm=document.createElement('span');dm.textContent=': '+r.appDomain;
+if(r.appDomain){sp.appendChild(document.createTextNode(': '));var dm=document.createElement(lnk?'a':'span');dm.textContent=r.appDomain;if(lnk){dm.href=hf;dm.target='_blank';dm.rel='noopener noreferrer'}
 dm.title=_KC.label+' domain: '+r.appDomain;
 dm.style.cssText='font-weight:400;color:#6b747c;max-width:13em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom';
 sp.appendChild(dm)}
+// SSO is the SERVER's grade (r.sso): only it knows which service name is ours, so the client never
+// compares the raw binding. Absent ⇒ an older server, and no pill at all beats a guessed one.
+if(r.sso===true||r.sso===false){var pl=document.createElement('span');pl.textContent=r.sso===true?'NS SSO':'NS SSO off';
+pl.title=r.sso===true?'Single sign-on with the PBX login is enabled for this domain':'Single sign-on is not bound for this domain — users sign in to the app with an emailed password';
+pl.style.cssText='margin-left:6px;padding:0 4px;border-radius:3px;font-size:10px;line-height:14px;display:inline-block;vertical-align:middle;'+(r.sso===true?'color:darkgreen;background:#e6f4ea;border:1px solid #b7dfc2':'color:#6b747c;background:#f1f3f4;border:1px solid #d6dade');
+sp.appendChild(pl)}
 }else{
 var lb=document.createElement('span');lb.style.fontWeight='bold';lb.style.cursor='default';lb.style.color='#c09853';
 lb.textContent=nm+' Not Active';lb.title=nm+' not activated for this PBX domain';

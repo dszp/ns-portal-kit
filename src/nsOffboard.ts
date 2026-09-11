@@ -12,10 +12,14 @@
  * merely fast.
  */
 
-/** One extension to deactivate, with every Ringotel record id found at it. */
+/** One extension to deactivate, with every Ringotel record id found at it, and the evidence that made
+ *  it a candidate. `ns-gone` = absent from the NetSapiens user list; `ns-reset` = present, but in
+ *  `reset` state. The reason is carried rather than re-derived because the Worker logs it per extension,
+ *  and "deactivated 3" across a fleet run is an unanswerable question the next morning. */
 export interface SweepOrphan {
   ext: string;
   rtUserIds: string[];
+  reason: 'ns-gone' | 'ns-reset';
 }
 
 export type SweepPlan =
@@ -25,6 +29,17 @@ export type SweepPlan =
 export interface SweepInput {
   /** Extensions that exist in NetSapiens for this domain. **`null` means the read failed.** */
   nsExtensions: string[] | null;
+  /**
+   * The subset of {@link nsExtensions} whose NetSapiens account is in `reset` state — derived from the
+   * same list read, which carries `account-status` per row.
+   *
+   * A reset user still EXISTS, so nothing here can infer them from absence; they have to be named. What
+   * "Reset User" leaves behind is the shell of an account — no name, no email, no password, no softphone
+   * devices — so the app seat it still holds is the same waste a departed user's is. This list only
+   * makes them CANDIDATES: the Worker re-reads each one before writing anything, and a record that comes
+   * back `standard` is refused, so a stale or mis-parsed list can never deactivate a live user.
+   */
+  resetExtensions: string[];
   /** The Ringotel org's users. Org-wide, so it spans branches — hence the branchid filter below. */
   rtUsers: { id?: unknown; extension?: unknown; branchid?: unknown; status?: unknown; userid?: unknown }[];
   /** The branch bound to this NS domain. */
@@ -35,6 +50,10 @@ export interface SweepInput {
 
 /**
  * Decide which extensions are orphaned.
+ *
+ * Two kinds of candidate, one rule: an extension NetSapiens does not have, and one it has in `reset`
+ * state (see {@link SweepInput.resetExtensions}). Both are only ever candidates — the Worker confirms
+ * each against NetSapiens itself before writing.
  *
  * ⚠️ **The two aborts are the load-bearing part.** A failed NS read and an empty NS user list are both
  * refused, because "could not read" and "nobody exists" are indistinguishable from the result alone — and
@@ -52,10 +71,13 @@ export function planOrphanSweep(input: SweepInput): SweepPlan {
   // cause one. This membership test only: `usersForExt` (shared with `resolveCanonical`/`dedupSiblings`)
   // is deliberately left case-sensitive, so this can never widen what a write actually matches.
   const known = new Set(input.nsExtensions.map((e) => String(e).trim().toLowerCase()).filter(Boolean));
+  // Normalised the same way, and for the same reason: the reset set comes from the same rows as `known`,
+  // so a spelling difference that made a case-variant "known" above must not also make it un-reset here.
+  const reset = new Set(input.resetExtensions.map((e) => String(e).trim().toLowerCase()).filter(Boolean));
 
   // Group by extension: deactivateAppOnly acts per extension and handles every record at it, so two
   // orphaned siblings are one unit of work, not two.
-  const byExt = new Map<string, string[]>();
+  const byExt = new Map<string, { ids: string[]; reason: SweepOrphan['reason'] }>();
   let scanned = 0;
   for (const u of input.rtUsers) {
     if (String(u.branchid ?? '') !== input.branchid) continue;
@@ -71,11 +93,18 @@ export function planOrphanSweep(input: SweepInput): SweepPlan {
     const ext = String(u.extension ?? '').trim();
     // Emit the ORIGINAL trimmed casing, not lowercased — deactivateAppOnly matches via `usersForExt`,
     // which is untouched by this fix and stays case-sensitive.
-    if (!ext || known.has(ext.toLowerCase())) continue;
-    byExt.set(ext, [...(byExt.get(ext) ?? []), String(u.id)]);
+    if (!ext) continue;
+    const key = ext.toLowerCase();
+    const isReset = reset.has(key);
+    // Two candidacies, one set: absent from NetSapiens, or present there in `reset` state. Everything
+    // else is a live user and is left alone.
+    if (known.has(key) && !isReset) continue;
+    const reason: SweepOrphan['reason'] = isReset ? 'ns-reset' : 'ns-gone';
+    const prev = byExt.get(ext);
+    byExt.set(ext, { ids: [...(prev?.ids ?? []), String(u.id)], reason: prev?.reason ?? reason });
   }
 
-  const all = [...byExt.entries()].map(([ext, rtUserIds]) => ({ ext, rtUserIds })).sort((a, z) => a.ext.localeCompare(z.ext));
+  const all = [...byExt.entries()].map(([ext, v]) => ({ ext, rtUserIds: v.ids, reason: v.reason })).sort((a, z) => a.ext.localeCompare(z.ext));
   const orphans = all.slice(0, Math.max(0, input.max));
   return { status: 'ok', orphans, truncated: all.length > orphans.length, scanned };
 }
@@ -90,6 +119,9 @@ export interface DomainSweepInput {
   /** Domain-wide NS extensions. **`null` means the read failed** — every connection then aborts, because
    *  the list is the domain's, not the connection's. */
   nsExtensions: string[] | null;
+  /** Domain-wide reset extensions — see {@link SweepInput.resetExtensions}. Carried to every connection
+   *  on the same argument the extension list is: a reset account is reset on all of them. */
+  resetExtensions: string[];
   /** The org's users, org-wide (spans connections). */
   rtUsers: SweepInput['rtUsers'];
   /** Every connection bound to this domain. */
@@ -118,7 +150,7 @@ export function planDomainSweep(input: DomainSweepInput): ConnectionSweep[] {
   let budget = Math.max(0, input.max);
   const out: ConnectionSweep[] = [];
   for (const branchid of input.branchids) {
-    const plan = planOrphanSweep({ nsExtensions: input.nsExtensions, rtUsers: input.rtUsers, branchid, max: budget });
+    const plan = planOrphanSweep({ nsExtensions: input.nsExtensions, resetExtensions: input.resetExtensions, rtUsers: input.rtUsers, branchid, max: budget });
     out.push({ branchid, plan });
     if (plan.status === 'ok') budget -= plan.orphans.length;
   }

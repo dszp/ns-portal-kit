@@ -33,7 +33,8 @@ export interface NsEventsEnv {
   NS_EVENTS?: string;
   /**
    * Enumerated domains, or `*` for every domain the write rail permits (concrete list discovered from
-   * the Ringotel directory at reconcile time). Empty/unset ⇒ inert — `*` must be chosen deliberately.
+   * the Ringotel directory at reconcile time). `*` may be followed by `!domain` exclusions, e.g.
+   * `*,!lab.example.com`. Empty/unset ⇒ inert — `*` must be chosen deliberately.
    */
   NS_EVENTS_DOMAINS?: string;
   /** Public origin of this Worker, e.g. `https://portal.example.com`. Must be host-distinct per env. */
@@ -123,6 +124,12 @@ export interface NsEventsConfig {
    * rail-intersected list.
    */
   domains: string[] | '*';
+  /**
+   * Domains carved OUT of a `'*'` rail (`NS_EVENTS_DOMAINS: '*,!lab.example.com'`). Empty unless the
+   * operator wrote exclusions, and only ever populated alongside `domains === '*'`. Applied by
+   * {@link isDomainEnabled}, so it reaches the receiver, the sweep and the reconcile together.
+   */
+  domainsExcept: string[];
   /** The Ringotel write rail, kept so the receiver can apply it when `domains` is `'*'`. */
   writeRail: string[] | '*';
   baseUrl: string;
@@ -185,6 +192,43 @@ export function isValidEventDomain(raw: unknown): boolean {
   return /^[a-z0-9][a-z0-9.-]*$/.test(raw);
 }
 
+/** The shape a domain rail resolves to: the wildcard with its carve-outs, or an explicit list. */
+export type DomainRail =
+  | { wildcard: true; except: string[] }
+  | { wildcard: false; domains: string[] };
+
+/**
+ * The `*[,!domain…]` grammar the domain rails share (`NS_EVENTS_DOMAINS` here, `RINGOTEL_PREPOP_AUTO` in
+ * eligibility.ts). One implementation, because the rule that actually matters — a `!` token means nothing
+ * without a `*` to subtract it from — is the kind of thing two copies drift on, and the two shapes a lone
+ * `!name` could be read as (everything, or nothing) are opposites.
+ *
+ * **Non-throwing on purpose.** Each rail owns its own config-error class, and the Worker's config gates
+ * catch those by `instanceof` to turn them into an actionable 500 rather than an unhandled throw. A shared
+ * helper that threw a third type would escape both gates, so it reports and the caller raises.
+ *
+ * Only the `!` tokens are grammar-checked here. The plain-list branch is returned as-is: the two rails
+ * validate their lists differently today (events does, prepop does not), and tightening prepop's list in
+ * passing would turn a currently-accepted deployment's config into a startup error.
+ */
+export function parseDomainRail(raw: string, setting: string): { ok: true; rail: DomainRail } | { ok: false; message: string } {
+  const except: string[] = [];
+  const plain: string[] = [];
+  for (const tok of csv(raw).map((t) => t.trim().toLowerCase())) {
+    if (tok.startsWith('!')) except.push(tok.slice(1).trim());
+    else plain.push(tok);
+  }
+  const wildcard = plain.includes('*');
+  if (wildcard && plain.length > 1) return { ok: false, message: `${setting} is either "*" or a list of domains, not both` };
+  if (except.length && !wildcard) return { ok: false, message: `${setting} exclusions ("!domain") are only meaningful alongside "*"` };
+  for (const d of except) {
+    if (!isValidEventDomain(d)) return { ok: false, message: `${setting} has an exclusion that is not a valid domain: !${d}` };
+  }
+  return wildcard
+    ? { ok: true, rail: { wildcard: true, except: [...new Set(except)] } }
+    : { ok: true, rail: { wildcard: false, domains: plain } };
+}
+
 /**
  * Resolve configuration, separating **intent** from **armed**.
  *
@@ -231,8 +275,8 @@ export function parseNsEventsConfig(env: NsEventsEnv): NsEventsConfig {
 
   /**
    * `'*'` is a deliberate, operator-chosen setting, not the default (unset ⇒ inert). It means "every
-   * domain the write rail permits", with the concrete list discovered from the Ringotel directory at
-   * reconcile time — a Reseller-scoped credential cannot create a subscription with `domain: '*'`
+   * domain the write rail permits", optionally minus `!domain` carve-outs, with the concrete list
+   * discovered from the Ringotel directory at reconcile time — a Reseller-scoped credential cannot create a subscription with `domain: '*'`
    * anyway (that needs Super User), so a wildcard must always expand to real domains.
    *
    * Note what does and does not protect this. The enumerated list was defence-in-depth; the actual gate
@@ -241,11 +285,15 @@ export function parseNsEventsConfig(env: NsEventsEnv): NsEventsConfig {
    * domain the rail permits. Rotate the secret if it is ever exposed.
    */
   const rawDomains = (env.NS_EVENTS_DOMAINS ?? '').trim();
+  const railParse = parseDomainRail(rawDomains, 'NS_EVENTS_DOMAINS');
+  if (!railParse.ok) throw new NsEventsConfigError(railParse.message);
   let domains: string[] | '*';
-  if (rawDomains === '*') {
+  let domainsExcept: string[] = [];
+  if (railParse.rail.wildcard) {
     domains = '*';
+    domainsExcept = railParse.rail.except;
   } else {
-    const requested = csv(rawDomains).map((d) => d.trim().toLowerCase());
+    const requested = railParse.rail.domains;
     for (const d of requested) {
       if (!isValidEventDomain(d)) throw new NsEventsConfigError(`NS_EVENTS_DOMAINS contains an invalid domain: ${d}`);
     }
@@ -282,6 +330,7 @@ export function parseNsEventsConfig(env: NsEventsEnv): NsEventsConfig {
   const base: Omit<NsEventsConfig, 'armed' | 'inertReason'> = {
     intent,
     domains,
+    domainsExcept,
     baseUrl,
     pathSecret,
     writeRail,
@@ -337,14 +386,17 @@ export function nsEventsConfigError(env: NsEventsEnv): string | null {
 }
 
 /**
- * Is this domain in scope for event handling? Applies the wildcard and the write rail together, so the
- * receiver and the reconciler can never disagree about scope.
+ * Is this domain in scope for event handling? Applies the wildcard, its `!domain` exclusions and the write
+ * rail together, so the receiver and the reconciler can never disagree about scope.
  *
  * Call only on a domain that has already passed {@link isValidEventDomain} — this answers "is it allowed",
  * not "is it well-formed".
  */
 export function isDomainEnabled(cfg: NsEventsConfig, domain: string): boolean {
   const d = domain.toLowerCase();
+  // Exclusions are checked FIRST and unconditionally. They only ever accompany a `'*'` rail, but ordering
+  // them ahead of both branches means the carve-out cannot be lost to a future change in either one.
+  if (cfg.domainsExcept.includes(d)) return false;
   if (cfg.domains !== '*') return cfg.domains.includes(d);
   return cfg.writeRail === '*' || cfg.writeRail.includes(d);
 }
