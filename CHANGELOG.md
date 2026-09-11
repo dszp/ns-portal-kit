@@ -2398,6 +2398,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.8.4]: https://github.com/dszp/ns-portal-kit/compare/v0.7.1...v0.8.4
 [0.7.1]: https://github.com/dszp/ns-portal-kit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/dszp/ns-portal-kit/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/dszp/ns-portal-kit/compare/v0.6.0...v0.6.1
