@@ -590,11 +590,12 @@ const realEvent = {
   ok(threw, 'an unknown NS_EVENTS_OFFBOARD value is a loud config error, not a silent off');
 }
 {
-  // The grace clock is unproven (spec §6), so hard delete is not a value you can select yet. The parser
-  // is where that fail-safe is enforced, rather than by remembering.
+  // `delete` is a value of its own; a combined spelling is not, and the parser is where that is enforced.
   let threw = false;
   try { parseNsEventsConfig({ ...FULL, NS_EVENTS_OFFBOARD: 'deactivate+delete' }); } catch (e) { threw = e instanceof NsEventsConfigError; }
-  ok(threw, 'deactivate+delete is REFUSED — no verified grace clock, so hard delete cannot be enabled');
+  ok(threw, 'deactivate+delete is REFUSED — the modes are exclusive values, not a combinable list');
+  const c = parseNsEventsConfig({ ...FULL, NS_EVENTS_OFFBOARD: 'delete' });
+  ok(c.offboard === 'delete', 'NS_EVENTS_OFFBOARD=delete parses to its own mode');
 }
 {
   let threw = false;

@@ -22,6 +22,12 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-09-14
+
+### Added
+
+- **`NS_EVENTS_OFFBOARD=delete`.** A user confirmed deleted from NetSapiens (404 on re-read, the same evidence `deactivate` uses) has every Ringotel record at their extension deleted — active, deactivated, placeholder — rather than left as a tombstone in the customer's user list. A **reset** account is still only deactivated: it exists and is about to be handed to someone new. Both doors apply it, the change event and the hourly sweep, and the sweep in this mode also nominates the tombstones `deactivate` mode left at extensions that no longer exist, under the same `NS_EVENTS_SWEEP_MAX` cap. An attached secondary is never deleted. The earlier position — that hard delete needs a "how long orphaned" clock — is withdrawn: a record for a person who no longer exists is worth nothing, and recreating one is the same one-step provisioning that made it.
+
 ## [0.8.4] — 2026-09-11
 
 ### Added
@@ -2398,6 +2404,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.8.5]: https://github.com/dszp/ns-portal-kit/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/dszp/ns-portal-kit/compare/v0.7.1...v0.8.4
 [0.7.1]: https://github.com/dszp/ns-portal-kit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/dszp/ns-portal-kit/compare/v0.6.1...v0.7.0

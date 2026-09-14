@@ -58,12 +58,15 @@ export interface NsEventsEnv {
   /** Truthy ⇒ log payload shape (keys/sizes only, never values) to learn a payload we haven't seen. */
   NS_EVENTS_DIAG_RAW?: string;
   /**
-   * `off` (default) | `deactivate`. Whether an NS-deleted user's app record is deactivated, by both the
-   * event tier and the cron sweep.
+   * `off` (default) | `deactivate` | `delete`. What happens to the app record of a user who has left
+   * NetSapiens, by both the event tier and the cron sweep. `deactivate` keeps a tombstone; `delete`
+   * removes every record at a DELETED user's extension (confirmed by a 404 re-read) and still only
+   * deactivates a `reset` account, which exists and is about to be handed to someone new.
    *
-   * `deactivate+delete` is deliberately NOT accepted: hard deletion needs a verified "how long has this
-   * been an orphan" clock, and none has been established (see the design spec §6). Rejecting it here
-   * means the fail-safe is enforced by the parser rather than by remembering.
+   * `delete` acts on the same evidence `deactivate` does — the 404 re-read, never a list or a payload —
+   * with no grace period, on the argument that a record for a person who no longer exists is worth
+   * nothing, and recreating one is the same one-step provisioning that made it. Combined spellings
+   * such as `deactivate+delete` are refused: the parser is where the value set is enforced.
    */
   NS_EVENTS_OFFBOARD?: string;
   /** `off` (default) | `report` | `heal`. Device self-heal on a user-change event. */
@@ -142,7 +145,7 @@ export interface NsEventsConfig {
   preferredServer?: string;
   maxEvents: number;
   diagRaw: boolean;
-  offboard: 'off' | 'deactivate';
+  offboard: 'off' | 'deactivate' | 'delete';
   deviceRepair: 'off' | 'report' | 'heal';
   sweepMax: number;
   identity?: NsWriteIdentity;
@@ -265,7 +268,7 @@ export function parseNsEventsConfig(env: NsEventsEnv): NsEventsConfig {
   const geoSupport: 'yes' | 'no' = rawGeo === 'no' ? 'no' : 'yes';
 
   // Parsed unconditionally, like `models` above: a typo must surface rather than hide behind a switch.
-  const offboard = enumOr(env.NS_EVENTS_OFFBOARD, ['off', 'deactivate'] as const, 'off', 'NS_EVENTS_OFFBOARD');
+  const offboard = enumOr(env.NS_EVENTS_OFFBOARD, ['off', 'deactivate', 'delete'] as const, 'off', 'NS_EVENTS_OFFBOARD');
   const deviceRepair = enumOr(env.NS_EVENTS_DEVICE_REPAIR, ['off', 'report', 'heal'] as const, 'off', 'NS_EVENTS_DEVICE_REPAIR');
   const sweepMax = Math.max(1, intOr(env.NS_EVENTS_SWEEP_MAX, 200, 'NS_EVENTS_SWEEP_MAX', 'count'));
 

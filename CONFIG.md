@@ -1286,7 +1286,14 @@ dropped.
 
 ### `NS_EVENTS_OFFBOARD` · `vars` · default `off`
 
-`off` or `deactivate` — whether a user who has left NetSapiens has their app record deactivated.
+`off` · `deactivate` · `delete` — what happens to the app record of a user who has left NetSapiens.
+
+- **`deactivate`** deactivates every active record at the extension and keeps it, as a tombstone the
+  customer's Ringotel user list still shows. **`delete`** removes every record at a **deleted** user's
+  extension — active, deactivated, placeholder — and still only *deactivates* a **reset** account, which
+  exists and is about to be handed to someone new. A person gone from NetSapiens is not listed in
+  Ringotel at all; if they come back, the record is recreated by the same one-step provisioning that made
+  it (the directory reconcile, or the app on their next sign-in).
 
 - Two things count as leaving. A **deleted** user, confirmed only by a 404 on re-read. And a user
   NetSapiens reports as **`account-status: reset`** — the "Reset User" action strips their name, email,
@@ -1297,8 +1304,12 @@ dropped.
   orphaned before this feature shipped. The sweep reads `account-status` from the domain user list to
   nominate reset accounts, then re-reads each one before writing: a record that comes back `standard` is
   refused and logged, so a stale list can never deactivate a live user.
-- Full deletion is deliberately not offered: it needs a verified "how long orphaned" clock that does not
-  exist yet. Deactivation is reversible; a reset account that gets recycled reactivates normally.
+- `delete` acts on the same evidence `deactivate` does — the 404 re-read — with no grace period. The
+  sweep in `delete` mode also nominates records `deactivate` mode left behind at extensions that no
+  longer exist, so switching modes cleans up the tombstones on the next hourly run, under the same
+  `NS_EVENTS_SWEEP_MAX` cap. An attached secondary (a second connection's view of a user on another) is
+  never deleted by either mode. Deactivation is reversible; a reset account that gets recycled
+  reactivates normally.
 - **A change event for a reset user writes nothing else, whatever this is set to.** The re-read grades
   the account ahead of the identity sync, the directory reconcile and the device repair, and all three
   are skipped — see [`NS_EVENTS_DEVICE_REPAIR`](#NS_EVENTS_DEVICE_REPAIR). Setting this to `off` means

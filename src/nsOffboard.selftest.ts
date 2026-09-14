@@ -37,6 +37,36 @@ const rt = (o: { id: string; ext: string; status?: number; branchid?: string }) 
   });
   ok(p.status === 'ok' && p.orphans.length === 0, 'an already-INACTIVE record is not an orphan — nothing to free, and re-deactivating is pointless');
 }
+// ── delete mode: tombstones at a GONE extension become candidates; nothing else changes ──
+{
+  const p = planOrphanSweep({
+    nsExtensions: ['100', '101'], resetExtensions: ['101'],
+    rtUsers: [rt({ id: 'U1', ext: '999', status: -1 }), rt({ id: 'U2', ext: '998', status: 1 }), rt({ id: 'U3', ext: '101', status: -1 }), rt({ id: 'U4', ext: '100', status: -1 })],
+    branchid: 'B1', max: 200, mode: 'delete',
+  });
+  const exts = p.status === 'ok' ? p.orphans.map((o) => `${o.ext}:${o.reason}`).join(',') : p.reason;
+  ok(exts === '998:ns-gone,999:ns-gone', `delete mode: an INACTIVE record at a GONE extension is a candidate, a reset account's inactive record is not, a known extension never is (got ${exts})`);
+}
+{
+  const p = planOrphanSweep({
+    nsExtensions: ['100'], resetExtensions: [],
+    rtUsers: [{ id: 'U1', extension: '999', status: -1, branchid: 'B1', userid: 'P1' }],
+    branchid: 'B1', max: 200, mode: 'delete',
+  });
+  ok(p.status === 'ok' && p.orphans.length === 0, 'delete mode still never nominates an attached secondary');
+}
+{
+  const p = planOrphanSweep({
+    nsExtensions: ['100'], resetExtensions: [],
+    rtUsers: [rt({ id: 'U1', ext: '999', status: -1 })],
+    branchid: 'B1', max: 200, mode: 'deactivate',
+  });
+  ok(p.status === 'ok' && p.orphans.length === 0, 'deactivate mode (explicit) is unchanged: an inactive record at a gone extension is left alone');
+}
+{
+  const per = planDomainSweep({ nsExtensions: ['100'], resetExtensions: [], rtUsers: [rt({ id: 'U1', ext: '999', status: -1 })], branchids: ['B1'], max: 5, mode: 'delete' });
+  ok(per[0]!.plan.status === 'ok' && per[0]!.plan.orphans.length === 1, 'planDomainSweep carries the mode to every connection');
+}
 {
   const p = planOrphanSweep({
     nsExtensions: ['100'], resetExtensions: [],

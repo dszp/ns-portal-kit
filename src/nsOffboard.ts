@@ -46,6 +46,15 @@ export interface SweepInput {
   branchid: string;
   /** Max extensions to deactivate in one run. */
   max: number;
+  /**
+   * What the sweep will DO to a `ns-gone` orphan, which decides what counts as one. In `deactivate`
+   * mode only an ACTIVE record is a candidate: an inactive one has no seat to free, and touching it
+   * again is pointless. In `delete` mode every record at a gone extension is a candidate, including the
+   * tombstones `deactivate` mode left behind — a person gone from NetSapiens is not meant to be listed
+   * in Ringotel at all. `ns-reset` candidates are active-only in BOTH modes: the account still exists,
+   * so the record is deactivated and kept, never deleted. Default `deactivate`.
+   */
+  mode?: 'deactivate' | 'delete';
 }
 
 /**
@@ -88,7 +97,6 @@ export function planOrphanSweep(input: SweepInput): SweepPlan {
     // `!== 1` test below too, but relying on that is relying on an accident: this guard states the
     // intent, so widening the status predicate later cannot silently start sweeping secondaries.
     if (u.userid != null) continue;
-    if (Number(u.status) !== 1) continue; // already inactive — no seat to free
     if (u.id == null) continue; // nothing to address
     const ext = String(u.extension ?? '').trim();
     // Emit the ORIGINAL trimmed casing, not lowercased — deactivateAppOnly matches via `usersForExt`,
@@ -99,6 +107,11 @@ export function planOrphanSweep(input: SweepInput): SweepPlan {
     // Two candidacies, one set: absent from NetSapiens, or present there in `reset` state. Everything
     // else is a live user and is left alone.
     if (known.has(key) && !isReset) continue;
+    // An inactive record is a candidate only when the extension is GONE and the mode will delete it
+    // (see `SweepInput.mode`). A reset account's inactive record is left as it is in every mode: the
+    // deactivation already happened, and a reset is not a deletion.
+    const gone = !known.has(key);
+    if (Number(u.status) !== 1 && !(gone && input.mode === 'delete')) continue;
     const reason: SweepOrphan['reason'] = isReset ? 'ns-reset' : 'ns-gone';
     const prev = byExt.get(ext);
     byExt.set(ext, { ids: [...(prev?.ids ?? []), String(u.id)], reason: prev?.reason ?? reason });
@@ -128,6 +141,8 @@ export interface DomainSweepInput {
   branchids: string[];
   /** Max extensions to deactivate in one run, **shared across the whole domain**. */
   max: number;
+  /** See {@link SweepInput.mode}. Domain-wide: one setting decides the whole deployment's answer. */
+  mode?: 'deactivate' | 'delete';
 }
 
 /**
@@ -150,7 +165,7 @@ export function planDomainSweep(input: DomainSweepInput): ConnectionSweep[] {
   let budget = Math.max(0, input.max);
   const out: ConnectionSweep[] = [];
   for (const branchid of input.branchids) {
-    const plan = planOrphanSweep({ nsExtensions: input.nsExtensions, resetExtensions: input.resetExtensions, rtUsers: input.rtUsers, branchid, max: budget });
+    const plan = planOrphanSweep({ nsExtensions: input.nsExtensions, resetExtensions: input.resetExtensions, rtUsers: input.rtUsers, branchid, max: budget, mode: input.mode });
     out.push({ branchid, plan });
     if (plan.status === 'ok') budget -= plan.orphans.length;
   }

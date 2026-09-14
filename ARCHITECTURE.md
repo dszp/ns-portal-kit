@@ -302,8 +302,9 @@ leaves `~` untouched); an explicit domain allowlist that can never exceed `RINGO
 always-on in-isolate rate limiter ahead of verification. Anything unverifiable is dropped, never applied.
 
 The sync writer is deliberately narrow, and everything it may do is named by a setting. Always: **update
-identity** on an existing app record. With `NS_EVENTS_OFFBOARD` on: **deactivate** — never delete — the
-record of a user NetSapiens has deleted or reset, on a re-read of that user rather than on the payload.
+identity** on an existing app record. With `NS_EVENTS_OFFBOARD` on: **deactivate** the record of a
+user NetSapiens has deleted or reset — or, in `delete` mode, **delete** a deleted user's records and still only
+deactivate a reset one — on a re-read of that user rather than on the payload.
 With `RINGOTEL_PREPOP_AUTO` armed for the domain: create, rename and remove **placeholders**, through the
 same `reconcileDomainDirectory` the cron uses, and only ever records that were never active. What it never
 does is **activate** a user or de-duplicate records — because an SSO integration running beside this Worker

@@ -1,6 +1,6 @@
 /** Offline test for the Ringotel activation orchestration (device-ensure + create/update/deactivate/
  *  reset) with recording mock clients, plus the write-domain safety rail. pnpm test:ringotelwrite */
-import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter, syncIdentity, generateSipPassword, deactivateAppOnly, repairDeviceForEvent, resolveCanonical, isPlaceholder } from './ringotelActivation.js';
+import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter, syncIdentity, generateSipPassword, deactivateAppOnly, deleteAppRecords, repairDeviceForEvent, resolveCanonical, isPlaceholder } from './ringotelActivation.js';
 import type { User } from '@dszp/ringotel-lib';
 
 let pass = 0, fail = 0;
@@ -659,6 +659,27 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     const r = await deactivateAppOnly({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
     ok(r.action === 'deactivated' && r.rtUserIds.length === 2, 'deactivateAppOnly deactivates EVERY active record at the extension, not just the canonical');
     ok(calls.every((c) => c.m === 'deactivateUser'), 'deactivating siblings still only ever calls deactivateUser');
+  }
+  // ── deleteAppRecords: the irreversible sibling, for a user CONFIRMED gone from NS ────
+  {
+    const { rw, calls } = mockRt();
+    const { dw, calls: dcalls } = mockDevices();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1 }), rtUser({ id: 'U2', ext: '100', status: -1, authname: '100r' }), rtUser({ id: 'U3', ext: '100', status: 0 })];
+    const r = await deleteAppRecords({ ...base(), nsWrite: dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'deleted' && r.rtUserIds.join() === 'U1,U2,U3', 'deleteAppRecords deletes EVERY record at the extension — active, tombstone and placeholder alike');
+    ok(calls.length === 3 && calls.every((c) => c.m === 'deleteUser'), 'INVARIANT: deleteAppRecords calls ONLY deleteUser on the Ringotel side');
+    ok(dcalls.length === 0, 'INVARIANT: deleteAppRecords touches NO NS device — the NS user is already gone');
+  }
+  {
+    const { rw, calls } = mockRt();
+    const users = [rtUser({ id: 'U1', ext: '100', status: 1, userid: 'P9' }), rtUser({ id: 'U2', ext: '101', status: -1 })];
+    const r = await deleteAppRecords({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: users as any });
+    ok(r.action === 'absent' && calls.length === 0, 'an attached SECONDARY is never deleted — its seat belongs to a primary elsewhere — and other extensions are untouched');
+  }
+  {
+    const { rw, calls } = mockRt();
+    const r = await deleteAppRecords({ ...base(), nsWrite: mockDevices().dw as any, rtWrite: rw as any, users: [] as any });
+    ok(r.action === 'absent' && calls.length === 0, 'replay-safe: nothing at the extension answers absent with no write');
   }
   {
     // Two records sharing the SIP identity make resolveCanonical throw 409. This path must not care:

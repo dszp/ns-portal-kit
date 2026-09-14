@@ -63,7 +63,7 @@ import {
   sweepScope, isValidEventDomain, NS_EVENTS_PREFIX, locateConnection, type NsEventsConfig,
 } from './nsEvents.js';
 import { getServiceToken } from './nsIdentity.js';
-import { syncIdentity, deactivateAppOnly, repairDeviceForEvent } from './ringotelActivation.js';
+import { syncIdentity, deactivateAppOnly, deleteAppRecords, repairDeviceForEvent } from './ringotelActivation.js';
 import { NsSubscriptionsClient, planSubscriptions } from '@dszp/netsapiens-lib';
 import { resolveFeaturePolicies, featuresConfigError, parseSuperadmins, kitStatusLockedReason, fleetReadAllowed } from './features.js';
 import { resolveMenus, menuConfigError, appsHideSources, activeApps, unreachableDefaults, type MenuPlan } from './menus.js';
@@ -309,8 +309,8 @@ interface Env {
   NS_EVENTS_PREFERRED_SERVER?: string;
   NS_EVENTS_MAX_EVENTS?: string;
   NS_EVENTS_DIAG_RAW?: string;
-  /** `off` (default) | `deactivate`. Whether an NS-deleted user's app record is deactivated, by both the
-   *  event tier and the cron sweep. `deactivate+delete` is deliberately NOT accepted (see src/nsEvents.ts). */
+  /** `off` (default) | `deactivate` | `delete`. What happens to a departed user's app record, by both the
+   *  event tier and the cron sweep — see src/nsEvents.ts. */
   NS_EVENTS_OFFBOARD?: string;
   /** `off` (default) | `report` | `heal`. Device self-heal triggered by a user-change event. */
   NS_EVENTS_DEVICE_REPAIR?: string;
@@ -1571,6 +1571,9 @@ async function offboardOneFromEvent(a: {
   org: OrgResolution & { users?: User[] };
   domain: string; ext: string; suffix: string;
   evidence: 'ns-404' | 'ns-reset';
+  /** `NS_EVENTS_OFFBOARD` as parsed. Decides ONE thing: whether `ns-404` evidence deletes or
+   *  deactivates. `ns-reset` evidence deactivates in both modes — the account still exists. */
+  mode: 'deactivate' | 'delete';
 }): Promise<void> {
   const branches = connectionsOf(a.org);
   if (!branches.length) {
@@ -1591,13 +1594,16 @@ async function offboardOneFromEvent(a: {
     }));
     return;
   }
-  const off = await deactivateAppOnly({
+  const wopts = {
     nsWrite: a.nsWrite, rtWrite: makeWriteClient(a.env),
     users: a.org.users ?? [],
     orgid, branchid: at.branchid,
     domain: a.domain, ext: a.ext, suffix: a.suffix,
-  });
-  if (off.action === 'deactivated') await invalidateOrgUsers(a.cache, scopeOf(a.env), orgid);
+  };
+  // The evidence picks the verb, not the mode alone: `delete` mode still only DEACTIVATES a reset
+  // account, because that user exists and is about to be handed to someone new (`deleteAppRecords`).
+  const off = a.mode === 'delete' && a.evidence === 'ns-404' ? await deleteAppRecords(wopts) : await deactivateAppOnly(wopts);
+  if (off.action === 'deactivated' || off.action === 'deleted') await invalidateOrgUsers(a.cache, scopeOf(a.env), orgid);
   console.log(JSON.stringify({ msg: 'ns-event offboard', domain: a.domain, ext: a.ext, action: off.action, rtUserIds: off.rtUserIds, reason: a.evidence }));
 }
 
@@ -1641,7 +1647,7 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
         // A 404 is the ONLY read outcome that may authorise a deactivation. `failed` never does — a
         // transient NS error mistaken for a deletion would offboard a live user.
         const goneArmed = read.kind === 'gone' && prepopArmed(u.domain, rtConfig);
-        if (read.kind === 'gone' && (goneArmed || cfg.offboard === 'deactivate')) {
+        if (read.kind === 'gone' && (goneArmed || cfg.offboard !== 'off')) {
           // ONE directory read for both doors below — `resolveForWrite` is a forced-fresh Ringotel read, and
           // the placeholder reconcile and the offboard have to judge the same state anyway. Resolved only
           // when one of them will actually run, so a deployment with neither armed still pays nothing here.
@@ -1652,8 +1658,8 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
           // 'active' for one, and `deactivateAppOnly` below still handles it on the reversible path that
           // offboarding chose deliberately. The two can never reach the same record.
           if (goneArmed) await runEventPrepop({ env, cache, domain: u.domain, ext: u.ext, read, org, rtConfig });
-          if (cfg.offboard === 'deactivate') {
-            await offboardOneFromEvent({ env, cache, nsWrite, org, domain: u.domain, ext: u.ext, suffix: rtConfig.suffix, evidence: 'ns-404' });
+          if (cfg.offboard !== 'off') {
+            await offboardOneFromEvent({ env, cache, nsWrite, org, domain: u.domain, ext: u.ext, suffix: rtConfig.suffix, evidence: 'ns-404', mode: cfg.offboard });
             continue;
           }
         }
@@ -1677,11 +1683,11 @@ export async function processNsEventUsers(env: Env, cfg: NsEventsConfig, users: 
       // meant "sync a stripped account instead", and reading it that way is how the switch would become
       // the thing that re-provisions the account it was set to leave alone.
       if (isResetAccount(rec)) {
-        if (cfg.offboard === 'deactivate') {
+        if (cfg.offboard !== 'off') {
           await offboardOneFromEvent({
             env, cache, nsWrite,
             org: await resolveForWrite(env, cache, u.domain),
-            domain: u.domain, ext: u.ext, suffix: rtConfig.suffix, evidence: 'ns-reset',
+            domain: u.domain, ext: u.ext, suffix: rtConfig.suffix, evidence: 'ns-reset', mode: cfg.offboard,
           });
         } else {
           console.log(JSON.stringify({ msg: 'ns-event skip', domain: u.domain, ext: u.ext, reason: 'ns-reset' }));
@@ -1964,9 +1970,12 @@ async function deactivateOrphans(a: {
   env: Env; cache: Cache; client: NsClient; nsWrite: NsWriteClient;
   domain: string; branchid: string; orgid: string;
   users: User[]; plan: Extract<SweepPlan, { status: 'ok' }>; suffix: string; nsUsers: number;
+  /** See `offboardOneFromEvent.mode` — the same one decision, made by the same setting. */
+  mode: 'deactivate' | 'delete';
 }): Promise<void> {
-  const { env, cache, client, nsWrite, domain, branchid, orgid, users, plan, suffix, nsUsers } = a;
+  const { env, cache, client, nsWrite, domain, branchid, orgid, users, plan, suffix, nsUsers, mode } = a;
   let deactivated = 0;
+  let deleted = 0;
   for (const o of plan.orphans) {
     try {
       // Confirm the LIST-derived candidate against NetSapiens itself before writing anything — the
@@ -1990,12 +1999,20 @@ async function deactivateOrphans(a: {
         }
         continue;
       }
-      const res = await deactivateAppOnly({
+      const wopts = {
         nsWrite, rtWrite: makeWriteClient(env),
         users,
         orgid, branchid,
         domain, ext: o.ext, suffix,
-      });
+      };
+      // Same routing as the event tier: only `ns-gone` evidence in `delete` mode deletes. The planner
+      // nominated inactive records at gone extensions only in that mode, and `authorisesDeactivation`
+      // above confirmed the 404, so a record reaching `deleteAppRecords` has been judged gone twice.
+      const res = o.reason === 'ns-gone' && mode === 'delete' ? await deleteAppRecords(wopts) : await deactivateAppOnly(wopts);
+      if (res.action === 'deleted') {
+        deleted++;
+        console.log(JSON.stringify({ msg: 'ns-events sweep deleted', domain, branchid, ext: o.ext, reason: o.reason, rtUserIds: res.rtUserIds }));
+      }
       if (res.action === 'deactivated') {
         deactivated++;
         // Per extension, with the evidence that authorised it — `ns-gone` (absent from NetSapiens) or
@@ -2009,13 +2026,13 @@ async function deactivateOrphans(a: {
       console.error(JSON.stringify({ msg: 'ns-events sweep deactivate failed', domain, branchid, ext: o.ext, error: String((e as Error)?.message ?? e).slice(0, 200) }));
     }
   }
-  if (deactivated) await invalidateOrgUsers(cache, scopeOf(env), orgid);
+  if (deactivated || deleted) await invalidateOrgUsers(cache, scopeOf(env), orgid);
   // `nsUsers` is DOMAIN-wide while this line is per-connection — deliberately kept anyway, and on the
   // same key it has always used. It was added as a truncation diagnostic: comparing the returned NS
   // user count against the domain's known total is how a silently truncated (unpaged) `/users` read
   // gets caught, and the line that fires when orphans WERE found is exactly where you want to sanity-
   // check it. Dropping it here would have removed the diagnostic from the only case that matters.
-  console.log(JSON.stringify({ msg: 'ns-events sweep', domain, branchid, nsUsers, scanned: plan.scanned, orphans: plan.orphans.length, deactivated, exts: plan.orphans.map((o) => o.ext) }));
+  console.log(JSON.stringify({ msg: 'ns-events sweep', domain, branchid, nsUsers, scanned: plan.scanned, orphans: plan.orphans.length, deactivated, deleted, exts: plan.orphans.map((o) => o.ext) }));
 }
 
 /**
@@ -2030,7 +2047,7 @@ async function deactivateOrphans(a: {
  */
 export async function runOrphanSweep(env: Env): Promise<void> {
   const cfg = parseNsEventsConfig(env);
-  if (!cfg.armed || !cfg.identity || cfg.offboard !== 'deactivate') {
+  if (!cfg.armed || !cfg.identity || cfg.offboard === 'off') {
     console.log(JSON.stringify({ msg: 'ns-events sweep skipped', reason: cfg.armed ? `offboard-${cfg.offboard}` : (cfg.inertReason ?? 'not-armed') }));
     return;
   }
@@ -2084,6 +2101,7 @@ export async function runOrphanSweep(env: Env): Promise<void> {
         rtUsers: org.users ?? [],
         branchids: branches.map((b) => b.branchid),
         max: cfg.sweepMax,
+        mode: cfg.offboard,
       });
 
       for (const { branchid, plan } of perConnection) {
@@ -2099,7 +2117,7 @@ export async function runOrphanSweep(env: Env): Promise<void> {
           console.log(JSON.stringify({ msg: 'ns-events sweep', domain, branchid, nsUsers: nsExtensions?.length ?? 0, scanned: plan.scanned, orphans: 0 }));
           continue;
         }
-        await deactivateOrphans({ env, cache, client, nsWrite, domain, branchid, orgid, users: org.users ?? [], plan, suffix: rtConfig.suffix, nsUsers: nsExtensions?.length ?? 0 });
+        await deactivateOrphans({ env, cache, client, nsWrite, domain, branchid, orgid, users: org.users ?? [], plan, suffix: rtConfig.suffix, nsUsers: nsExtensions?.length ?? 0, mode: cfg.offboard });
       }
     } catch (e) {
       console.error(JSON.stringify({ msg: 'ns-events sweep domain failed', domain, error: String((e as Error)?.message ?? e).slice(0, 200) }));

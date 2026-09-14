@@ -539,6 +539,41 @@ export async function deactivateAppOnly(opts: ActivationOpts): Promise<Deactivat
   return { action: 'deactivated', rtUserIds };
 }
 
+export interface DeleteAppRecordsResult {
+  action: 'deleted' | 'absent';
+  rtUserIds: string[];
+}
+
+/**
+ * Delete EVERY Ringotel record at an extension — active, deactivated, placeholder — on the strength of
+ * NetSapiens saying the user is gone. The irreversible sibling of {@link deactivateAppOnly}, and the
+ * whole difference between `NS_EVENTS_OFFBOARD=deactivate` and `=delete`.
+ *
+ * Why it exists: a deactivated record is still a row in the customer's Ringotel user list, for a person
+ * who no longer exists anywhere else. Recreating one is the same one-step provisioning that made it in
+ * the first place (a placeholder from the reconcile, or the app on the next SSO login), so keeping the
+ * tombstone buys nothing that a fresh record would not.
+ *
+ * What it is NOT for: a `reset` account. That user still exists in NetSapiens, so the caller must route
+ * reset evidence to `deactivateAppOnly`; this function has no way to tell and does not try.
+ *
+ * Attached secondaries (`userid` set) are skipped, as the sweep planner skips them: their seat belongs to
+ * a primary on another connection, whose own NetSapiens extension is the evidence that matters for it.
+ *
+ * Replay-safe: an extension with nothing left at it answers `'absent'`, so at-least-once delivery and
+ * the placeholder reconcile deleting the same record first both cost nothing.
+ */
+export async function deleteAppRecords(opts: ActivationOpts): Promise<DeleteAppRecordsResult> {
+  const matches = usersForExt(opts.users, opts.branchid, opts.ext).filter((u) => u.id != null && u.userid == null);
+  if (matches.length === 0) return { action: 'absent', rtUserIds: [] };
+  const rtUserIds: string[] = [];
+  for (const u of matches) {
+    await opts.rtWrite.deleteUser(String(u.id), opts.orgid);
+    rtUserIds.push(String(u.id));
+  }
+  return { action: 'deleted', rtUserIds };
+}
+
 /** What a device self-heal found or did. `changed` holds `'device-created'`, `'device-missing'` (report
  *  mode only — device absent, or present with an unreadable password; the two can't be told apart there),
  *  `'device-password-blank'` (heal mode only — device confirmed present, password unreadable), or
