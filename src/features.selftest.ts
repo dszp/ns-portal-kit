@@ -493,5 +493,26 @@ ok(can(P('Reseller'), 'me.appAccess', selfPolicies), 'me.appAccess default admit
   ok(!can(P('Office Manager', 'om@d.example'), 'onebill.view', bare), 'and an Office Manager sees neither');
 }
 
+// ── ringotel.provision.view / ringotel.provision.write (the Ringotel Integration page) ───────────
+// The same rung split as the OneBill pair: reading how a domain's organization compares with the standard
+// is reseller work; creating that organization is not. Asserted here rather than trusted to the registry
+// literal, because the default on the write key is the only thing standing between a reseller and a live
+// Ringotel organization created in the operator's tenant.
+{
+  const bare = resolveFeaturePolicies({});
+  ok(FEATURE_REGISTRY.some((f) => f.key === 'ringotel.provision.view'), 'registry has ringotel.provision.view');
+  ok(FEATURE_REGISTRY.some((f) => f.key === 'ringotel.provision.write'), 'registry has ringotel.provision.write');
+  ok(can(P('Reseller', 'other@d.example'), 'ringotel.provision.view', bare), 'ringotel.provision.view admits a reseller by default');
+  ok(!can(P('Reseller', 'other@d.example'), 'ringotel.provision.write', bare),
+    'ringotel.provision.write does NOT — creating an organization defaults to a named superadmin');
+  const withBoss = resolveFeaturePolicies({ PORTAL_SUPERADMINS: 'boss@0000.svc' });
+  ok(can(P('Basic User', 'boss@0000.svc'), 'ringotel.provision.view', withBoss), 'a named superadmin holds the view key');
+  ok(can(P('Basic User', 'boss@0000.svc'), 'ringotel.provision.write', withBoss), 'and the write key');
+  const widened = resolveFeaturePolicies({ PORTAL_FEATURES: '{"ringotel.provision.write":"reseller"}' });
+  ok(can(P('Reseller', 'other@d.example'), 'ringotel.provision.write', widened),
+    'and PORTAL_FEATURES widens the write key to reseller when an operator asks for it');
+  ok(!can(P('Office Manager', 'om@d.example'), 'ringotel.provision.view', bare), 'an Office Manager sees neither');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

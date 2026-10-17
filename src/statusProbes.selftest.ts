@@ -256,6 +256,113 @@ globalThis.fetch = modeFetch;
   globalThis.fetch = modeFetch; // restore the shared mode-based stub for the blocks below
 }
 
+// ── Ringotel provisioning: three account-level catalog reads, and the configured NAMES must resolve ──
+// The failure this probe exists for is silent until the first write: a template, package or region named
+// by a setting but absent from the tenant looks like a working deployment until an operator clicks Enable
+// and gets a 422. Each name is asserted separately — a single "the catalog resolved" check would pass with
+// the package unresolved, which is the one of the three that decides what the customer is billed for.
+{
+  const PROV_ENV = {
+    NS_SERVER: 'mock.local', RINGOTEL_API_KEY: SECRET,
+    RINGOTEL_CONNECTION_TEMPLATE: 'Standard SIP', RINGOTEL_DEFAULT_PACKAGE: 'Essentials', RINGOTEL_REGION: 'US East',
+  };
+  const TEMPLATES = [{ id: 't1', name: 'Standard SIP', params: {} }];
+  const PACKAGES = [{ id: 7, name: 'Essentials' }];
+  const REGIONS = [{ id: 'us-east', name: 'US East' }];
+  /** The AdminAPI is one POST endpoint that dispatches on a `method` in the body, so the stub reads the
+   *  body rather than the URL — the three catalog reads are indistinguishable by path. */
+  const stubCatalog = (templates: unknown[], packages: unknown[], regions: unknown[]) => {
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const method = String((JSON.parse(String(init?.body ?? '{}')) as { method?: string }).method ?? '');
+      const result = method === 'getTemplates' ? templates
+        : method === 'getPackages' ? packages
+          : method === 'getRegions' ? regions : [];
+      return new Response(JSON.stringify({ result }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as any;
+  };
+
+  // not configured ⇒ skip. An API key alone is the Ringotel integration, not this page.
+  stubCatalog(TEMPLATES, PACKAGES, REGIONS);
+  let rs = await runProbes({ NS_SERVER: 'mock.local', RINGOTEL_API_KEY: SECRET } as any, CTX);
+  ok(byId(rs, 'provision').state === 'skip', 'no connection template ⇒ the provisioning probe skips');
+  ok(/RINGOTEL_CONNECTION_TEMPLATE/.test(byId(rs, 'provision').detail),
+    'and it names the setting it was waiting on, not just that it was waiting');
+
+  // all three resolve ⇒ pass
+  rs = await runProbes(PROV_ENV as any, CTX);
+  ok(byId(rs, 'provision').state === 'pass', 'template, package and region all resolve ⇒ pass');
+  ok(!JSON.stringify(rs).includes(SECRET), 'and no result carries the API key');
+
+  // a required setting missing while the page is ON is a config error, reported as itself
+  rs = await runProbes({ ...PROV_ENV, RINGOTEL_DEFAULT_PACKAGE: '' } as any, CTX);
+  ok(byId(rs, 'provision').state === 'fail', 'the page is on but a required setting is blank ⇒ fail');
+  ok(/RINGOTEL_DEFAULT_PACKAGE/.test(byId(rs, 'provision').detail), 'naming the setting that is missing');
+
+  // no template by that name ⇒ fail, in the catalog's own words
+  stubCatalog([], PACKAGES, REGIONS);
+  rs = await runProbes(PROV_ENV as any, CTX);
+  ok(byId(rs, 'provision').state === 'fail', 'no template by the configured name ⇒ fail');
+  ok(/No connection template named/.test(byId(rs, 'provision').detail), 'with the same sentence the page renders');
+
+  // two templates sharing the name — ambiguous is not usable, and picking one would be worse
+  stubCatalog([...TEMPLATES, { id: 't2', name: 'Standard SIP', params: {} }], PACKAGES, REGIONS);
+  rs = await runProbes(PROV_ENV as any, CTX);
+  ok(byId(rs, 'provision').state === 'fail', 'two templates sharing the configured name ⇒ fail');
+  ok(/More than one connection template/.test(byId(rs, 'provision').detail), 'and says which way it is ambiguous');
+
+  // the package name is absent from the tenant
+  stubCatalog(TEMPLATES, [{ id: 9, name: 'Something Else' }], REGIONS);
+  rs = await runProbes(PROV_ENV as any, CTX);
+  ok(byId(rs, 'provision').state === 'fail', 'a package name absent from the tenant ⇒ fail');
+  ok(/RINGOTEL_DEFAULT_PACKAGE/.test(byId(rs, 'provision').detail), 'naming the setting, not just the value');
+
+  // the region name is absent from the tenant
+  stubCatalog(TEMPLATES, PACKAGES, [{ id: 'eu-west', name: 'EU West' }]);
+  rs = await runProbes(PROV_ENV as any, CTX);
+  ok(byId(rs, 'provision').state === 'fail', 'a region name absent from the tenant ⇒ fail');
+  ok(/RINGOTEL_REGION/.test(byId(rs, 'provision').detail), 'naming that setting in turn');
+
+  // a rejected key: report the status, never the key
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: 'bad token' } }), { status: 401 })) as any;
+  rs = await runProbes(PROV_ENV as any, CTX);
+  ok(byId(rs, 'provision').state === 'fail', 'a 401 from the AdminAPI ⇒ fail');
+  ok(/401/.test(byId(rs, 'provision').detail), 'and the detail carries the status code');
+  ok(!JSON.stringify(rs).includes(SECRET), 'but never the credential itself');
+
+  // upstream unreachable entirely
+  globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
+  rs = await runProbes(PROV_ENV as any, CTX);
+  ok(byId(rs, 'provision').state === 'fail', 'a network failure ⇒ fail, never a throw');
+  ok(!/connection reset/.test(byId(rs, 'provision').detail), 'and the detail does not quote the raw upstream error');
+
+  // ── the operator's OWN word for the app, in every sentence this probe writes ─────────────────────
+  // Read straight off RINGOTEL_LABEL, because these sentences can be produced before the provisioning
+  // config has resolved — and one of them IS the report that it did not. A white-label deployment must
+  // not read the vendor's name in its own console.
+  const WL = { ...PROV_ENV, RINGOTEL_LABEL: 'Acme App' };
+  stubCatalog(TEMPLATES, [{ id: 9, name: 'Something Else' }], REGIONS);
+  rs = await runProbes(WL as any, CTX);
+  ok(/Acme App tenant/.test(byId(rs, 'provision').detail) && !/Ringotel/.test(byId(rs, 'provision').detail),
+    `the unresolvable-package failure says the operator's own word for the app: ${byId(rs, 'provision').detail}`);
+  stubCatalog(TEMPLATES, PACKAGES, [{ id: 'eu-west', name: 'EU West' }]);
+  rs = await runProbes(WL as any, CTX);
+  ok(/Acme App tenant/.test(byId(rs, 'provision').detail) && !/Ringotel/.test(byId(rs, 'provision').detail),
+    'and so does the unresolvable-region one');
+  // The sentence `loadCatalog` writes for the page, rendered here verbatim — so it carries the label too.
+  stubCatalog([], PACKAGES, REGIONS);
+  rs = await runProbes(WL as any, CTX);
+  ok(/Acme App tenant/.test(byId(rs, 'provision').detail) && !/Ringotel/.test(byId(rs, 'provision').detail),
+    `and the absent-template sentence the page shares: ${byId(rs, 'provision').detail}`);
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: 'bad token' } }), { status: 401 })) as any;
+  rs = await runProbes(WL as any, CTX);
+  ok(/^Acme App rejected/.test(byId(rs, 'provision').detail), `and a rejected read names it too: ${byId(rs, 'provision').detail}`);
+  globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
+  rs = await runProbes(WL as any, CTX);
+  ok(/Acme App provisioning catalogs/.test(byId(rs, 'provision').detail), 'as does an unreachable one');
+
+  globalThis.fetch = modeFetch; // restore the shared mode-based stub for the blocks below
+}
+
 // ── the catalog IS the contract the Checks tab renders against (it now genuinely is: statusPage.ts renders
 // the not-run rows from PROBE_CATALOG. It previously carried its own list of three, which disagreed with
 // these six on content, count and mechanics — and this block's stated premise was what made that easy to

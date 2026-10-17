@@ -22,6 +22,50 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-17
+
+### Added
+
+- **Download a call flow as PNG, SVG or PDF.** The call-flow window has three new buttons. PNG saves the
+  diagram at twice screen resolution. SVG saves a vector file that opens in editors and other viewers.
+  PDF opens the print dialog with the diagram laid out for US Letter: on one page when it stays legible
+  (at least 70% scale), otherwise split between boxes across as few pages as possible, in portrait or
+  landscape, whichever fits better.
+- **The Ringotel Integration page** (Management menu) — audits every NetSapiens domain against the
+  Ringotel organization and connection your standard calls for (organization present, label correct,
+  package, sign-in mode, connector settings grouped by section) and enables a domain in one confirmed,
+  re-runnable action: create its organization, set its sign-in mode, create its connection from a saved
+  template, rebuild this deployment's org index, and run the directory reconcile. A step already
+  satisfied reports `noop`, so re-running it changes nothing. The create offers every connection template
+  in the tenant — newest first, with the date each was saved and the configured standard preselected — so
+  a customer needing a variant connector gets one without changing a setting; the drift audit still
+  compares against the configured standard.
+- Two feature keys gate it: `ringotel.provision.view` (default: reseller) shows the audit;
+  `ringotel.provision.write` (default: superadmin) enables a domain or fixes a single finding. Both widen
+  through `PORTAL_FEATURES`, the same mechanism as every other feature gate.
+- Five settings, all under `RINGOTEL_API_KEY` and gated together by `RINGOTEL_CONNECTION_TEMPLATE`:
+  `RINGOTEL_PROVISION_DOMAINS` (the write rail — unset, the audit still renders but nothing can be
+  enabled), `RINGOTEL_CONNECTION_TEMPLATE`, `RINGOTEL_SSO_SERVICE_ID` (optional — a different setting from
+  the existing `RINGOTEL_SSO_SERVICE`), `RINGOTEL_DEFAULT_PACKAGE` and `RINGOTEL_REGION`. See
+  [CONFIG.md → Ringotel provisioning](./CONFIG.md#group-provision).
+
+### Changed
+
+- **Call-flow diagrams are drawn by [Pele](https://github.com/obsidianmd/pele) instead of Mermaid**, through
+  `@dszp/netsapiens-lib` 0.13.0. Labels no longer clip at the right edge, and the window loads about a quarter
+  of the script it did (250 KB compressed, down from 970 KB). Secondary lines in a box (such as a queue's ring
+  settings) now show at full size. If your Content Security Policy allowed Mermaid from jsDelivr, it allows
+  Pele too.
+- The call-flow window's iframe now allows downloads (`allow-downloads`), which the PNG and SVG buttons
+  need. It still never gets `allow-same-origin`.
+
+### Fixed
+
+- **Domains with more than 100 users, phone numbers or other records now show all of them.** NetSapiens
+  returns only the first 100 records of a list unless asked for more, so call-flow diagrams and entity
+  lists for larger domains were missing entries. Fixed in `@dszp/netsapiens-lib` 0.12.0, which this
+  release now requires.
+
 ## [0.8.5] — 2026-09-14
 
 ### Added
@@ -2404,6 +2448,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.9.0]: https://github.com/dszp/ns-portal-kit/compare/v0.8.5...v0.9.0
 [0.8.5]: https://github.com/dszp/ns-portal-kit/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/dszp/ns-portal-kit/compare/v0.7.1...v0.8.4
 [0.7.1]: https://github.com/dszp/ns-portal-kit/compare/v0.7.0...v0.7.1

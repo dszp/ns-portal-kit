@@ -223,4 +223,33 @@ export const SPK_BRIDGE = {
    *  viewed account's report as it now reads — or `{unavailable}`, which renders as a failed move and
    *  never as a silent no-op. */
   assignKey: 'assign',
+  /**
+   * iframe → parent: the Ringotel Integration page asks for the fleet table (`{op:'fleet', refresh?}`),
+   * for one domain's checklist (`{op:'domain', domain, refresh?}`), or for one enable step
+   * (`{op:'enable', domain, step, choice}`). The parent forwards them to `GET /kit/ringotel/fleet`,
+   * `GET /kit/ringotel/domain` and `POST /kit/ringotel/enable` — the page fetches nothing itself, being a
+   * sandboxed `srcdoc` with no `ns_t` and no origin of its own to send one from.
+   *
+   * One pair carrying three ops rather than three pairs, unlike the OneBill family: every reply here is
+   * the SAME document — a fleet answer redraws the table, and both a domain read and an enable step answer
+   * with that domain's checklist as it now reads. There is no shape a mis-tagged reply could render in the
+   * wrong place. Correlated by {@link idKey} all the same, because a refresh and an enable can be
+   * outstanding at once and the older answer must not overwrite the newer one.
+   *
+   * What the page may ask for is not what it is trusted with: the Worker re-reads the caller's own scope,
+   * the write rail and the live Ringotel tenant before any step, and the choice fields (package, sign-in
+   * mode, label) are checked against the resolved catalog rather than accepted as sent.
+   */
+  provisionRequest: 'provision',
+  /** parent → iframe: the reply to {@link provisionRequest}. */
+  provisionResponse: 'provision-result',
+  /**
+   * BOTH DIRECTIONS: the payload field. iframe → parent it is the request (`{op, domain?, step?,
+   * choice?, refresh?}`); parent → iframe it is `{fleet}`, `{checklist}`, or `{unavailable: '<why>'}`.
+   *
+   * ⚠️ `unavailable` obeys the same rule as {@link errorKey}: a failed read renders as a failed read and a
+   * refused write as a refusal, never as an empty fleet table — which would say "no domain is enabled for
+   * the app", a confident answer to a question that was never asked.
+   */
+  provisionKey: 'provision',
 } as const;

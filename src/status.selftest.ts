@@ -86,8 +86,9 @@ ok(envBadge('svc.example.com', 'dev') === 'DEV', 'CACHE_SCOPE=dev wins over a pr
 
   // EXACT, not a floor. `>= 18` against a registry of exactly 26 passes by coincidence and loosens
   // silently — deleting a registry entry left it green. Same reason EXPECTED_SUBSYSTEM_IDS below is a set
-  // and not a count: adding a feature should be a deliberate edit here.
-  ok(doc.features.length === 26, `every registry feature gets a card, and there are exactly 26 (got ${doc.features.length})`);
+  // and not a count: adding a feature should be a deliberate edit here. 28 with the Ringotel Integration
+  // page's view/write pair.
+  ok(doc.features.length === 28, `every registry feature gets a card, and there are exactly 28 (got ${doc.features.length})`);
   ok(doc.features.every((f) => f.name && f.description), 'cards carry a name and description');
 
   ok(byKey('me.devices').state === 'off', 'a feature gated `off` reports off');
@@ -110,6 +111,68 @@ ok(envBadge('svc.example.com', 'dev') === 'DEV', 'CACHE_SCOPE=dev wins over a pr
     'a write feature with an empty RINGOTEL_WRITE_DOMAINS is inert');
   ok(withKey.features.find((f) => f.key === 'ringotel.activate')!.missing.some((m) => m.setting === 'RINGOTEL_WRITE_DOMAINS'),
     'and it names the write rail');
+
+  // The Ringotel Integration pair is gated on MORE than the API key, and the `startsWith('ringotel.')`
+  // loop that hands out RINGOTEL_API_KEY cannot know it — which is exactly how both cards first reported
+  // `on` while the routes answered 404 and every enable was inert. Three envs, because the two keys stop
+  // being inert at different moments.
+  {
+    const SA = { principal: P('Super User', 'boss@example.com'), hostname: 'svc.example.com' };
+    const f = (doc2: ReturnType<typeof buildStatus>, k: string) => doc2.features.find((x) => x.key === k)!;
+
+    const keyOnly = buildStatus({ ...OK_ENV, RINGOTEL_API_KEY: 'x' }, SA);
+    ok(f(keyOnly, 'ringotel.provision.view').state === 'inert',
+      '[provision] an API key with no connection template leaves the page inert, not on');
+    ok(f(keyOnly, 'ringotel.provision.view').missing.some((m) => m.setting === 'RINGOTEL_CONNECTION_TEMPLATE'),
+      '[provision] and the card names RINGOTEL_CONNECTION_TEMPLATE');
+    ok(f(keyOnly, 'ringotel.provision.write').state === 'inert',
+      '[provision] the write key is inert too — there is no page to write from');
+
+    // The mirror of the case above: the template set and the key not. Both are prerequisites of the view
+    // key and each is listed on its own, so the card must name the KEY and say nothing about the template
+    // — a prereq case that answered with `provisionEnabled` (key AND template) reported the template as
+    // set-but-unsatisfied here, blaming the one the operator had got right.
+    const noKey = buildStatus({ ...OK_ENV, RINGOTEL_CONNECTION_TEMPLATE: 'Standard SIP' }, SA);
+    ok(f(noKey, 'ringotel.provision.view').state === 'inert',
+      '[provision] a connection template with no API key leaves the page inert');
+    ok(f(noKey, 'ringotel.provision.view').missing.some((m) => m.setting === 'RINGOTEL_API_KEY'),
+      '[provision] and the card names RINGOTEL_API_KEY, which is the one that is absent');
+    ok(!f(noKey, 'ringotel.provision.view').missing.some((m) => m.setting === 'RINGOTEL_CONNECTION_TEMPLATE')
+      && !f(noKey, 'ringotel.provision.view').notes.some((n) => n.includes('RINGOTEL_CONNECTION_TEMPLATE')),
+      '[provision] never the template, which is set — each prerequisite answers for its own setting');
+
+    const noRail = buildStatus({ ...OK_ENV, RINGOTEL_API_KEY: 'x', RINGOTEL_CONNECTION_TEMPLATE: 'Standard SIP' }, SA);
+    ok(f(noRail, 'ringotel.provision.view').state === 'on',
+      '[provision] with the template set the audit is on — reading needs no rail');
+    ok(f(noRail, 'ringotel.provision.write').state === 'inert',
+      '[provision] but with no RINGOTEL_PROVISION_DOMAINS every enable is inert');
+    ok(f(noRail, 'ringotel.provision.write').missing.some((m) => m.setting === 'RINGOTEL_PROVISION_DOMAINS'),
+      '[provision] and the card names the rail rather than reporting the feature on');
+
+    const armed = buildStatus({
+      ...OK_ENV, RINGOTEL_API_KEY: 'x', RINGOTEL_CONNECTION_TEMPLATE: 'Standard SIP',
+      RINGOTEL_PROVISION_DOMAINS: '*, !lab.example',
+    }, SA);
+    ok(f(armed, 'ringotel.provision.view').state === 'on' && f(armed, 'ringotel.provision.write').state === 'on',
+      '[provision] key + template + rail ⇒ both keys report on');
+
+    // The rail question is answered per SETTING, not by the five-setting resolver: with the rail set and
+    // RINGOTEL_DEFAULT_PACKAGE still blank, `resolveProvisionConfig` throws, and a card keyed off that
+    // would name the one setting the operator had already got right. That the page is then misconfigured
+    // is the probe's report to make, not this card's.
+    ok(!f(armed, 'ringotel.provision.write').missing.some((m) => m.setting === 'RINGOTEL_PROVISION_DOMAINS')
+      && !f(armed, 'ringotel.provision.write').notes.some((n) => n.includes('RINGOTEL_PROVISION_DOMAINS')),
+      '[provision] a rail that is set is never reported as missing or unmet because another setting is blank');
+
+    const badRail = buildStatus({
+      ...OK_ENV, RINGOTEL_API_KEY: 'x', RINGOTEL_CONNECTION_TEMPLATE: 'Standard SIP',
+      RINGOTEL_PROVISION_DOMAINS: '!lab.example',
+    }, SA);
+    ok(f(badRail, 'ringotel.provision.write').state === 'inert',
+      '[provision] a rail that will not parse is unmet, not satisfied');
+    ok(f(badRail, 'ringotel.provision.write').notes.some((n) => n.includes('RINGOTEL_PROVISION_DOMAINS')),
+      '[provision] and it is reported as set-but-unmet, never as missing — the operator did set it');
+  }
 
   ok(byKey('kit.status').viewerPasses === true, 'the viewer reading the page passes kit.status');
   ok(byKey('me.devices').viewerPasses === false, 'an off feature does not pass');
@@ -220,8 +283,9 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // when adding one; the drift guard in statusModel.selftest.ts is what proves the table matches
   // `interface Env`. 74 with PORTAL_HANDOFF_ORIGINS, the origin allow-list a `handoff` menu entry needs.
   // 75 with RINGOTEL_PREPOP_AUTO, the arming rail for the automatic directory reconcile. 76 with
-  // RINGOTEL_UNLISTED_USERS, which grades NetSapiens' *List in Directory* switch.
-  ok(SETTINGS.length === 76, `sanity: the descriptor table has exactly 76 rows (got ${SETTINGS.length})`);
+  // RINGOTEL_UNLISTED_USERS, which grades NetSapiens' *List in Directory* switch. 81 with the five
+  // `provision` settings the Ringotel Integration page reads.
+  ok(SETTINGS.length === 81, `sanity: the descriptor table has exactly 81 rows (got ${SETTINGS.length})`);
   // Every row is rendered now: there is one deployment shape, so no setting is inapplicable to it.
   ok(doc.settings.length === SETTINGS.length,
     `every row is rendered (${doc.settings.length} of ${SETTINGS.length})`);

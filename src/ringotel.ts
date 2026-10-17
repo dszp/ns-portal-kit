@@ -109,7 +109,10 @@ const DEFAULT_LABEL = 'Ringotel';
 // It is cheap insurance — the only cost is one extra fleet-wide re-dig — against a class of bug that is
 // otherwise silent and only shows up as "SSO users can't sign in right after a deploy".
 const INDEX_SHAPE_VERSION = 3; // v2: added ssoService · v3: added hidePassInEmail to the projected entry
-const CACHE_ORIGIN = 'https://ringotel-cache.internal';
+/** Cache-key origin for every entry this deployment writes. Exported so a sibling feature keying its
+ *  own entries (the provisioning fleet snapshot) lands in the SAME namespace rather than inventing a
+ *  second one that `CACHE_SCOPE` does not cover. */
+export const CACHE_ORIGIN = 'https://ringotel-cache.internal';
 /** Every key below is namespaced by `scopeOf(env)` — see `RingotelEnv.CACHE_SCOPE` for why. */
 const indexKey = (scope: string) => `${CACHE_ORIGIN}/${scope}/index-v${INDEX_SHAPE_VERSION}`;
 const INDEX_TTL = 3600; // 1h
@@ -159,7 +162,10 @@ export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise
 // It IS scoped, though, and for a reason the shape-version does not cover: unscoped, a dev refresh takes
 // the lock and suppresses a PROD refresh for the next minute.
 export const indexRefreshLockKey = (scope: string) => `${CACHE_ORIGIN}/${scope}/index-refresh-lock`;
-const INDEX_REFRESH_MIN_INTERVAL = 60; // s — an actual re-dig happens at most once per minute, per scope
+/** s — an actual re-dig happens at most once per minute, per scope. Exported so a sibling feature's own
+ *  refresh button (the provisioning fleet audit) is bounded by the SAME number rather than a second one
+ *  that can drift away from it. */
+export const INDEX_REFRESH_MIN_INTERVAL = 60;
 const orgUsersKey = (scope: string, orgid: string) => `${CACHE_ORIGIN}/${scope}/org/${orgid}/users`;
 // Exported for the same reason indexRefreshLockKey is: the selftests' in-memory Cache API stub has no
 // TTL expiry, so a scenario that CHANGES an org's params has to evict this entry by hand where production
@@ -304,11 +310,15 @@ async function cacheGetAged<T>(cache: Cache, key: string): Promise<Aged<T> | und
   return { value, age: Math.max(0, Math.floor((Date.now() - stamp) / 1000)) };
 }
 
-async function cacheGet<T>(cache: Cache, key: string): Promise<T | undefined> {
+/** Read a JSON value written by {@link cachePut}; `undefined` on a miss or an unreadable entry.
+ *  Exported for the provisioning fleet snapshot, which caches its own dig under a CACHE_ORIGIN key. */
+export async function cacheGet<T>(cache: Cache, key: string): Promise<T | undefined> {
   return (await cacheGetAged<T>(cache, key))?.value;
 }
 
-async function cachePut(cache: Cache, key: string, value: unknown, ttl: number): Promise<void> {
+/** Write a JSON value under `key` with a `max-age` and the age stamp {@link cacheGetAged} reads.
+ *  Exported alongside {@link cacheGet} for the same reason. */
+export async function cachePut(cache: Cache, key: string, value: unknown, ttl: number): Promise<void> {
   await cache.put(
     new Request(key),
     new Response(JSON.stringify(value), {
@@ -489,10 +499,11 @@ export async function resolveOrgForDomain(client: RingotelReadClient, cache: Cac
   return classifyOrgMatch(index, domain, overrides);
 }
 
-/** Construct the Ringotel read client from env (shared by enrichment + the status endpoints). */
-function makeClient(env: RingotelEnv): RingotelReadClient {
+/** Build a read client from env. Exported so the provision page and its probe share one construction. */
+export function makeReadClient(env: RingotelEnv): RingotelReadClient {
   return new RingotelReadClient({ token: env.RINGOTEL_API_KEY!, ...(env.RINGOTEL_BASE_URL ? { baseUrl: env.RINGOTEL_BASE_URL } : {}) });
 }
+const makeClient = makeReadClient;
 
 /** Construct the Ringotel WRITE client from env (the activation orchestration's mutation surface). */
 export function makeWriteClient(env: RingotelEnv): RingotelWriteClient {
@@ -504,6 +515,16 @@ export function makeWriteClient(env: RingotelEnv): RingotelWriteClient {
  *  being deleted was shared with dev and dia, either of which could immediately repopulate it. */
 export async function invalidateOrgUsers(cache: Cache, scope: string, orgid: string): Promise<void> {
   await cache.delete(new Request(orgUsersKey(scope, orgid)));
+}
+
+/** Evict THIS scope's org+branch index — but NOT its refresh lock — so the next `getDirectory` rebuilds.
+ *  `getDirectory(…, refresh=true)` is rate-limited by a 60 s lock and silently serves the cached entry
+ *  inside it — right after an org or connector is created that is the wrong answer, so a create fences
+ *  with this instead. The lock stays: deleting the index already forces the next plain read to rebuild,
+ *  and keeping the lock stops a writer amplifying into full directory digs. Scoped like every other key:
+ *  dev and prod never evict each other. */
+export async function invalidateDirectory(cache: Cache, scope: string): Promise<void> {
+  await cache.delete(new Request(indexKey(scope)));
 }
 
 /**

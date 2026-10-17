@@ -11,7 +11,8 @@
 export type SettingKind = 'secret' | 'config';
 export type SettingGroup =
   | 'core' | 'branding' | 'domains' | 'ringotel' | 'eligibility'
-  | 'appaccess' | 'menus' | 'injection' | 'events' | 'identity' | 'bindings' | 'onebill';
+  | 'appaccess' | 'menus' | 'injection' | 'events' | 'identity' | 'bindings' | 'onebill'
+  | 'provision';
 
 /** How consequential this setting is. Absent ⇒ `normal`. It orders rows within a group and drives visual
  *  weight: a flat list of 64 equals implies `NS_SERVER` and `RINGOTEL_LABEL_SHORT` matter the same amount,
@@ -43,13 +44,14 @@ export interface SettingDef {
  *  `interface Env` (so a reviewer can read the two side by side) — which is the right order for auditing
  *  the table and the wrong one for reading the page. */
 export const GROUP_ORDER: SettingGroup[] = [
-  'core', 'domains', 'injection', 'menus', 'ringotel', 'onebill', 'eligibility',
+  'core', 'domains', 'injection', 'menus', 'ringotel', 'provision', 'onebill', 'eligibility',
   'appaccess', 'events', 'identity', 'branding', 'bindings',
 ];
 
 export const GROUP_LABEL: Record<SettingGroup, string> = {
   core: 'Core', domains: 'Domain limits', injection: 'Portal injection',
-  menus: 'Portal menus', ringotel: 'App integration', onebill: 'OneBill', eligibility: 'Activation rules',
+  menus: 'Portal menus', ringotel: 'App integration', provision: 'Ringotel provisioning',
+  onebill: 'OneBill', eligibility: 'Activation rules',
   appaccess: 'Self-service app access', events: 'Change events', identity: 'Background service identity',
   branding: 'Branding', bindings: 'Worker bindings',
 };
@@ -60,6 +62,7 @@ export const GROUP_BLURB: Record<SettingGroup, string> = {
   injection: 'What gets served to the Manager Portal, and who may receive it.',
   menus: 'Adding and hiding entries in the portal\'s stock menus. Two settings can hide an Apps entry; setting both merges them.',
   ringotel: 'The softphone app integration. Everything below it is inert without an API key.',
+  provision: 'Enable a domain for the app and audit every organization against the connection template. Inert without RINGOTEL_API_KEY and RINGOTEL_CONNECTION_TEMPLATE.',
   onebill: 'The NS↔OneBill billing link report. Everything below it is inert without all four credentials.',
   eligibility: 'Which extensions are treated as real people when the app is activated.',
   appaccess: 'What a signed-in user is told about their own app access.',
@@ -391,6 +394,11 @@ export const PROBE_CATALOG: ProbeCatalogEntry[] = [
     cost: 'One OAuth grant plus one one-row subscriber read.',
   },
   {
+    id: 'provision', name: 'Ringotel provisioning catalog',
+    what: 'Reads the connection templates, packages and regions once and checks the configured names resolve. Skipped when provisioning is not configured.',
+    cost: 'Three small catalog reads.',
+  },
+  {
     id: 'documo', name: 'Documo',
     what: 'Nothing to check — not wired into this Worker.',
     cost: 'No network call — not integrated.',
@@ -717,6 +725,37 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'No overrides — the NS domain is matched to the Ringotel branch address automatically.',
     affects: ['ringotel.orgStatus'] },
 
+  // ── provision: the Ringotel Integration page — org + connection creation (src/ringotelProvision.ts) ─
+  { name: 'RINGOTEL_PROVISION_DOMAINS', group: 'provision', kind: 'config',
+    importance: 'critical', gatedBy: 'RINGOTEL_API_KEY', example: '*, !lab.example',
+    what: 'The write safety rail: which NetSapiens domains may be enabled for the app from this deployment. `*` for all, a CSV list for some, or `*` with `!domain` exclusions.',
+    whenUnset: 'Writes are inert — no domain can be enabled — and the audit still renders for every domain the caller can read.',
+    affects: ['ringotel.provision.view', 'ringotel.provision.write'] },
+
+  { name: 'RINGOTEL_CONNECTION_TEMPLATE', group: 'provision', kind: 'config',
+    importance: 'critical', gatedBy: 'RINGOTEL_API_KEY', example: 'Standard SIP',
+    what: 'The name of the connection template every connection is created from and audited against — it must match exactly one template in the tenant. With the API key, its presence turns the page on.',
+    whenUnset: 'The page is inert: no provisioning reads, the Management-menu entry is absent, its routes answer 404.',
+    affects: ['ringotel.provision.view', 'ringotel.provision.write'] },
+
+  { name: 'RINGOTEL_SSO_SERVICE_ID', group: 'provision', kind: 'config',
+    importance: 'minor', gatedBy: 'RINGOTEL_API_KEY', example: '12345/netsapiens_sso',
+    what: 'The whole SSO service id an organization\u2019s `params.sso` carries — not the same value as RINGOTEL_SSO_SERVICE, which holds only the name half of it for the app-access surface.',
+    whenUnset: 'This deployment does no Ringotel SSO: the sign-in-mode step is not offered, and an organization without SSO is not reported as a finding.',
+    affects: ['ringotel.provision.view', 'ringotel.provision.write'] },
+
+  { name: 'RINGOTEL_DEFAULT_PACKAGE', group: 'provision', kind: 'config',
+    importance: 'minor', gatedBy: 'RINGOTEL_API_KEY', example: 'Essentials',
+    what: 'The name of the subscription package a new organization is created with, resolved against the tenant\u2019s package list.',
+    whenUnset: 'The page is misconfigured: it answers 503 and the provisioning check fails, naming this setting.',
+    affects: ['ringotel.provision.view', 'ringotel.provision.write'] },
+
+  { name: 'RINGOTEL_REGION', group: 'provision', kind: 'config',
+    importance: 'minor', gatedBy: 'RINGOTEL_API_KEY', example: 'US East',
+    what: 'The name of the region a new organization is created in, resolved against the tenant\u2019s region list.',
+    whenUnset: 'The page is misconfigured: it answers 503 and the provisioning check fails, naming this setting.',
+    affects: ['ringotel.provision.view', 'ringotel.provision.write'] },
+
   // ── onebill: NS↔OneBill link report — fully gated on all four credentials (src/onebill.ts) ────────
   { name: 'ONEBILL_TENANT_ID', group: 'onebill', kind: 'config',
     importance: 'critical',
@@ -829,7 +868,7 @@ export const SETTINGS: SettingDef[] = [
 
   { name: 'RINGOTEL_WRITE_DOMAINS', group: 'eligibility', kind: 'config',
     importance: 'critical', gatedBy: 'RINGOTEL_API_KEY', example: 'acme.12345.service',
-    what: 'The write rail: the only domains in which activate / deactivate / password-reset may run. `*` means every domain the token permits. Unlike the rails narrowed against it (RINGOTEL_PREPOP_AUTO, NS_EVENTS_DOMAINS) it takes NO `!name` exclusions and refuses one with a startup error: "everything except X" as the OUTER bound is a fail-open default, since a domain added to the fleet tomorrow would land inside it.',
+    what: 'The write rail: the only domains in which activate / deactivate / password-reset may run. `*` means every domain the token permits. Unlike the rails narrowed against it (RINGOTEL_PREPOP_AUTO, NS_EVENTS_DOMAINS) it takes no `!name` exclusions and refuses one with a startup error: "everything except X" as the outer bound is a fail-open default, since a domain added to the fleet tomorrow would land inside it.',
     whenUnset: 'Every write is refused — empty is fail-closed, not unrestricted.',
     affects: ['ringotel.activate', 'ringotel.resetPassword', 'ringotel.prepop', 'me.resetPassword', 'events'] },
 

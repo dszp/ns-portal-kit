@@ -69,6 +69,15 @@
     // See CONFIG.md#RINGOTEL_PREPOP_AUTO. Needs the same service identity as NS_EVENTS above (NS_API_KEY,
     // or NS_ADMIN_USER + NS_ADMIN_PASS) even with NS_EVENTS off — the cron door reads NetSapiens with it too.
     //   "RINGOTEL_PREPOP_AUTO": "acme.example.com",  // CSV, or "*" for everything the write rail allows
+    //
+    // ── OPTIONAL: Ringotel provisioning — audit + enable a domain (gated by RINGOTEL_API_KEY) ──────
+    // Also needs RINGOTEL_CONNECTION_TEMPLATE below; without both, the Management-menu entry is absent
+    // and its routes answer 404. See CONFIG.md#group-provision.
+    //   "RINGOTEL_PROVISION_DOMAINS": "*, !lab.example.com",  // write rail: domains this may enable
+    //   "RINGOTEL_CONNECTION_TEMPLATE": "Standard",           // template every connection is built from
+    //   "RINGOTEL_SSO_SERVICE_ID": "12345/netsapiens_sso",    // full SSO service id, if you use Ringotel SSO
+    //   "RINGOTEL_DEFAULT_PACKAGE": "Essentials",              // subscription package a new organization gets
+    //   "RINGOTEL_REGION": "US East",                          // region a new organization is created in
 
     // REQUIRED for delegated/portal auth: the Manager Portal host that issues your ns_t.
     // There is deliberately no default — a default issuer would mean accepting tokens minted by a

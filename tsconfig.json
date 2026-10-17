@@ -2,6 +2,9 @@
   // Type-checks the DEPLOYABLE Worker surface only (`pnpm typecheck`). The Node-using files —
   // cli.ts and *.selftest.ts — are excluded (they'd need @types/node); wrangler/esbuild bundles
   // without type-checking, so this is the gate that catches type errors in shipped Worker code.
+  // A module reachable only through another entry point needs no listing, but one nothing imports
+  // YET does: `include` is a pattern list, so a not-yet-written file here is silently skipped
+  // rather than an error, and listing it means the gate covers it the moment it lands.
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -16,5 +19,5 @@
     "noUncheckedIndexedAccess": false,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/worker.ts", "src/access.ts", "src/viewerApp.ts", "src/ringotel.ts", "src/nsDevices.ts", "src/status.ts", "src/statusPage.ts"]
+  "include": ["src/worker.ts", "src/access.ts", "src/viewerApp.ts", "src/ringotel.ts", "src/nsDevices.ts", "src/status.ts", "src/statusPage.ts", "src/ringotelProvision.ts", "src/ringotelProvisionApply.ts", "src/ringotelProvisionPage.ts"]
 }

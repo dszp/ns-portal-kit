@@ -713,7 +713,8 @@ x.style.cssText='border:0;background:transparent;font-size:18px;cursor:pointer;l
 x.addEventListener('click',close);
 h.appendChild(s);h.appendChild(x);
 var f=document.createElement('iframe');f.style.cssText='flex:1;border:0;width:100%';// allow-modals: the OneBill page confirms every write with confirm(); without it a sandboxed confirm() returns false SILENTLY (David, 2026-09-03).
-f.sandbox='allow-scripts allow-popups allow-modals';f.title=t;f.srcdoc=src;
+// allow-downloads: the call-flow gallery's PNG button saves a file; without it the browser drops the download silently.
+f.sandbox='allow-scripts allow-popups allow-modals allow-downloads';f.title=t;f.srcdoc=src;
 f.addEventListener('load',function(){try{f.contentDocument.addEventListener('keydown',key)}catch(e){}});
 b.appendChild(h);b.appendChild(f);o.appendChild(b);
 o.addEventListener('click',function(e){if(e.target===o)close()});
@@ -1937,11 +1938,17 @@ export const SPK_FEATURE_KEYS = [
   // gate for a handful of lines. The flag is carried now — `onebill.view` is a WIDER audience than the
   // console's, so the bundle already ships to them — and the entry that reads it lands with the page.
   { flag: 'onebill', key: 'onebill.view' },
+  // The Ringotel Integration page's Management entry, on the same trade as `onebill` above: the finders
+  // and `box()` are already in this bundle, so a separate delivery path for one menu item would be a
+  // route, a cache tier and a gate for a handful of lines. The flag is carried from here; the entry that
+  // reads it lands with the page. `ringotel.provision.write` deliberately has NO flag — it gates a route,
+  // and the page is drawn from the answer the server already gave (see CONSOLE_KEYS_WITHOUT_FLAG).
+  { flag: 'provision', key: 'ringotel.provision.view' },
 ] as const;
 export const spkFeaturePolicyKeys = (): string[] => SPK_FEATURE_KEYS.map((f) => f.key);
 
 const SPK_BODY = String.raw`
-if(!_AF.status&&!_AF.capture&&!_AF.onebill)return;
+if(!_AF.status&&!_AF.capture&&!_AF.onebill&&!_AF.provision)return;
 // ── the captured stock menus, per role ──────────────────────────────────────────────────────────────
 // WHY THIS EXISTS: the editor draws each menu the way the audience you pick would see it, and it gets
 // the RULES right because the Worker resolves them. The stock entries it starts from are whatever was on
@@ -2177,6 +2184,21 @@ jpost('/kit/onebill/assign?viewing='+encodeURIComponent(String(gq.viewing||'')),
 .then(function(r){grr({report:(r&&r.report)||null})})
 .catch(function(e){grr({unavailable:'Nothing was moved: '+owhy(e)+'.'})});
 return}
+// The Ringotel Integration page. Same trade as OneBill above: no ns_t of its own, so every read and
+// every write it does comes through here. Three ops on one message pair, unlike the OneBill family --
+// SPK_BRIDGE only pins the ENVELOPE (mis-tagging is what idKey/correlation prevents); the page's own
+// deliver() (ringotelProvisionPage.ts) decides the PAYLOAD shape per op, and that is pinned by the
+// selftest instead: fleet under 'fleet', a domain read under 'checklist' -- the routes return those
+// documents BARE, so each branch wraps its own before replying rather than forwarding the raw JSON.
+if(d.${SPK_BRIDGE.tag}==='${SPK_BRIDGE.provisionRequest}'){
+var pq=d.${SPK_BRIDGE.provisionKey}||{};var pid=d.${SPK_BRIDGE.idKey};
+var prr=function(v){try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.provisionResponse}',${SPK_BRIDGE.idKey}:pid,${SPK_BRIDGE.provisionKey}:v},'*')}catch(x){}};
+if(pq.op==='domain'){jget('/kit/ringotel/domain?domain='+encodeURIComponent(pq.domain||'')).then(function(r){prr({checklist:r})}).catch(function(e){prr({unavailable:'Could not load this domain from this deployment: '+owhy(e)+'.'})});return}
+// enable's route already answers {outcomes, stoppedAt?, report} -- the page reads v.report, so this one
+// forwards unwrapped, unlike its two siblings.
+if(pq.op==='enable'){jpost('/kit/ringotel/enable',{domain:pq.domain,step:pq.step,choice:pq.choice||{}}).then(function(r){prr(r)}).catch(function(e){prr({unavailable:'The step did not run: '+owhy(e)+'.'})});return}
+jget('/kit/ringotel/fleet'+(pq.refresh?'?refresh=1':'')).then(function(r){prr({fleet:r})}).catch(function(e){prr({unavailable:'Could not load the fleet from this deployment: '+owhy(e)+'.'})});
+return}
 if(d.${SPK_BRIDGE.tag}!=='${SPK_BRIDGE.request}')return;
 jget('/kit/status?format=json&probe=1').then(function(r){
 try{_spkFrame.contentWindow.postMessage({${SPK_BRIDGE.tag}:'${SPK_BRIDGE.response}',${SPK_BRIDGE.dataKey}:(r&&r.probes)||[]},'*')}catch(x){}
@@ -2205,6 +2227,20 @@ fetch(u,{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw n
 .then(function(html){box('OneBill Integration',html,'');
 var o=document.getElementById('_svx');_spkFrame=o&&o.querySelector('iframe')})
 .catch(function(){alert('The OneBill page is unavailable right now.')})}
+// The Ringotel Integration page, opened the same way and into the same single frame slot: box() removes
+// any existing #_svx, so only one of these pages can be on screen at a time and _spkFrame must point at
+// whichever it is. Dropping the reference BEFORE the fetch keeps the handler from answering a detached
+// frame.
+function provisionOpen(){
+var j=tok();if(!j)return;
+_spkFrame=null;
+// The domain the portal is already inside, if any — the route re-validates it against this caller's
+// own visible domain set (see worker.ts), so appending it here is an offer, not a grant.
+var d=dom(),u=B+'/kit/ringotel'+(d?'?domain='+encodeURIComponent(d):'');
+fetch(u,{headers:{Authorization:'Bearer '+j}}).then(function(x){if(!x.ok)throw new Error(x.status);return x.text()})
+.then(function(html){box(_KC.label+' Integration',html,'');
+var o=document.getElementById('_svx');_spkFrame=o&&o.querySelector('iframe')})
+.catch(function(){alert('The '+_KC.label+' Integration page is unavailable right now.')})}
 /**
  * The masquerade bar. masq() already knew both handles it has — a mask-bar class, or the End
  * Masquerade anchor — because the app-status features had to suppress themselves under a mask. Reusing
@@ -2320,6 +2356,9 @@ var CAP=!_AF.status&&_AF.capture;
 // Never inside a mask. The report names every domain the CALLER can see, and a masked session is not the
 // caller -- offering the page there invites reading it as the masked user's own.
 var OB=!!_AF.onebill&&!masq();
+// Same rule as OB, one key over: the fleet table names every domain the CALLER can see, and a masked
+// session is not the caller.
+var RP=!!_AF.provision&&!masq();
 // ⚠️ THE CAPTURE ENTRY GOES TO THE ACCOUNT MENU, NOT MANAGEMENT-WITH-A-FALLBACK. The console prefers
 // Management because that is where an operator tool belongs for an operator. Capture only ever appears
 // while masqueraded as someone lower, and those users have no Management menu — so the preference would
@@ -2330,9 +2369,9 @@ var OB=!!_AF.onebill&&!masq();
 // which is a different key on a different surface. Same for the menu CHOICE below: capture prefers the
 // account menu because a masked user has no Management menu, and OneBill prefers Management because an
 // operator tool belongs there. With both live it is Management-first, which is the OneBill rule.
-if(CAP&&!capOn()&&!OB)return;
-if(!_AF.status&&!CAP&&!OB)return;
-var ul=(CAP&&!OB)?acctUl():mgmtUl(),fallback=false;
+if(CAP&&!capOn()&&!OB&&!RP)return;
+if(!_AF.status&&!CAP&&!OB&&!RP)return;
+var ul=(CAP&&!OB&&!RP)?acctUl():mgmtUl(),fallback=false;
 if(!ul){ul=acctUl();fallback=!!ul}
 if(!ul||ul.dataset.svxspk)return;
 // ⚠️ "CAN the bar take it", not "HAS it taken it". Asking whether the button is already there is a
@@ -2340,7 +2379,7 @@ if(!ul||ul.dataset.svxspk)return;
 // the bar then added the button, and both showed (David's screenshot). Asking whether the bar EXISTS is
 // order-independent, which matters because both run again on every mutation and the interleaving is not
 // ours to control.
-if(CAP&&!OB&&masqEnd())return;
+if(CAP&&!OB&&!RP&&masqEnd())return;
 ul.dataset.svxspk='1';
 // ONE BUILDER FOR BOTH ENTRIES, so they cannot end up styled, marked or positioned differently. Bold,
 // because these are operator tools sitting among ordinary per-customer entries and should not read as
@@ -2363,6 +2402,9 @@ ul.insertBefore(li,ul.firstChild);
 return a};
 // FIRST, so the console lands on top of it (David, 2026-09-02): prepend order is last-wins, and the
 // operator's own console stays the first entry. For a caller holding only onebill.view this is the sole entry.
+// RP is coded immediately before OB, on the same prepend rule: with both live the screen reads OneBill,
+// Ringotel, console.
+if(RP)ent(_KC.label+' Integration','Enable a domain for the app and audit every organization against the connection template.',provisionOpen)
 if(OB)ent('OneBill Integration','Which OneBill billing account each domain and site is linked to.',onebillOpen)
 // SECOND, on top. The console, or -- masked in, where the console's own gate refuses the effective identity -- the
 // capture entry. Never both: those two gates are mutually exclusive in practice. Naming the role in the

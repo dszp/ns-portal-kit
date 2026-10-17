@@ -13,6 +13,22 @@ const ok = (c: boolean, m: string) => {
   console.log(`${c ? '✓' : '✗ FAIL'} ${m}`);
 };
 
+/** In-memory Cache API stub shared by tests that need match/put/delete — no TTL expiry, so
+ *  assertions drive the `refresh` flag or call `delete` directly rather than waiting on a clock. */
+class MemoryCache {
+  store = new Map<string, Response>();
+  async match(req: Request): Promise<Response | undefined> {
+    const r = this.store.get(req.url);
+    return r ? r.clone() : undefined;
+  }
+  async put(req: Request, res: Response): Promise<void> {
+    this.store.set(req.url, res.clone());
+  }
+  async delete(req: Request): Promise<boolean> {
+    return this.store.delete(req.url);
+  }
+}
+
 // ── the gate ──────────────────────────────────────────────────────────────────
 ok(ringotelEnabled({}) === false, 'gate: no key → disabled');
 ok(ringotelEnabled({ RINGOTEL_API_KEY: '' }) === false, 'gate: empty key → disabled');
@@ -617,6 +633,24 @@ ok(Object.keys(em).length === 2, 'enabledOrgs: only the two singly-matched domai
   const m = usersStatusMap(sameConn, branches, 'r');
   ok(m['100']?.connectionConflict !== true, 'status: two records on ONE connection are a duplicate, NOT a connection conflict');
   ok(m['100']?.health.flags.includes('duplicate'), 'status: ...and the pre-existing duplicate flag still reports them');
+}
+
+// ── invalidateDirectory: the "after" fence for org/branch creates ──────────────────────────────
+{
+  const { getDirectory, invalidateDirectory, makeReadClient } = await import('./ringotel.js');
+  let builds = 0;
+  const client = { getOrganizations: async () => { builds++; return [{ id: 'O1', domain: 'acme' }]; }, getBranches: async () => [{ id: 'B1', address: 'acme.12345.service' }] } as any;
+  const cache = new MemoryCache() as unknown as Cache;
+  await getDirectory(client, cache, 'test-inv');
+  await getDirectory(client, cache, 'test-inv');
+  ok(builds === 1, '[inv] second read is served from the index cache');
+  await getDirectory(client, cache, 'test-inv', true);
+  await getDirectory(client, cache, 'test-inv', true);
+  ok(builds === 2, '[inv] refresh inside the 60 s lock is coalesced (the stale read this fence exists to bypass)');
+  await invalidateDirectory(cache, 'test-inv');
+  await getDirectory(client, cache, 'test-inv');
+  ok(builds === 3, '[inv] invalidateDirectory forces the next PLAIN read to rebuild even inside the lock');
+  ok(typeof makeReadClient === 'function', '[inv] makeReadClient is exported');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -184,7 +184,7 @@ ok(SETTINGS.filter((s) => s.group === 'bindings').every((s) => s.kind === 'confi
   'and a binding is never marked secret — it has no value to withhold');
 
 // The probe catalog: one row per live check, and the Checks tab renders the not-run state from it.
-ok(PROBE_CATALOG.length === 7, `the probe catalog has exactly 7 checks (got ${PROBE_CATALOG.length})`);
+ok(PROBE_CATALOG.length === 8, `the probe catalog has exactly 8 checks (got ${PROBE_CATALOG.length})`);
 ok(new Set(PROBE_CATALOG.map((p) => p.id)).size === PROBE_CATALOG.length, 'with no duplicate ids');
 ok(PROBE_CATALOG.every((p) => p.name.trim() && p.what.trim() && p.cost.trim()), 'each carrying a name, a what and a cost');
 

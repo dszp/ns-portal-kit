@@ -399,6 +399,15 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
   },
   { key: 'onebill.view', name: 'OneBill links', description: 'See the OneBill entry in the Management menu and read which OneBill account each NetSapiens domain and site is linked to.', default: 'reseller', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'], usersBackstop: 'requireFleetRead (worker.ts) \u2014 the page names every domain, so a domain-locked account admitted by name is still refused at the route' },
   { key: 'onebill.write', name: 'OneBill links \u2014 write', description: 'Link, relink or remove the NetSapiens domain and site recorded on an OneBill account. Requires onebill.view.', default: 'superadmin', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'], usersBackstop: 'requireFleetRead (worker.ts), and the route requires onebill.view too' },
+
+  // ── The Ringotel Integration page (2026-09-14) ───────────────────────────────────────────────────
+  // Split a rung apart for the same reason the OneBill pair is: reading whether a domain is enabled for
+  // the app, and how its organization compares with the standard, is reseller work; creating the
+  // organization and connection that enable it is not. Floored at `reseller` because the page names every
+  // domain in the fleet — every scope below it is domain-locked by resolveAuth, so there is no honest way
+  // to draw this page for one.
+  { key: 'ringotel.provision.view', name: 'Ringotel Integration', description: 'See the Ringotel Integration entry in the Management menu and read, for every domain, whether it is enabled for the app and how its organization and connection compare with the configured standard.', default: 'reseller', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'], usersBackstop: 'requireFleetRead (worker.ts) \u2014 the page names every domain, so a domain-locked account admitted by name is still refused at the route' },
+  { key: 'ringotel.provision.write', name: 'Ringotel Integration \u2014 enable', description: 'Create the Ringotel organization and connection for a domain, set its package and sign-in mode, and refresh the org index. Requires ringotel.provision.view.', default: 'superadmin', deliveredBy: 'console', allowedLevels: ['off', 'superadmin', 'super_user', 'reseller'], usersBackstop: 'requireFleetRead (worker.ts), and the route requires ringotel.provision.view too' },
 ];
 
 /** The registry's policy keys, in order (drives `_AF` + the default policy set). */

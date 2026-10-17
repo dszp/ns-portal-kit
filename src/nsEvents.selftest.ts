@@ -421,10 +421,81 @@ const realEvent = {
 {
   const d = decodeEventBatch([{ firstname: 'Nobody' }, null, 'string', 42, []], DOM, 40);
   ok(d.users.length === 0 && d.unidentified === 5, 'unidentifiable and non-object entries are counted, not crashed on');
+  ok(d.unidentifiedShapes.length === 1 && d.unidentifiedShapes[0] === 'firstname:word6', 'only the one genuine object contributes a shape; the 4 non-object entries add none');
 }
 {
   const d = decodeEventBatch([{ user: 'a/../b', domain: DOM }], DOM, 40);
   ok(d.users.length === 0 && d.unidentified === 1, 'an extension with path characters is refused');
+}
+// ── the DELETE record: {domain, remove, user} (prod 2026-09-15) ────────────────────────────────────
+{
+  const d = decodeEventBatch([{ domain: DOM, remove: 'yes', user: `1091@${DOM}` }], DOM, 40);
+  ok(d.users.length === 1 && d.users[0]!.ext === '1091' && d.unidentified === 0, 'a delete record whose user is <ext>@<domain> identifies the extension');
+}
+{
+  const d = decodeEventBatch([{ domain: DOM, remove: 'yes', user: '1091@other.example.com' }], DOM, 40);
+  ok(d.users.length === 0 && d.domainMismatch === 1 && d.unidentified === 0, 'a login-form user naming another domain is a domain mismatch, not an unidentified event');
+}
+{
+  const d = decodeEventBatch([{ domain: DOM, remove: 'yes', user: { user: '1092', domain: DOM } }], DOM, 40);
+  ok(d.users.length === 1 && d.users[0]!.ext === '1092', 'a nested user object yields its extension');
+  const e = decodeEventBatch([{ domain: DOM, remove: 'yes', user: { subscriber_login: `1093@${DOM}` } }], DOM, 40);
+  ok(e.users.length === 1 && e.users[0]!.ext === '1093', 'a nested user object with only subscriber_login yields its extension');
+}
+{
+  const d = decodeEventBatch([{ domain: DOM, remove: 'yes', user: { uid: 'x' } }], DOM, 40);
+  ok(d.unidentified === 1 && d.unidentifiedShapes[0] === 'domain:word16,remove:word3,user.{uid:word1}', 'an unidentified nested user is shaped one level down, key names only');
+  const e = decodeEventBatch([{ domain: DOM, remove: 'yes', user: ['1091'] }], DOM, 40);
+  ok(e.unidentified === 1 && e.unidentifiedShapes[0] === 'domain:word16,remove:word3,user:arr1', 'an array user is neither accepted nor expanded');
+}
+{
+  const d = decodeEventBatch([{ domain: DOM, remove: 'yes', user: '1044 (x)' }], DOM, 40);
+  ok(d.unidentifiedShapes[0] === 'domain:word16,remove:word3,user:text8/dddd_xax', 'a text value is shown as a character-class mask, never its characters');
+}
+// ── unidentifiedShapes: key-names-only diagnostic for a shapeless payload, PII-safe ───────────────────
+{
+  const d = decodeEventBatch([{ domain: DOM, uid: 'x', subscriber_name: 'y' }], DOM, 40);
+  ok(d.unidentified === 1 && d.unidentifiedShapes.length === 1, 'a domain-only event with no identifying key is unidentified and shaped');
+  ok(d.unidentifiedShapes[0] === 'domain:word16,subscriber_name:word1,uid:word1', 'the shape is the sorted top-level key NAMES plus a value CLASS, never a value');
+  for (const s of d.unidentifiedShapes) {
+    ok(!s.includes('x') && !s.includes('y') && !s.includes(DOM), 'no VALUE (uid "x", subscriber_name "y", or the domain string) leaks into the shape');
+  }
+}
+{
+  const d = decodeEventBatch([{ domain: DOM, data: { login: 'a@b' } }], DOM, 40);
+  ok(d.unidentified === 1 && d.unidentifiedShapes.length === 1 && d.unidentifiedShapes[0] === 'data.{login:login3},domain:word16',
+    'a nested data/subscriber/object value expands one level as "data.{a,b,c}" instead of the bare key');
+  ok(!d.unidentifiedShapes[0]!.includes('a@b'), 'the nested VALUE never leaks, only its key name');
+}
+{
+  const d = decodeEventBatch([realEvent], DOM, 40);
+  ok(d.unidentifiedShapes.length === 0, 'an identified event contributes no shape');
+}
+{
+  // 3 distinct unidentified shapes, one repeated 3x — dedup keeps 3, not 5.
+  const batch = [
+    { a1: 1 },
+    { a1: 1 },
+    { a1: 1 },
+    { b2: 1 },
+    { c3: 1 },
+  ];
+  const d = decodeEventBatch(batch, DOM, 40);
+  ok(d.unidentified === 5 && d.unidentifiedShapes.length === 3, 'distinct unidentified shapes are de-duplicated');
+}
+{
+  // 7 events, each with a unique key ⇒ 7 distinct shapes, capped at 5 per batch.
+  const batch = Array.from({ length: 7 }, (_, i) => ({ [`k${i}`]: 1 }));
+  const d = decodeEventBatch(batch, DOM, 40);
+  ok(d.unidentified === 7 && d.unidentifiedShapes.length === 5, 'unidentifiedShapes is capped at 5 distinct shapes per batch');
+}
+{
+  // A single event with 45 keys ⇒ the shape is capped at 40 key names.
+  const many: Record<string, unknown> = {};
+  for (let i = 0; i < 45; i++) many[`k${String(i).padStart(2, '0')}`] = i;
+  const d = decodeEventBatch([many], DOM, 40);
+  ok(d.unidentified === 1 && d.unidentifiedShapes.length === 1, 'the oversized-key event is still one shape');
+  ok(d.unidentifiedShapes[0]!.split(',').length === 40, 'the shape is capped at 40 keys per event');
 }
 // ── extension grammar admits no pure dot-segment (fix-wave S1) ────────────────
 // `encodeURIComponent` leaves `.`/`..` untouched, but `NsClient.get` builds the request with `new URL(...)`,

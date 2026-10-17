@@ -77,6 +77,13 @@ let rtOrgs: any[] = [];
 let rtBranches: any[] = [];
 let rtUsers: any[] = [];
 let rtRpc: Array<{ method: string; params: any }> = []; // captured Ringotel RPC bodies (write-route asserts)
+// The three ACCOUNT-level catalogs the provisioning page resolves its config against, and the counter
+// behind the ids a create hands back. Empty unless the /kit/ringotel block below fills them — every other
+// scenario here reads no catalog at all, and an empty one is the honest answer for them.
+let rtTemplates: any[] = [];
+let rtPackages: any[] = [];
+let rtRegions: any[] = [];
+let rtSeq = 0;
 let nsDevices: any[] = []; // NS user devices (write-route tests)
 let nsDevicesFail = false; // when set, the devices GET returns non-2xx (no-ns-device: read-failure case)
 let nsUserRec: any = null; // NS single-user record (eligibility; write-route tests)
@@ -209,6 +216,15 @@ const nf = () => new Response('[]', { status: 404 });
       : method === 'getBranches' ? rtBranches.filter((b: any) => b.orgid === params?.orgid)
       : method === 'getUsers' ? rtUsers
       : method === 'createUser' ? { id: 'NEWRT', ...params }
+      : method === 'getTemplates' ? rtTemplates
+      : method === 'getPackages' ? rtPackages
+      : method === 'getRegions' ? rtRegions
+      // The three provisioning writes PERSIST into the same arrays the reads are served from. A stub that
+      // accepted a create and forgot it would make every idempotence assertion below vacuous — the second
+      // `step:'all'` would create a second organization and still look like a pass.
+      : method === 'createOrganization' ? (() => { const o = { id: `RTORG${++rtSeq}`, ...params }; rtOrgs.push(o); return o; })()
+      : method === 'createBranch' ? (() => { const b = { id: `RTBR${++rtSeq}`, ...params }; rtBranches.push(b); return b; })()
+      : method === 'updateOrganization' ? (() => { const o = rtOrgs.find((x: any) => String(x.id) === String(params?.id)); if (o) Object.assign(o, params); return o ?? { ok: true }; })()
       : ['updateUser', 'deactivateUser', 'deleteUser', 'resetUserPassword', 'setUserStatus'].includes(method) ? { ok: true }
       : [];
     return new Response(JSON.stringify({ result }), { status: 200 });
@@ -404,16 +420,14 @@ const ok = (c: boolean, m: string) => {
   const rf = await scall(`/flow?domain=${domain}&kind=${kind}&ref=${ref}`);
   ok(rf.status === 200 && JSON.stringify(stripMmd(await rf.json())) === JSON.stringify(expected), '[service] /flow?domain → graph matches');
 
-  // /flow?format=html (the gallery the injected modal iframe loads) must pin Mermaid with SRI, so a
+  // /flow?format=html (the gallery the injected modal iframe loads) must pin its renderer with SRI, so a
   // compromised CDN can't substitute code (finding 2 §2b). Regression guard on the pinned tag.
   const rhtml = await scall(`/flow?domain=${domain}&kind=${kind}&ref=${ref}&format=html`);
   const htmlBody = await rhtml.text();
   ok(
     rhtml.status === 200 &&
-      htmlBody.includes('cdn.jsdelivr.net/npm/mermaid@11.16.0/') &&
-      /integrity="sha384-[A-Za-z0-9+/=]+"/.test(htmlBody) &&
-      htmlBody.includes('crossorigin="anonymous"'),
-    '[service] /flow?format=html → Mermaid pinned (11.16.0) + SRI + crossorigin',
+      /<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/pele@\d+\.\d+\.\d+\/dist\/pele\.global\.js" integrity="sha384-[A-Za-z0-9+/=]+" crossorigin="anonymous">/.test(htmlBody),
+    '[service] /flow?format=html → renderer (Pele) pinned to an exact version + SRI + crossorigin',
   );
 
   // ================= Ringotel enrichment (optional, gated) =================
@@ -3277,6 +3291,634 @@ const ok = (c: boolean, m: string) => {
       } finally {
         obSubs = savedSubs2;
       }
+    }
+  }
+
+
+  // ================= /kit/ringotel — the Ringotel Integration page, its two reads and the one write ===
+  // FOUR routes, one gate chain, and this block is the whole enforcement surface: the rail, both feature
+  // keys, the fleet-read backstop, domain visibility and fresh auth are checked nowhere else, and these
+  // routes are the only caller of the provisioning write module. Every case below walks one gate.
+  {
+    const rpEnv = {
+      NS_SERVER: 'mock.local', PORTAL_MODE: '1', NS_PORTAL_ISS: ISS,
+      ALLOWED_ORIGINS: 'https://portal.example.com',
+      PORTAL_SUPERADMINS: 'boss@mock.local', PORTAL_HANDOFF_URL: '',
+      CACHE_SCOPE: 'rptest',
+      RINGOTEL_API_KEY: 'rt-key-0000',
+      RINGOTEL_CONNECTION_TEMPLATE: 'Standard',
+      RINGOTEL_DEFAULT_PACKAGE: 'Business',
+      RINGOTEL_REGION: 'US East',
+      RINGOTEL_SSO_SERVICE_ID: 'sso-0000-demo',
+      // The provisioning rail admits the fixture domain; the WRITE rail deliberately does NOT — it is a
+      // real, non-empty list that simply names somewhere else, which is what makes the `reconcile`
+      // refusal below about THIS domain rather than about an empty setting refusing everything.
+      RINGOTEL_PROVISION_DOMAINS: domain,
+      RINGOTEL_WRITE_DOMAINS: 'other.example',
+    };
+    // The same deployment with the template unset — `provisionEnabled` reads false and the routes are gone.
+    const { RINGOTEL_CONNECTION_TEMPLATE: _tpl, ...rpOff } = rpEnv;
+
+    const rpBoss = mkTok({ user_scope: 'Super User', sub: 'boss@mock.local', user: 'boss', domain: 'mock.local' });
+    const rpRes = mkTok({ user_scope: 'Reseller' });
+    const rpCall = (p: string, tok: string, e: any = rpEnv, init: RequestInit = {}) =>
+      worker.fetch(new Request(`https://w.dev${p}`, { ...init, headers: { Authorization: `Bearer ${tok}`, Origin: 'https://portal.example.com', ...(init.headers as any) } }), e as any, ctx);
+    const rpPost = (tok: string, body: unknown, e: any = rpEnv) =>
+      rpCall('/kit/ringotel/enable', tok, e, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const called = (m: string) => rtRpc.filter((x) => x.method === m);
+    const label = 'demo'; // deriveOrgLabel('demo.12345.service') — the territory suffix removed
+    // A control character, written as an escape: a literal one in source is invisible to `grep` and to
+    // the leak guard's manual path, which is the same rule the route's own regex is written under.
+    const CTRL = String.fromCharCode(7);
+
+    // The tenant this block provisions into: empty, with the three catalogs the config names resolved.
+    rtOrgs = []; rtBranches = []; rtUsers = []; rtSeq = 0;
+    // TWO templates, so the picker and the create have something to choose BETWEEN — and the newer one
+    // is listed second here on purpose: the catalog sorts newest-first rather than serving tenant order.
+    rtTemplates = [
+      { id: 'TPL1', name: 'Standard', created: 1_750_000_000_000, params: { country: 'US', domain: 'tpl.example', provision: { proxy: { host: 'sip.example.com' }, sip: { transport: 'tls' } } } },
+      { id: 'TPL2', name: 'Pilot', created: 1_757_000_000_000, params: { country: 'GB', provision: { proxy: { host: 'pilot.example.com' } } } },
+    ];
+    rtPackages = [{ id: 7, name: 'Business' }, { id: 8, name: 'Pro' }];
+    rtRegions = [{ id: 'us-east', name: 'US East' }];
+
+    // ── 404: an unconfigured integration has no routes at all, on every path and both methods ────────
+    for (const p of ['/kit/ringotel', '/kit/ringotel/fleet', '/kit/ringotel/domain']) {
+      ok((await rpCall(p, rpBoss, rpOff)).status === 404, `[provision] ${p} → 404 when provisioning is unconfigured`);
+    }
+    ok((await rpPost(rpBoss, { domain, step: 'all' }, rpOff)).status === 404,
+      '[provision] and the enable route too — 404 is answered before the method gate, so an off deployment discloses nothing about which verbs it would take');
+
+    // ── the feature gate, and the fleet-read backstop behind it ──────────────────────────────────────
+    {
+      const offFeature = { ...rpEnv, PORTAL_FEATURES: JSON.stringify({ 'ringotel.provision.view': 'off' }) };
+      const rOff = await rpCall('/kit/ringotel/fleet', rpRes, offFeature);
+      ok(rOff.status === 403, '[provision] ringotel.provision.view off → 403 for the reseller');
+      ok(/ringotel\.provision\.view/.test((await jbody(rOff)).error || ''), '[provision] and the refusal names the key');
+
+      // A `users:` grant names an account at ANY scope, so the level floor alone cannot keep a
+      // domain-locked one out. The fleet table names every domain this deployment can see.
+      const omEnv = { ...rpEnv, PORTAL_FEATURES: JSON.stringify({ 'ringotel.provision.view': { users: ['om@cust.local'] } }) };
+      const omTok = mkTok({ user_scope: 'Office Manager', sub: 'om@cust.local', user: 'om', domain: 'cust.local' });
+      const rOm = await rpCall('/kit/ringotel/fleet', omTok, omEnv);
+      ok(rOm.status === 403, '[provision] a domain-locked account admitted BY NAME is still refused the fleet read');
+      const omErr = (await jbody(rOm)).error || '';
+      ok(/reseller scope or a listed superadmin/.test(omErr), '[provision] with the fleet-read wording, not the feature-gate one');
+      ok(/The Ringotel Integration page/.test(omErr), '[provision] and the refusal names THIS page');
+      ok((await rpCall('/kit/spk.js', omTok, omEnv)).status === 204,
+        '[provision] while the speculative bundle fetch stays a quiet 204 for them — a steady-state refusal is not an incident');
+    }
+
+    // ── 503: config that will not resolve is named, not swallowed ────────────────────────────────────
+    {
+      const { RINGOTEL_REGION: _r, ...noRegion } = rpEnv;
+      const rCfg = await rpCall('/kit/ringotel', rpBoss, noRegion);
+      ok(rCfg.status === 503, '[provision] a missing RINGOTEL_REGION is a 503, not a 500');
+      ok(/RINGOTEL_REGION/.test((await jbody(rCfg)).error || ''), '[provision] and the reason names the setting to fix');
+      const badRail = { ...rpEnv, NS_EVENTS_DOMAINS: '*,!' };
+      ok((await rpCall('/kit/ringotel/domain?domain=' + encodeURIComponent(domain), rpBoss, badRail)).status === 503,
+        '[provision] an unparseable NS_EVENTS_DOMAINS is a 503 too — a rail that will not read is not a rail that covers nothing');
+    }
+
+    // ── the page, and the ?domain= prefilter ─────────────────────────────────────────────────────────
+    {
+      const before = domainsCalls;
+      const rPlain = await rpCall('/kit/ringotel', rpBoss);
+      ok(rPlain.status === 200 && (rPlain.headers.get('content-type') || '').includes('text/html'), '[provision] GET /kit/ringotel serves the page');
+      ok((rPlain.headers.get('Cache-Control') || '') === 'private, no-store', '[provision] which is never cached');
+      ok(domainsCalls === before, '[provision] and a plain page load makes no /domains read at all');
+      ok(!/<body[^>]*\bdata-prefilter=/.test(await rPlain.text()), '[provision] no ?domain= → no data-prefilter attribute');
+
+      const rKnown = await (await rpCall(`/kit/ringotel?domain=${encodeURIComponent(domain.toUpperCase())}`, rpBoss)).text();
+      ok(rKnown.includes(`data-prefilter="${domain}"`),
+        "[provision] ?domain= naming a visible domain renders the prefilter — matched case-insensitively, rendered with the VISIBLE set's own spelling, never the query string's");
+
+      const rUnknown = await (await rpCall('/kit/ringotel?domain=nope.example', rpBoss)).text();
+      ok(!/<body[^>]*\bdata-prefilter=/.test(rUnknown), '[provision] a domain outside the caller\'s visible set renders no prefilter');
+
+      const rRo = await (await rpCall('/kit/ringotel', rpRes)).text();
+      ok(rRo.includes('ringotel.provision.write'), '[provision] a reseller gets the read-only page, which names the key that would grant the write surface');
+    }
+
+    // ── the fleet audit: one row per VISIBLE domain, the rest counted and never named ────────────────
+    {
+      const hidEnv = { ...rpEnv, CACHE_SCOPE: 'rphidden', BLOCKED_DOMAINS: 'blocked.example' };
+      nsExtraDomain = true;
+      try {
+        const r = await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, hidEnv);
+        ok(r.status === 200, `[provision] GET /kit/ringotel/fleet → 200 (${r.status})`);
+        const body = await jbody(r);
+        // Asserted apart, and on the EXACT value. A `&&` of two header checks has one way to fail across
+        // two subjects, and `.includes('Authorization')` would pass on a Vary that had lost `Origin`.
+        ok(r.headers.get('Cache-Control') === 'no-store', `[provision] the fleet report is never stored (${r.headers.get('Cache-Control')})`);
+        ok(r.headers.get('Vary') === 'Origin, Authorization', `[provision] and varies by BOTH origin and principal (${r.headers.get('Vary')})`);
+        ok(Array.isArray(body.rows) && body.rows.length === 1 && body.rows[0].domain === domain,
+          `[provision] one row per visible domain (${JSON.stringify((body.rows ?? []).map((x: any) => x.domain))})`);
+        ok(body.rows[0].state === 'no-org', `[provision] and the empty tenant reads as no-org (${body.rows[0].state})`);
+        ok(body.hidden === 1, `[provision] the blocked domain is COUNTED (${body.hidden})`);
+        ok(!JSON.stringify(body).includes('blocked.example'), '[provision] and named nowhere in the report');
+        ok(body.template === 'Standard' && body.templateProblem === null, '[provision] the resolved connection template is reported by name');
+      } finally { nsExtraDomain = false; }
+    }
+
+    // ── the rail is not a state ──────────────────────────────────────────────────────────────────────
+    // A domain RINGOTEL_PROVISION_DOMAINS does not include still gets its real audit state — the app may
+    // well be set up there, and this page saying "integration off" said the opposite. What the rail
+    // decides is whether the page may CHANGE it, which rides alongside as `enableable`.
+    {
+      const r = await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, { ...rpEnv, CACHE_SCOPE: 'rprailfleet', RINGOTEL_PROVISION_DOMAINS: 'other.example' });
+      ok(r.status === 200, `[provision] the fleet reads for a caller whose rail excludes every visible domain (${r.status})`);
+      const row = (await jbody(r)).rows?.[0];
+      ok(row?.state === 'no-org', `[provision] the excluded domain still reports its audit state (${row?.state})`);
+      ok(row?.enableable === false, `[provision] and is marked not enableable (${row?.enableable})`);
+      ok(/read-only for this domain/.test(row?.detail ?? ''), `[provision] with the reason on its own detail (${row?.detail})`);
+      const on = (await jbody(await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, { ...rpEnv, CACHE_SCOPE: 'rprailfleet2' }))).rows?.[0];
+      ok(on?.enableable === true, `[provision] while an included domain is enableable (${on?.enableable})`);
+    }
+
+    // ── one domain's checklist ───────────────────────────────────────────────────────────────────────
+    {
+      const r403 = await rpCall('/kit/ringotel/domain?domain=nope.example', rpBoss);
+      ok(r403.status === 403, '[provision] ?domain= outside the visible set → 403');
+      ok((await jbody(r403)).error === 'That domain is not in your visible set',
+        '[provision] with the wording that makes "you may not ask" indistinguishable from "there is nothing to say"');
+
+      const r = await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss);
+      ok(r.status === 200, `[provision] GET /kit/ringotel/domain → 200 (${r.status})`);
+      const rep = await jbody(r);
+      ok(rep.domain === domain && Array.isArray(rep.rows), '[provision] the checklist names its domain and carries rows');
+      const org = (rep.rows ?? []).find((x: any) => x.step === 'org');
+      ok(org?.verdict === 'fix' && org?.fixable === true, '[provision] a domain with no organization reads as a FIXABLE org row');
+      ok(rep.label?.derived === label && rep.label?.current === null,
+        `[provision] the derived label is offered and there is no current one (${JSON.stringify(rep.label)})`);
+      ok(rep.defaultPackage === 'Business' && (rep.packages ?? []).includes('Pro'), '[provision] the tenant\'s packages come back with the configured default');
+      // EVERY template, newest first — the create may be made from one that is not the configured
+      // standard, and the picker draws the order it is handed rather than re-deriving one.
+      ok((rep.templates ?? []).map((t: any) => t.name).join(',') === 'Pilot,Standard',
+        `[provision] every connection template comes back, newest first (${(rep.templates ?? []).map((t: any) => t.name).join(',')})`);
+      ok(rep.templates?.[0]?.createdAt === new Date(1_757_000_000_000).toISOString(),
+        `[provision] each one carrying its own save stamp as an ISO string (${rep.templates?.[0]?.createdAt})`);
+      ok(rep.defaultTemplate === 'Standard', `[provision] and the configured standard is named for the picker to preselect (${rep.defaultTemplate})`);
+      ok(rep.ssoConfigured === true, '[provision] and the page is told this deployment manages sign-in mode');
+      const rails = (rep.rows ?? []).find((x: any) => x.step === 'rails');
+      ok((rails?.detail || '').includes('RINGOTEL_WRITE_DOMAINS'), '[provision] the rails row reports the write rail this domain is outside of');
+    }
+
+    // ── the write gates, before any of it reaches Ringotel ───────────────────────────────────────────
+    {
+      ok((await rpCall('/kit/ringotel/enable', rpBoss)).status === 405, '[provision] GET /kit/ringotel/enable → 405');
+      ok((await rpCall('/kit/ringotel', rpBoss, rpEnv, { method: 'POST', body: '{}' })).status === 405, '[provision] and POST to the page → 405');
+
+      const rRes = await rpPost(rpRes, { domain, step: 'all' });
+      ok(rRes.status === 403 && /ringotel\.provision\.write/.test((await jbody(rRes)).error || ''),
+        '[provision] a reseller may read the page and may not enable a domain');
+
+      ok((await rpPost(rpBoss, { domain: 'nope.example', step: 'all' })).status === 403,
+        '[provision] an enable naming a domain outside the visible set → 403');
+
+      rtRpc.length = 0;
+      const railEnv = { ...rpEnv, RINGOTEL_PROVISION_DOMAINS: 'other.example' };
+      const rRail = await rpPost(rpBoss, { domain, step: 'all' }, railEnv);
+      ok(rRail.status === 403, '[provision] a domain the provisioning rail does not admit → 403');
+      ok(/RINGOTEL_PROVISION_DOMAINS/.test((await jbody(rRail)).error || ''), '[provision] naming the setting that refused it');
+      ok(called('getOrganizations').length === 0 && called('getTemplates').length === 0,
+        '[provision] and the rail refused BEFORE any Ringotel call — the refusal cannot be timed against a read that happened anyway');
+
+      ok((await rpPost(rpBoss, { domain, step: 'package' })).status === 422,
+        '[provision] step "package" → 422: a package is set on create and a live organization on another one is a finding, not a fix');
+      ok((await rpPost(rpBoss, { domain, step: 'all', choice: { signin: 'magic' } })).status === 422,
+        '[provision] an unknown sign-in mode → 422');
+      ok((await rpPost(rpBoss, { step: 'all' })).status === 422,
+        '[provision] a body with no domain at all is a 422 naming the shape — NOT the invisible-domain 403, which would send an operator hunting a permission problem that is not there');
+      // Each choice field asserted on its OWN, not as one over-long body: they share a bound but not a
+      // wiring, and a single case would pass with two of the three never read.
+      ok((await rpPost(rpBoss, { domain, step: 'all', choice: { pkg: 'x'.repeat(65) } })).status === 422,
+        '[provision] an over-long package name → 422');
+      ok((await rpPost(rpBoss, { domain, step: 'all', choice: { label: 'x'.repeat(65) } })).status === 422,
+        '[provision] an over-long label → 422');
+      ok((await rpPost(rpBoss, { domain, step: 'all', choice: { orgName: 'x'.repeat(65) } })).status === 422,
+        '[provision] an over-long organization name → 422');
+      ok((await rpPost(rpBoss, { domain, step: 'all', choice: { template: 'x'.repeat(65) } })).status === 422,
+        '[provision] an over-long template name → 422, bounded on the way in like every other choice');
+      ok((await rpPost(rpBoss, { domain, step: 'all', choice: { orgName: `Acme${CTRL}Co` } })).status === 422,
+        '[provision] and a control character in one → 422, before it can reach a durable Ringotel record');
+      ok(called('createOrganization').length === 0, '[provision] none of which wrote anything');
+    }
+
+    // ── the happy path: step "all" on an empty tenant ────────────────────────────────────────────────
+    {
+      rtRpc.length = 0;
+      const r = await rpPost(rpBoss, { domain, step: 'all', choice: { orgName: 'Acme Co' } });
+      ok(r.status === 200, `[provision] step "all" → 200 (${r.status})`);
+      // The write's reply names every domain's organization state for one domain and varies by principal,
+      // exactly as the reports do — so it carries the same two headers, asserted apart and exactly.
+      ok(r.headers.get('Cache-Control') === 'no-store', `[provision] the enable reply is never stored (${r.headers.get('Cache-Control')})`);
+      ok(r.headers.get('Vary') === 'Origin, Authorization', `[provision] and varies by both origin and principal (${r.headers.get('Vary')})`);
+      const v = await jbody(r);
+
+      const create = called('createOrganization')[0];
+      ok(!!create, '[provision] the organization was created');
+      ok(create?.params?.domain === label, `[provision] under the label this domain derives (${create?.params?.domain})`);
+      ok(create?.params?.name === 'Acme Co', '[provision] with the display name the operator typed, which is NOT the label');
+      ok(create?.params?.packageid === 7 && create?.params?.region === 'us-east',
+        '[provision] on the configured package and region, resolved by NAME against the tenant\'s own catalogs');
+      ok(create?.params?.params?.sso === 'sso-0000-demo' && create?.params?.params?.hidePassInEmail === true,
+        '[provision] and created for single sign-on with passwords kept out of welcome emails');
+
+      const branch = called('createBranch')[0];
+      ok(!!branch, '[provision] then the connection was created');
+      ok(branch?.params?.address === domain, `[provision] at THIS domain's address (${branch?.params?.address}) — never the template's own`);
+      ok(branch?.params?.name === 'Ringotel', '[provision] under the configured connection name');
+      ok(branch?.params?.provision?.proxy?.host === 'sip.example.com', '[provision] carrying the template\'s provision blob');
+      ok(branch?.params?.domain === undefined, '[provision] and NOT the template\'s identity fields — copying one would point this customer at another customer\'s domain');
+
+      ok(called('getOrganizations').length > 1,
+        `[provision] the index was rebuilt after the writes — more than one getOrganizations in the run (${called('getOrganizations').length})`);
+
+      const steps = (v.outcomes ?? []).map((o: any) => `${o.step}:${o.action}`);
+      ok(!v.stoppedAt, `[provision] nothing stopped the run (${JSON.stringify(v.stoppedAt)})`);
+      ok(steps.includes('org:created') && steps.includes('connector:created'), `[provision] the outcomes name both creates (${steps.join(', ')})`);
+      ok(steps.includes('index:refreshed'), '[provision] and the index refresh');
+
+      const orgRow = (v.report?.rows ?? []).find((x: any) => x.step === 'org');
+      ok(orgRow?.verdict === 'ok', `[provision] the checklist that comes back reads org: ok (${orgRow?.verdict})`);
+      ok(v.report?.label?.current === label, '[provision] with the live label now set');
+      ok(v.report?.orgName === 'Acme Co', '[provision] and the organization\'s display name');
+      const idxRow = (v.report?.rows ?? []).find((x: any) => x.step === 'index');
+      ok(idxRow?.verdict === 'ok', `[provision] the cached index now resolves this domain (${idxRow?.verdict})`);
+
+      // The WRITE rail is a separate rail from the provisioning one, and this domain is outside it.
+      const rec = (v.outcomes ?? []).find((o: any) => o.step === 'reconcile');
+      ok(rec?.action === 'blocked', `[provision] the reconcile step is BLOCKED by RINGOTEL_WRITE_DOMAINS (${rec?.action})`);
+      ok(/RINGOTEL_WRITE_DOMAINS/.test(rec?.reason || ''), '[provision] with a reason naming that rail');
+      ok(called('createUser').length === 0, '[provision] and not one directory placeholder was written');
+    }
+
+    // ── idempotence: the same request again writes nothing ───────────────────────────────────────────
+    {
+      rtRpc.length = 0;
+      const v = await jbody(await rpPost(rpBoss, { domain, step: 'all' }));
+      const applied = (v.outcomes ?? []).filter((o: any) => ['org', 'signin', 'connector'].includes(o.step));
+      ok(applied.length === 3 && applied.every((o: any) => o.action === 'noop'),
+        `[provision] a second "all" leaves all three Ringotel steps a noop (${applied.map((o: any) => `${o.step}:${o.action}`).join(', ')})`);
+      ok(called('createOrganization').length === 0 && called('createBranch').length === 0 && called('updateOrganization').length === 0,
+        '[provision] having written nothing at all — which is what lets a half-finished enable be resumed by pressing the same button');
+      ok(!v.stoppedAt, '[provision] and nothing stopped it');
+    }
+
+    // ── a DELIBERATE re-run of one step is a different question, and gets the 409 ────────────────────
+    {
+      rtRpc.length = 0;
+      const r = await rpPost(rpBoss, { domain, step: 'org' });
+      ok(r.status === 200, '[provision] an explicit re-run of "org" still answers 200 with the checklist');
+      const v = await jbody(r);
+      ok(v.stoppedAt?.step === 'org', `[provision] and surfaces the refusal as stoppedAt (${JSON.stringify(v.stoppedAt)})`);
+      ok(/already matches this domain/.test(v.stoppedAt?.error || ''), '[provision] saying a second organization would leave the domain ambiguous');
+      ok(called('createOrganization').length === 0, '[provision] with no second organization created');
+      ok((v.report?.rows ?? []).some((x: any) => x.step === 'org' && x.verdict === 'ok'), '[provision] and the checklist still comes back');
+    }
+
+    // ── the fleet now reads the domain as enabled ────────────────────────────────────────────────────
+    {
+      const body = await jbody(await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss));
+      const row = (body.rows ?? []).find((x: any) => x.domain === domain);
+      ok(row?.state === 'enabled', `[provision] the fleet row is now "enabled" (${row?.state}: ${row?.detail})`);
+      ok(row?.orgLabel === label && row?.expectedLabel === label, '[provision] with the live label matching the derived one');
+      ok(body.hidden === 0, '[provision] and nothing hidden in this deployment');
+    }
+
+    // ── one enable per domain at a time ─────────────────────────────────────────────────────────────
+    // Two concurrent enables of a fresh domain both dig, both see no organization, and both create one —
+    // leaving the domain with two, the state `applyOrg` refuses everything on and no button here can undo.
+    // Staged by taking the lock the route takes, which is what a second in-flight enable looks like from
+    // inside this one.
+    {
+      const held = await takePrepopLock(memCache as any, 'rptest', domain);
+      ok(!!held, '[provision] (the harness holds the domain lock, standing in for an enable already running)');
+      rtRpc.length = 0;
+      const rBusy = await rpPost(rpBoss, { domain, step: 'all' });
+      ok(rBusy.status === 409, `[provision] a second enable while one is running → 409 (${rBusy.status})`);
+      ok((await jbody(rBusy)).error === 'An enable is already running for this domain', '[provision] saying so plainly');
+      ok(rtRpc.length === 0, `[provision] and it made no Ringotel call at all — the lock is taken before the first read (${rtRpc.length})`);
+      await releasePrepopLock(memCache as any, 'rptest', domain, held!);
+      const rFree = await rpPost(rpBoss, { domain, step: 'all' });
+      ok(rFree.status === 200, '[provision] and the same request goes through once the lock is released');
+      // The route must not leave the lock behind either, or the NEXT enable 409s on a run that finished.
+      const after = await takePrepopLock(memCache as any, 'rptest', domain);
+      ok(!!after, '[provision] which released the lock on its way out, rather than wedging the domain until the TTL lapses');
+      if (after) await releasePrepopLock(memCache as any, 'rptest', domain, after);
+    }
+
+    // ── RINGOTEL_OVERRIDES: a domain whose connection lives at another address ──────────────────────
+    // Every create here writes `address: <the NS domain>` while matching goes through the override, so a
+    // connection built from this page would never be the one the override points at — the checklist would
+    // offer the same create forever and each press would add another connection. Refused on both halves,
+    // from the same fact, so the page never offers what the route declines.
+    {
+      const ovEnv = { ...rpEnv, CACHE_SCOPE: 'rpover', RINGOTEL_OVERRIDES: JSON.stringify({ [domain]: 'elsewhere.example' }) };
+      const rep = await jbody(await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss, ovEnv));
+      const org = (rep.rows ?? []).find((x: any) => x.step === 'org');
+      ok(org?.verdict === 'blocked', `[provision] the org row is BLOCKED on an overridden domain (${org?.verdict})`);
+      ok(org?.fixable === false, '[provision] and offers no fix');
+      ok(/RINGOTEL_OVERRIDES/.test(org?.detail || ''), '[provision] naming the setting that makes it unsupported');
+
+      rtRpc.length = 0;
+      const rWrite = await rpPost(rpBoss, { domain, step: 'all' }, ovEnv);
+      ok(rWrite.status === 422, `[provision] and the write route refuses it 422 (${rWrite.status})`);
+      ok(/address override/.test((await jbody(rWrite)).error || ''), '[provision] saying provisioning from this page is not supported for it');
+      ok(rtRpc.filter((x) => x.method === 'createBranch').length === 0, '[provision] with no connection created at the wrong address');
+    }
+
+    // ── a refresh button is an amplifier unless something bounds it ─────────────────────────────────
+    // This dig is 1 + N Ringotel calls and the Refresh sits beside a table an operator is impatient with.
+    // Coalesced on the same 60 s window `getDirectory` uses: the first press per window re-digs, the rest
+    // are served what it wrote.
+    {
+      const ampEnv = { ...rpEnv, CACHE_SCOPE: 'rpamp' };
+      rtRpc.length = 0;
+      ok((await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, ampEnv)).status === 200, '[provision] the first forced refresh answers');
+      const first = rtRpc.filter((x) => x.method === 'getOrganizations').length;
+      ok(first > 0, `[provision] having really re-dug (${first} getOrganizations)`);
+      rtRpc.length = 0;
+      const r2 = await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, ampEnv);
+      ok(r2.status === 200, '[provision] a second press inside the window still answers with the fleet');
+      ok(rtRpc.filter((x) => x.method === 'getOrganizations').length === 0,
+        `[provision] and is served from the cached dig rather than re-digging — downgraded, never refused (${rtRpc.filter((x) => x.method === 'getOrganizations').length})`);
+      ok(((await jbody(r2)).rows ?? []).length === 1, '[provision] the downgraded answer is still a fleet, not an empty table');
+    }
+
+    // ── a write re-digs inside the refresh window, because the page re-reads the fleet right after one ─
+    // The coalescer that stops a Refresh button from amplifying would otherwise make the page LIE: an
+    // enable is followed immediately by `ask('fleet', {refresh:true})`, and a downgraded answer inside the
+    // window shows the operator the row they just changed, as it was before they changed it. A write is
+    // the one legitimate reason to re-dig inside the window, so it clears the window.
+    {
+      const staleEnv = { ...rpEnv, CACHE_SCOPE: 'rpstale', RINGOTEL_PROVISION_DOMAINS: 'second.example' };
+      const second = 'second.example';
+      nsEditDomain = true;
+      try {
+        // Warm the entry AND take the refresh lock — the state an operator's own Refresh leaves behind.
+        const before = await jbody(await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, staleEnv));
+        ok((before.rows ?? []).find((x: any) => x.domain === second)?.state === 'no-org',
+          `[provision] the second domain starts with no organization (${(before.rows ?? []).find((x: any) => x.domain === second)?.state})`);
+
+        const en = await rpPost(rpBoss, { domain: second, step: 'all' }, staleEnv);
+        ok(en.status === 200, `[provision] and is enabled (${en.status})`);
+        const enBody = await jbody(en);
+        ok((enBody.outcomes ?? []).some((o: any) => o.step === 'org' && o.action === 'created'),
+          '[provision] with an organization really created — a noop would prove nothing about the invalidation');
+
+        rtRpc.length = 0;
+        const after = await jbody(await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, staleEnv));
+        ok(rtRpc.filter((x) => x.method === 'getOrganizations').length > 0,
+          '[provision] the page\'s own post-enable refresh really re-digs, inside a window that would otherwise have downgraded it');
+        ok((after.rows ?? []).find((x: any) => x.domain === second)?.state === 'enabled',
+          `[provision] and the row reflects the organization that was just created (${(after.rows ?? []).find((x: any) => x.domain === second)?.state})`);
+      } finally { nsEditDomain = false; }
+    }
+
+    // ── a JSON null in RINGOTEL_OVERRIDES overrides nothing, so it must block nothing ────────────────
+    // `matchOrgsForDomain` reads `overrides[d] ?? d`, which falls through on null — the domain is not
+    // overridden. A guard testing `!== undefined` would have refused provisioning on an override that
+    // does nothing at all, which is the failure mode of checking presence instead of effect.
+    {
+      const nullEnv = { ...rpEnv, CACHE_SCOPE: 'rpnull', RINGOTEL_OVERRIDES: JSON.stringify({ [domain]: null }) };
+      const rep = await jbody(await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss, nullEnv));
+      const org = (rep.rows ?? []).find((x: any) => x.step === 'org');
+      ok(org?.verdict !== 'blocked', `[provision] a null override does not block the org row (${org?.verdict})`);
+      ok(!/RINGOTEL_OVERRIDES/.test(org?.detail || ''), '[provision] nor claim the domain is overridden');
+    }
+
+    // ── the revocation gap: a CACHED verdict is not good enough to write ────────────────────────────
+    // A server-side logout invalidates an ns_t before its `exp` (proven separately: /jwt 403s a token
+    // that still parses), so `requireFreshAuth` spends a live /jwt on every enable. Staged in that exact
+    // order — warm a GOOD verdict with a read, THEN make /jwt refuse — because a token that fails at
+    // `resolveAuth` would 401 whether or not this route re-validates, and would prove nothing.
+    //
+    // On its OWN token: the verdict cache is keyed by the token, and the failed re-validation writes a
+    // bad entry. A shared one would 401 every case that ran after this, which is exactly what the first
+    // draft of this case did.
+    {
+      const rpStale = mkTok({ user_scope: 'Super User', sub: 'boss@mock.local', user: 'boss', domain: 'mock.local', jti: 'stale-1' });
+      ok((await rpCall('/kit/ringotel', rpStale)).status === 200, '[provision] the token reads the page while it is still good');
+      rtRpc.length = 0;
+      jwtFail = 401;
+      try {
+        ok((await rpPost(rpStale, { domain, step: 'all' })).status === 401,
+          '[provision] and then cannot enable a domain once /jwt stops validating it — the cached verdict does not carry a write');
+        ok(called('createOrganization').length === 0 && called('getOrganizations').length === 0,
+          '[provision] refused before a single Ringotel call');
+      } finally { jwtFail = 0; }
+    }
+
+    // ── the template a connection is created FROM ───────────────────────────────────────────────────
+    // A create may legitimately be made from a template that is not the configured standard — the
+    // standard is the AUDIT's yardstick, not a bound on what may be built. Ringotel records nothing about
+    // which template a connection came from, so the choice is made once and the outcome line is the only
+    // place it is ever said. Staged on an emptied tenant under its own cache scope, because every case
+    // above has left this domain with an organization and a connection.
+    {
+      rtOrgs = []; rtBranches = []; rtSeq = 0;
+      const tplEnv = { ...rpEnv, CACHE_SCOPE: 'rptpl' };
+      rtRpc.length = 0;
+      const v = await jbody(await rpPost(rpBoss, { domain, step: 'all', choice: { template: 'Pilot' } }, tplEnv));
+      const branch = called('createBranch')[0];
+      ok(branch?.params?.provision?.proxy?.host === 'pilot.example.com',
+        `[provision] the CHOSEN template supplies the connection's provision blob (${JSON.stringify(branch?.params?.provision)})`);
+      ok(branch?.params?.country === 'GB', `[provision] and its country (${branch?.params?.country})`);
+      ok(branch?.params?.address === domain, '[provision] while the address is still this domain, never the template\'s');
+      const conn = (v.outcomes ?? []).find((o: any) => o.step === 'connector');
+      ok(conn?.action === 'created' && conn?.template === 'Pilot',
+        `[provision] and the outcome names the template it was built from (${JSON.stringify(conn)})`);
+
+      // ⚠️ A TEMPLATE THAT CANNOT BUILD A CONNECTION IS REFUSED BEFORE THE FIRST WRITE. `all` applies org,
+      // then sign-in, then connector — so a refusal at the last of the three would leave the domain with
+      // an organization and no connection, for somebody to finish by hand. 422 up front, nothing created.
+      rtOrgs = []; rtBranches = []; rtSeq = 0;
+      rtRpc.length = 0;
+      const bad = await rpPost(rpBoss, { domain, step: 'all', choice: { template: 'Nonesuch' } }, { ...rpEnv, CACHE_SCOPE: 'rptpl2' });
+      ok(bad.status === 422, `[provision] an unknown template is refused 422 before anything is created (${bad.status})`);
+      ok(/"Nonesuch"/.test((await jbody(bad)).error || ''), '[provision] with the refusal quoting the name back');
+      ok(called('createOrganization').length === 0 && called('createBranch').length === 0,
+        '[provision] and NOTHING was written — not the organization the earlier steps would have made first');
+
+      // The same rule for a template that exists and carries no PBX settings. The picker draws that
+      // option disabled from the same fact (`hasProvision`), so the page never offers what this refuses.
+      rtOrgs = []; rtBranches = []; rtSeq = 0;
+      rtRpc.length = 0;
+      rtTemplates.push({ id: 'TPL3', name: 'Sketch', created: 1_700_000_000_000, params: { country: 'US' } });
+      try {
+        const blank = await rpPost(rpBoss, { domain, step: 'all', choice: { template: 'Sketch' } }, { ...rpEnv, CACHE_SCOPE: 'rptpl3' });
+        ok(blank.status === 422, `[provision] a template carrying no provision configuration is refused up front too (${blank.status})`);
+        ok(/no provision configuration/.test((await jbody(blank)).error || ''), '[provision] saying a connection built from it would have no PBX settings');
+        ok(called('createOrganization').length === 0, '[provision] with no half-enabled domain left behind');
+        // And the picker says the same thing, from the same fact, rather than offering it.
+        const rep = await jbody(await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss, { ...rpEnv, CACHE_SCOPE: 'rptpl3' }));
+        const sketch = (rep.templates ?? []).find((t: any) => t.name === 'Sketch');
+        ok(sketch?.hasProvision === false, `[provision] and the report flags it for the picker to disable (${JSON.stringify(sketch)})`);
+        ok((rep.templates ?? []).find((t: any) => t.name === 'Standard')?.hasProvision === true, '[provision] while a usable one is not flagged');
+      } finally { rtTemplates = rtTemplates.filter((t: any) => t.id !== 'TPL3'); }
+    }
+
+    // ── fail closed when the configured standard does not resolve ───────────────────────────────────
+    // The checklist already refuses to offer a create in this state (the org row is not fixable), and the
+    // route now says the same — whatever the body chose. A deployment whose standard does not resolve has
+    // no audit to bring a domain to, and building one from some other template leaves a connection
+    // nothing here can ever compare. A hand-made POST must not do what the page will not offer.
+    {
+      rtOrgs = []; rtBranches = []; rtSeq = 0;
+      const noStd = { ...rpEnv, CACHE_SCOPE: 'rpnostd', RINGOTEL_CONNECTION_TEMPLATE: 'Retired Connection' };
+      const rep = await jbody(await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss, noStd));
+      const orgRow = (rep.rows ?? []).find((x: any) => x.step === 'org');
+      ok(orgRow?.fixable === false, `[provision] the checklist offers no create when the standard does not resolve (${orgRow?.fixable})`);
+
+      for (const step of ['all', 'org', 'connector']) {
+        rtRpc.length = 0;
+        const r = await rpPost(rpBoss, { domain, step }, noStd);
+        ok(r.status === 422, `[provision] and the route refuses step "${step}" with 422 (${r.status})`);
+        ok(/RINGOTEL_CONNECTION_TEMPLATE does not resolve/.test((await jbody(r)).error || ''),
+          `[provision] naming the setting that refused it ("${step}")`);
+        ok(called('createOrganization').length === 0, `[provision] with nothing created ("${step}")`);
+      }
+      // Choosing a template that DOES resolve does not buy past it: the standard is the audit this page
+      // brings a domain to, not a default the caller may substitute.
+      rtRpc.length = 0;
+      const chosen = await rpPost(rpBoss, { domain, step: 'all', choice: { template: 'Pilot' } }, noStd);
+      ok(chosen.status === 422, `[provision] a valid chosen template does not buy past it (${chosen.status})`);
+      ok(called('createOrganization').length === 0, '[provision] and still nothing was created');
+    }
+
+    // ── the early refusals say the operator's OWN name for the app ───────────────────────────────────
+    // These sentences are produced before `resolveProvisionConfig` can be trusted to have resolved — one
+    // of them IS the refusal that it did not — so they read RINGOTEL_LABEL straight off env. A
+    // white-label deployment must not read the vendor's name in its own portal, least of all in an error.
+    {
+      const wl = { ...rpEnv, RINGOTEL_LABEL: 'Acme App', CACHE_SCOPE: 'rpwl' };
+      const { RINGOTEL_REGION: _wr, ...wlNoRegion } = wl;
+      const rCfg = await rpCall('/kit/ringotel', rpBoss, wlNoRegion);
+      const cfgErr = (await jbody(rCfg)).error || '';
+      ok(rCfg.status === 503 && cfgErr.startsWith('Acme App provisioning is misconfigured'),
+        `[provision] the misconfiguration 503 is named in the operator's own word for the app (${cfgErr})`);
+      ok(!/Ringotel provisioning/.test(cfgErr), '[provision] and not in the vendor\'s');
+
+      const wlRails = { ...wl, NS_EVENTS_DOMAINS: '*,!' };
+      ok(((await jbody(await rpCall('/kit/ringotel', rpBoss, wlRails))).error || '').startsWith('Acme App provisioning is misconfigured'),
+        '[provision] the unparseable-rail 503 too — the same sentence, from the other of its two sites');
+
+      const wlOm = { ...wl, PORTAL_FEATURES: JSON.stringify({ 'ringotel.provision.view': { users: ['om@cust.local'] } }) };
+      const wlOmTok = mkTok({ user_scope: 'Office Manager', sub: 'om@cust.local', user: 'om', domain: 'cust.local' });
+      ok(/The Acme App Integration page/.test((await jbody(await rpCall('/kit/ringotel/fleet', wlOmTok, wlOm))).error || ''),
+        '[provision] and the fleet-read refusal names the page by that word too');
+
+      // The fourth sentence in that chain — "<app> Integration requires a delegated ns_t" — cannot be
+      // reached from here and is deliberately left untested rather than faked: `resolveAuth` in this
+      // backend either returns a principal or throws (401 with no bearer, 403 for a token it will not
+      // admit), so `!auth.principal` is a belt-and-braces guard on a value that is never absent. It is
+      // written from the same `rpLabel` as the three above.
+    }
+
+    // ── the organization an earlier run created and never connected ─────────────────────────────────
+    // The index is per-BRANCH, so an enable whose `org` step succeeded and whose `connector` step then
+    // failed leaves a record nothing can see by address. Before adoption the retry offered to create an
+    // organization, `applyOrg` refused because the derived domain name was taken, and the connection step
+    // it pointed at refused in its turn — a dead end on the page's main path, one failed API call away.
+    {
+      rtOrgs = [{ id: 'ORPH1', domain: label, name: 'Test Domain', packageid: 7, params: { sso: 'sso-0000-demo', hidePassInEmail: true } }];
+      rtBranches = []; rtSeq = 0; rtRpc.length = 0;
+      const adEnv = { ...rpEnv, CACHE_SCOPE: 'rporph' };
+
+      const fleetBefore = await jbody(await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, adEnv));
+      const rowBefore = (fleetBefore.rows ?? []).find((x: any) => x.domain === domain);
+      ok(rowBefore?.state === 'not-in-index',
+        `[orphan] the fleet row reads the adopted organization's true state, not "Not set up" (${rowBefore?.state}: ${rowBefore?.detail})`);
+      ok(rowBefore?.orgLabel === label, `[orphan] and names it (${rowBefore?.orgLabel})`);
+
+      const rep = await jbody(await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss, adEnv));
+      const orgRow = (rep.rows ?? []).find((x: any) => x.step === 'org');
+      ok(orgRow?.verdict === 'ok', `[orphan] the checklist finds the organization an earlier run left behind (${orgRow?.verdict})`);
+      const connRow = (rep.rows ?? []).find((x: any) => x.step === 'connector');
+      ok(connRow?.verdict === 'fix' && connRow?.fixable === true, `[orphan] and offers the connection it never got (${connRow?.verdict}/${connRow?.fixable})`);
+
+      rtRpc.length = 0;
+      const v = await jbody(await rpPost(rpBoss, { domain, step: 'all' }, adEnv));
+      ok(called('createOrganization').length === 0, `[orphan] an Enable-all creates no second organization (${called('createOrganization').length})`);
+      const steps = (v.outcomes ?? []).map((o: any) => `${o.step}:${o.action}`);
+      ok(steps.includes('org:noop'), `[orphan] the org step is a noop (${steps.join(', ')})`);
+      ok(called('createBranch').length === 1 && called('createBranch')[0]?.params?.orgid === 'ORPH1',
+        `[orphan] and the connection is created UNDER that organization (${JSON.stringify(called('createBranch')[0]?.params?.orgid)})`);
+      ok(rtOrgs.length === 1, `[orphan] leaving the tenant with exactly one organization for this domain (${rtOrgs.length})`);
+      ok(!v.stoppedAt, `[orphan] with nothing refused (${JSON.stringify(v.stoppedAt)})`);
+    }
+
+    // ── the same unfinished run, reached the other way: a CUSTOM label ──────────────────────────────
+    // A first attempt under an operator-chosen label leaves an organization whose domain name this domain
+    // does not derive, so adoption cannot see it. The name is the only handle left, and the refusal names
+    // the label to type instead — which the page then prefills from `orphanLabel`.
+    {
+      rtOrgs = [{ id: 'ORPH2', domain: `${label}-pilot`, name: 'Test Domain', packageid: 7, params: {} }];
+      rtBranches = []; rtSeq = 0; rtRpc.length = 0;
+      const cuEnv = { ...rpEnv, CACHE_SCOPE: 'rporph2' };
+
+      const rep = await jbody(await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss, cuEnv));
+      ok(rep.orphanLabel === `${label}-pilot`, `[orphan] the report names the unfinished organization's domain name for the label input (${rep.orphanLabel})`);
+      ok(rep.label?.current === null, '[orphan] while still reporting no organization matches this domain — nothing answers to its address yet');
+
+      rtRpc.length = 0;
+      const v = await jbody(await rpPost(rpBoss, { domain, step: 'all', choice: { label: `${label}-two`, orgName: 'Test Domain' } }, cuEnv));
+      ok(v.stoppedAt?.step === 'org', `[orphan] a retry under a different label stops at the org step (${JSON.stringify(v.stoppedAt)})`);
+      ok(new RegExp(`${label}-pilot`).test(v.stoppedAt?.error || ''), '[orphan] naming the domain name to set instead');
+      ok(called('createOrganization').length === 0 && rtOrgs.length === 1,
+        `[orphan] and no second organization was created for the same customer (${rtOrgs.length})`);
+
+      // ⚠️ AND THE RESUBMISSION, which is the whole point of naming a label in that refusal. The page has
+      // prefilled it; typing it back has to FINISH the organization, not be told to type it again.
+      rtRpc.length = 0;
+      const again = await jbody(await rpPost(rpBoss, { domain, step: 'all', choice: { label: `${label}-pilot`, orgName: 'Test Domain' } }, cuEnv));
+      ok(!again.stoppedAt, `[orphan] resubmitting the label the refusal named runs clean (${JSON.stringify(again.stoppedAt)})`);
+      const steps = (again.outcomes ?? []).map((o: any) => `${o.step}:${o.action}`);
+      ok(steps.includes('org:noop'), `[orphan] the organization step is a noop — it already exists (${steps.join(', ')})`);
+      ok(called('createOrganization').length === 0, `[orphan] with no second organization (${called('createOrganization').length})`);
+      ok(called('createBranch').length === 1 && called('createBranch')[0]?.params?.orgid === 'ORPH2',
+        `[orphan] and exactly one connection, created under the record the first run left (${JSON.stringify(called('createBranch')[0]?.params?.orgid)})`);
+      ok(rtOrgs.length === 1, `[orphan] leaving one organization for this domain (${rtOrgs.length})`);
+
+      const fleetAfter = await jbody(await rpCall('/kit/ringotel/fleet?refresh=1', rpBoss, cuEnv));
+      const rowAfter = (fleetAfter.rows ?? []).find((x: any) => x.domain === domain);
+      // `label-mismatch`, not `enabled`, and that is the TRUE state: the organization carries the label
+      // the operator typed rather than the one this domain derives, and Ringotel does not allow editing
+      // it. A finding, reported as one — where before this it read "Not set up" forever.
+      ok(rowAfter?.state === 'label-mismatch' && rowAfter?.orgLabel === `${label}-pilot`,
+        `[orphan] and the fleet row now reports what is really there (${rowAfter?.state}: ${rowAfter?.orgLabel})`);
+    }
+
+    // ── a template that names no dialling country ────────────────────────────────────────────────────
+    // `country: String(t.params.country ?? 'US')` turned an unfinished template into a connection quietly
+    // dialling as American — wrong outside the US, silent, and permanent, since nothing here rewrites a
+    // connection it created. Refused up front like the provision-less case, and flagged for the picker.
+    {
+      rtOrgs = []; rtBranches = []; rtSeq = 0; rtRpc.length = 0;
+      rtTemplates.push({ id: 'TPL4', name: 'Countryless', created: 1_600_000_000_000, params: { provision: { proxy: { host: 'sip.example.com' } } } });
+      try {
+        const ctEnv = { ...rpEnv, CACHE_SCOPE: 'rpnocountry' };
+        const r = await rpPost(rpBoss, { domain, step: 'all', choice: { template: 'Countryless' }, }, ctEnv);
+        ok(r.status === 422, `[country] a template naming no country is refused before anything is created (${r.status})`);
+        const err = (await jbody(r)).error || '';
+        ok(/country/i.test(err) && /"Countryless"/.test(err), `[country] with the refusal naming the template and the missing field (${err})`);
+        ok(called('createOrganization').length === 0, '[country] and no half-enabled domain left behind');
+        const rep = await jbody(await rpCall(`/kit/ringotel/domain?domain=${encodeURIComponent(domain)}`, rpBoss, ctEnv));
+        const cl = (rep.templates ?? []).find((t: any) => t.name === 'Countryless');
+        ok(cl?.hasCountry === false && cl?.hasProvision === true,
+          `[country] while the report flags it for the picker to disable — and says which of the two reasons (${JSON.stringify(cl)})`);
+        ok((rep.templates ?? []).find((t: any) => t.name === 'Standard')?.hasCountry === true, '[country] a template that names one is not flagged');
+      } finally { rtTemplates = rtTemplates.filter((t: any) => t.id !== 'TPL4'); }
+    }
+
+    // ── the bundle: a fourth way to be handed it ─────────────────────────────────────────────────────
+    {
+      ok((await rpCall('/kit/spk.js', rpRes)).status === 200,
+        '[provision] a reseller who can see the Ringotel Integration page IS handed the console bundle');
+      ok((await rpCall('/kit/spk.js', rpRes, rpOff)).status === 204,
+        '[provision] and with provisioning unconfigured that same reseller gets the quiet 204 back');
     }
   }
 

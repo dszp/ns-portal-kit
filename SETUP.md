@@ -210,6 +210,38 @@ back or uses one nobody billed. Counting both sides by hand is the job this repl
 *Feature keys `onebill.view` (default `reseller`) and `onebill.write` (default `superadmin`). Off unless
 all four `ONEBILL_*` credentials are set — see [Each integration, separately](#prerequisites) below.*
 
+### Ringotel provisioning
+
+A **Ringotel Integration** entry on the Management menu that audits every NetSapiens domain against the
+Ringotel organization and connection your standard calls for, and enables a domain in one confirmed
+action: create its organization, set its sign-in mode, create its connection from your template, and bring
+this deployment's records for it up to date.
+
+To turn it on: in the Ringotel panel, configure one connection the way you want every domain's to look and
+**Save As** a template from it, then name that template in
+[`RINGOTEL_CONNECTION_TEMPLATE`](./CONFIG.md#RINGOTEL_CONNECTION_TEMPLATE). If you use Ringotel SSO, put
+its service id in [`RINGOTEL_SSO_SERVICE_ID`](./CONFIG.md#RINGOTEL_SSO_SERVICE_ID) — a different setting
+from the existing [`RINGOTEL_SSO_SERVICE`](./CONFIG.md#RINGOTEL_SSO_SERVICE), which names only the app
+sign-in message, not this page. Set [`RINGOTEL_PROVISION_DOMAINS`](./CONFIG.md#RINGOTEL_PROVISION_DOMAINS)
+to the domains this deployment may actually enable — unset, the audit still runs, but nothing can be
+written. Then open **Management → Ringotel Integration**.
+
+**The organization label matters more than it looks.** A newly created organization is named after the
+NetSapiens domain with its territory suffix stripped (`acme.12345.service` → `acme`), because that is
+what a user types into the app to find their organization before SSO signs them in. Get the label wrong
+and the domain's users cannot find themselves — and Ringotel does not currently let you rename an
+organization once created, so a wrong label from a hand-built organization shows up here as a permanent
+finding rather than something this page can fix.
+
+**Why?** Because "create this domain's app organization" is otherwise a hand sequence in the Ringotel
+panel — five steps, easy to do slightly differently each time, and nothing tells you afterward whether one
+was skipped. This page runs the same five steps every time and tells you which domains still need them.
+
+*Feature keys `ringotel.provision.view` (default `reseller`) and `ringotel.provision.write` (default
+`superadmin`). Off unless both [`RINGOTEL_API_KEY`](./CONFIG.md#RINGOTEL_API_KEY) and
+[`RINGOTEL_CONNECTION_TEMPLATE`](./CONFIG.md#RINGOTEL_CONNECTION_TEMPLATE) are set — see [CONFIG.md →
+Ringotel provisioning](./CONFIG.md#group-provision).*
+
 ### The integration console
 
 A bold **Super Portal Kit** entry in the portal opens a read-only page reporting how this deployment is
@@ -331,6 +363,8 @@ its own minimum is met.
 | **OneBill links and the account panel** | [`ONEBILL_TENANT_ID`](./CONFIG.md#ONEBILL_TENANT_ID) + [`ONEBILL_CLIENT_SECRET`](./CONFIG.md#ONEBILL_CLIENT_SECRET) + [`ONEBILL_USERNAME`](./CONFIG.md#ONEBILL_USERNAME) + [`ONEBILL_PASSWORD`](./CONFIG.md#ONEBILL_PASSWORD) | All four are the gate: any one missing and there are no OneBill calls, no menu entry and no routes. The custom-field group named by [`ONEBILL_LINK_GROUP`](./CONFIG.md#ONEBILL_LINK_GROUP) must already exist in OneBill — [declare it first](#onebill-group), or the page shows a setup card instead of the table. |
 | **The billing comparison** | the four above **+** [`ONEBILL_RECURRING_RULES`](./CONFIG.md#ONEBILL_RECURRING_RULES) | Unset, the panel is a fact sheet: it shows the inventory and lists every offer as unmapped. Add [`NS_FAX_SERVER_HOSTS`](./CONFIG.md#NS_FAX_SERVER_HOSTS) if you bill fax lines apart from DIDs. |
 | **Accepting a gap** | the four above **+** the [`ONEBILL_DB`](./CONFIG.md#ONEBILL_DB) D1 binding, migrated | Apply `migrations/` **before** you deploy this version. Without the binding the panel still shows every gap; it just cannot record that one of them is normal. |
+| **Ringotel provisioning (audit)** | [`RINGOTEL_API_KEY`](./CONFIG.md#RINGOTEL_API_KEY) **+** [`RINGOTEL_CONNECTION_TEMPLATE`](./CONFIG.md#RINGOTEL_CONNECTION_TEMPLATE) | Both are the gate: either missing, the menu entry is absent and its routes 404. The named template must already exist in the Ringotel panel — **Save As** one from a live connector first. |
+| **Ringotel provisioning (enable)** | the two above **+** [`RINGOTEL_PROVISION_DOMAINS`](./CONFIG.md#RINGOTEL_PROVISION_DOMAINS) | The write rail is **fail-closed**: unset refuses every enable, though the audit still renders. The run's last step, the directory reconcile, also needs the domain covered by [`RINGOTEL_WRITE_DOMAINS`](./CONFIG.md#RINGOTEL_WRITE_DOMAINS) — a separate rail; without it, that one step reports blocked and the rest of the run (organization, sign-in, connector, index) still stands. Add [`RINGOTEL_SSO_SERVICE_ID`](./CONFIG.md#RINGOTEL_SSO_SERVICE_ID) if this tenant uses Ringotel SSO. |
 | **Your own gated scripts** | [`PORTAL_SECONDARIES`](./CONFIG.md#PORTAL_SECONDARIES), plus the [`ASSETS`](./CONFIG.md#ASSETS) R2 binding for `r2:` entries | The advanced path. Most deployments start with the built-in bundles and add these later. |
 | **Rate limiting the token checks** | the [`JWT_RATE_LIMITER`](./CONFIG.md#JWT_RATE_LIMITER) binding | Optional and worth having. Without it an in-isolate limiter still applies, just per edge location. |
 

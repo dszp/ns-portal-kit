@@ -820,7 +820,7 @@ const ACME = (): ResolvedAccountScope => resolveAccountScope(REPORT(), { domain:
     '100': [
       { device: 'sip:100@acme.example', 'device-models-model': 'Yealink T54W' },
       { device: 'sip:100wp@acme.example' },
-      { device: 'sip:100t@acme.example' },
+      { device: 'sip:100tm@acme.example' },
       { device: 'sip:100r@acme.example' },
       // A suffix that is also an inherited Object key. It must read as unknown, and must not make the
       // Ringotel entry "already present" when it is the activation suffix.
@@ -847,7 +847,7 @@ const ACME = (): ResolvedAccountScope => resolveAccountScope(REPORT(), { domain:
   // left absent — the Ringotel entry has to be added to something, and adding it to {} would drop these.
   {
     const { kindOf, x } = await run({ ...base, CACHE_SCOPE: 'test-suf-default' });
-    ok(kindOf('100wp') === 'SNAPmobile Web' && kindOf('100t') === 'Teams', 'the default legend reaches the counter');
+    ok(kindOf('100wp') === 'SNAPmobile Web' && kindOf('100tm') === 'Teams', 'the default legend reaches the counter');
     ok(kindOf('100r') === '', 'and a suffix nobody has explained has no kind');
     ok(x.teams === true && x.deviceCount === 4, 'the Teams connector is detected and kept out of the count');
     ok(kindOf('100constructor') === '', 'a suffix that is an inherited Object key reads as unknown, not as something borrowed from the prototype');
@@ -876,7 +876,7 @@ const ACME = (): ResolvedAccountScope => resolveAccountScope(REPORT(), { domain:
     const { kindOf, x } = await run({ ...base, CACHE_SCOPE: 'test-suf-set',
       NS_DEVICE_SUFFIXES: '{"wp":{"label":"Acme Web"},"r":{"label":"Acme App"}}' });
     ok(kindOf('100wp') === 'Acme Web', 'a configured suffix is labelled from the configured legend');
-    ok(kindOf('100t') === '', 'and one the operator left out is unknown, because the legend replaced the default');
+    ok(kindOf('100tm') === '', 'and one the operator left out is unknown, because the legend replaced the default');
     ok(x.teams === false && x.deviceCount === 5, 'so Teams detection is off and every device is a handset');
   }
   // An operator entry wins over the derived Ringotel one: an explicit legend entry is a decision.

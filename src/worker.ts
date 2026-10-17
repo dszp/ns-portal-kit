@@ -44,11 +44,11 @@ import {
   type VerdictCache,
   type EntityRef,
 } from '@dszp/netsapiens-lib';
-import { worstSeverity, type HealthFlag, type User } from '@dszp/ringotel-lib';
+import { worstSeverity, type HealthFlag, type Organization, type User } from '@dszp/ringotel-lib';
 import { brandAccent, productName, VERSION } from './brand.js';
 import { needsSetup, setupHtml } from './setup.js';
 import { portalModeHtml } from './portalInfo.js';
-import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeWriteClient, invalidateOrgUsers, resolveForWrite, buildExtIndex, ringotelDomains, scopeOf, takePrepopLock, releasePrepopLock, connectionsOf, orgidOf, type OrgResolution, type UserAppStatus } from './ringotel.js';
+import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDomain, usersStatusForDomainFresh, orgsStatusForDomains, makeReadClient, makeWriteClient, invalidateDirectory, invalidateOrgUsers, getDirectory, resolveDomainToOrg, parseOverrides, cacheGet, cachePut, CACHE_ORIGIN, INDEX_REFRESH_MIN_INTERVAL, resolveForWrite, buildExtIndex, ringotelDomains, scopeOf, takePrepopLock, releasePrepopLock, connectionsOf, orgidOf, type OrgResolution, type UserAppStatus } from './ringotel.js';
 // The eligibility DECISION is the shared engine in the library — one implementation with the SSO worker,
 // so the two can't drift. Only this deployment's config parsing is local.
 import { evaluateEligibility, type EligUser } from '@dszp/netsapiens-lib';
@@ -60,7 +60,7 @@ import { planDomainSweep, type SweepPlan } from './nsOffboard.js';
 import {
   parseNsEventsConfig, nsEventsConfigError, verifyEventRequest, decodeEventBatch, diagShape,
   desiredSubscriptions, ownedPrefix, applySubscriptionPlan, planInertCleanup, healthLine,
-  sweepScope, isValidEventDomain, NS_EVENTS_PREFIX, locateConnection, type NsEventsConfig,
+  sweepScope, isValidEventDomain, isDomainEnabled, NS_EVENTS_PREFIX, locateConnection, type NsEventsConfig,
 } from './nsEvents.js';
 import { getServiceToken } from './nsIdentity.js';
 import { syncIdentity, deactivateAppOnly, deleteAppRecords, repairDeviceForEvent } from './ringotelActivation.js';
@@ -85,6 +85,15 @@ import {
   r2Key,
   kitConfigError,
 } from './kit.js';
+import { ringotelProvisionHtml, type DomainReport, type FleetReport } from './ringotelProvisionPage.js';
+import {
+  provisionEnabled, provisionLabel, resolveProvisionConfig, railAdmits, deriveOrgLabel, planChecklist, fleetState,
+  type ProvisionConfig, type OrgView,
+} from './ringotelProvision.js';
+import {
+  loadCatalog, loadDomainSnapshot, loadFleetSnapshot, snapshotForDomain, applyStep, resolveTemplateChoice, orphanNamed, ProvisionRefused,
+  type ApplyOutcome, type ApplyStep, type Catalog, type DomainSnapshot, type FleetSnapshot,
+} from './ringotelProvisionApply.js';
 import { onebillHtml } from './onebillPage.js';
 import { onebillEnabled, onebillConfigError, loadLinkReport, applyLinks, refreshAppliedAccounts, OnebillRequestError, type ApplyOp, type LinkReport } from './onebill.js';
 import { loadAccountReport, applyBaselineAction, applyAssignment, AccountReadError, type BaselineAction, type AssignRequest } from './onebillAccount.js';
@@ -141,6 +150,22 @@ interface Env {
   RINGOTEL_PRESENCE?: string;
   /** Optional JSON `{ "<nsDomain>": "<branchAddressToMatch>" }` for rare address mismatches. */
   RINGOTEL_OVERRIDES?: string;
+
+  // ── Ringotel provisioning (src/ringotelProvision.ts) — API key + connection template ⇒ on ───────
+  /** WRITE SAFETY RAIL — domains this deployment may ENABLE for the app. `*`, a CSV list, or `*` with
+   *  `!domain` exclusions. Unset ⇒ no domain may be enabled; the audit still renders. */
+  RINGOTEL_PROVISION_DOMAINS?: string;
+  /** NAME of the Ringotel connection template new connections are created from and audited against. It
+   *  must match exactly one template in the tenant; with the API key, its presence turns the page on. */
+  RINGOTEL_CONNECTION_TEMPLATE?: string;
+  /** FULL Ringotel SSO service id — the whole value an org's `params.sso` carries. Distinct from
+   *  RINGOTEL_SSO_SERVICE, which holds only the name half for the app-access surface. Unset ⇒ this
+   *  deployment does no Ringotel SSO and has no opinion about `params.sso`. */
+  RINGOTEL_SSO_SERVICE_ID?: string;
+  /** NAME of the subscription package a new organization is created with, resolved against getPackages. */
+  RINGOTEL_DEFAULT_PACKAGE?: string;
+  /** NAME of the region a new organization is created in, resolved against getRegions. */
+  RINGOTEL_REGION?: string;
 
   // ── OneBill (src/onebill.ts) — all four credentials present ⇒ on ────────────────────────────────
   /** OneBill tenant identifier (Config > Settings > Business Profile). A var, not a secret. */
@@ -439,6 +464,14 @@ export const ROUTES = {
   // Moving one inventory item to another billing account is the same kind of durable decision, and it
   // clears the acceptance the account it leaves had recorded against it. `write`.
   '/kit/onebill/assign': { sensitivity: 'write' },
+  // The Ringotel Integration page, its fleet audit and one domain's checklist. `read` on the same grounds
+  // as the OneBill pair above: all three disclose the fleet's domains and their app state, which
+  // requireFleetRead already bounds to a principal that can read them anyway.
+  '/kit/ringotel': { sensitivity: 'read' },
+  '/kit/ringotel/fleet': { sensitivity: 'read' },
+  '/kit/ringotel/domain': { sensitivity: 'read' },
+  // Creating a Ringotel organization and its connection is a live write to another vendor's tenant. `write`.
+  '/kit/ringotel/enable': { sensitivity: 'write' },
   '/me/status': { sensitivity: 'read' },
   '/me/devices': { sensitivity: 'read' },
   '/me/resetPassword': { sensitivity: 'write' },
@@ -446,7 +479,7 @@ export const ROUTES = {
 } satisfies Record<string, { sensitivity: CallSensitivity }>;
 
 /** POST paths — the write routes. Everything else is GET-only (405 otherwise). */
-const WRITE_PATHS = new Set(['/rapp/activate', '/rapp/resetPassword', '/me/resetPassword', '/rapp/prepop/apply', '/kit/onebill/apply', '/kit/onebill/baseline', '/kit/onebill/assign']);
+const WRITE_PATHS = new Set(['/rapp/activate', '/rapp/resetPassword', '/me/resetPassword', '/rapp/prepop/apply', '/kit/onebill/apply', '/kit/onebill/baseline', '/kit/onebill/assign', '/kit/ringotel/enable']);
 
 /**
  * Routes matched by PREFIX rather than exact pathname, because they carry path parameters.
@@ -497,6 +530,50 @@ const OB_POST_PATHS = new Set(['/kit/onebill/apply', '/kit/onebill/baseline', '/
  * was refused for asking — the whole point of putting 403 ahead of 409 on these routes is that "you may
  * not ask about this" must not be distinguishable from "there is nothing to say about it".
  */
+/** The Ringotel Integration routes that take a POST. Same relationship to {@link WRITE_PATHS} as
+ *  {@link OB_POST_PATHS}: restated because this block answers its own method gate first. */
+const RP_POST_PATHS = new Set(['/kit/ringotel/enable']);
+
+/**
+ * The steps `POST /kit/ringotel/enable` accepts.
+ *
+ * `org`, `signin` and `connector` are `applyStep`'s own; `index` and `reconcile` are this Worker's (a
+ * cache drop and the directory reconcile); `all` runs the five in that order. `package` is deliberately
+ * NOT here and never will be — a package is set ON CREATE and a live organization on a different one is a
+ * finding, not a fix — so a body asking for it is a 422 like any other unknown step, not a 500.
+ */
+const RP_STEPS = new Set(['all', 'org', 'signin', 'connector', 'index', 'reconcile']);
+/** Control characters, written as escapes on purpose: a literal one in source is invisible to `grep` and
+ *  to the leak guard's manual path. Bans them from every choice field an enable body carries. */
+const RP_CONTROL_RE = /[\u0000-\u001F\u007F]/;
+/**
+ * What one enable STEP did.
+ *
+ * `ApplyOutcome`'s three Ringotel writes, plus this Worker's own two — dropping the cached org index and
+ * running the directory reconcile — which write nothing to Ringotel's org/branch surface and so have no
+ * business in that module's type. `reason` carries the WRITE rail's refusal on a blocked reconcile: the
+ * one step whose own gate can decline after the four before it already ran.
+ */
+type ProvisionOutcome = ApplyOutcome | { step: 'index' | 'reconcile'; action: 'refreshed' | 'reconciled' | 'blocked' | 'noop'; orgid?: string; branchid?: string; reason?: string };
+/** Shape refusal for an enable body. Names the whole accepted vocabulary and echoes nothing the caller
+ *  typed — every field here is bounded, and a refusal that quotes the input is a refusal that carries it. */
+const RP_BODY_422 = 'Body must be { domain, step: "all"|"org"|"signin"|"connector"|"index"|"reconcile", choice?: { pkg?, label?, orgName?, template? (each 1-64 characters, no control characters), signin?: "sso"|"credentials" } }';
+/** A template's ms-epoch save stamp as the page reads it: an ISO string, or null.
+ *
+ *  `new Date(x).toISOString()` THROWS on an out-of-range number, and this value comes from a vendor's
+ *  catalog rather than from us — a RangeError here would turn one odd template record into a 500 on the
+ *  whole page. An unreadable stamp is null, which the picker already renders as "name, no date". */
+const isoStamp = (ms: number | null): string | null => {
+  if (ms === null) return null;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+
+/** How long the fleet audit's dig is reused. Five minutes: the audit is 1 + N Ringotel calls and an
+ *  operator working through a list reloads it repeatedly, while nothing a WRITE decides is ever read from
+ *  it — every apply path digs live (see `loadDomainSnapshot`). `?refresh=1` bypasses it. */
+const PROVISION_FLEET_TTL = 300;
+
 const OB_DOMAIN_403 = 'That domain is not in your visible set';
 const OB_ACCOUNT_403 = 'That account holds a domain that is not in your visible set';
 
@@ -1871,6 +1948,7 @@ async function handleNsEvent(request: Request, env: Env, cfg: NsEventsConfig, ct
     msg: 'ns-event', domain: verdict.domain, correlationId: verdict.correlationId, sourceIp: ip,
     total: decoded.total, users: decoded.users.length, truncated: decoded.truncated,
     unidentified: decoded.unidentified, domainMismatch: decoded.domainMismatch, domainAbsent: decoded.domainAbsent,
+    ...(decoded.unidentifiedShapes.length ? { unidentifiedShapes: decoded.unidentifiedShapes } : {}),
   }));
 
   ctx.waitUntil(
@@ -2531,6 +2609,461 @@ export default {
       }
     }
 
+
+    // ── The Ringotel Integration page: the fleet audit, one domain's checklist, and the one write.
+    // Placed HERE, beside the OneBill block and ahead of Group 2, for exactly the reason that one is: it
+    // is delivered by the console bundle and read through the same bridge, so a deployment broken in one
+    // of Group 2's ways must not turn this into a bare 500 either.
+    //
+    // THIS BLOCK IS THE WHOLE ENFORCEMENT SURFACE of the feature. The rail, the two feature keys, the
+    // fleet-read backstop, domain visibility and fresh auth are checked nowhere else, and it is the only
+    // caller of `ringotelProvisionApply`'s write surface. The gate chain, in order, each step load-bearing:
+    //   404 when provisioning is unconfigured — an off integration has no routes,
+    //   405 before any auth work, so a GET on the write route is a client bug rather than a body-parse 500,
+    //   a delegated principal, `ringotel.provision.view`, then requireFleetRead — the fleet table names
+    //     every domain this deployment can see, so a `users:` grant to a domain-locked account is refused,
+    //   503 on configuration that cannot be resolved, and only then the write gates on the enable path.
+    if (url.pathname === '/kit/ringotel' || url.pathname === '/kit/ringotel/fleet'
+      || url.pathname === '/kit/ringotel/domain' || url.pathname === '/kit/ringotel/enable') {
+      try {
+        if (!provisionEnabled(env)) throw new HttpError(404, 'Not found');
+        // The generic method gate lives after this block, so state the same rule here rather than letting
+        // a GET fall into the enable handler. `/kit/ringotel/enable` is in WRITE_PATHS too — unreachable
+        // for this path since this block returns first, but that table is the declared POST allowlist and
+        // a write missing from it is a lie.
+        const isPost = RP_POST_PATHS.has(url.pathname);
+        if (isPost ? request.method !== 'POST' : request.method !== 'GET') throw new HttpError(405, 'Method not allowed');
+        const auth = await resolveAuth(request, env, policies);
+        // The operator's own word for the app, read STRAIGHT OFF env rather than from `cfg` — every
+        // refusal in this chain happens before `resolveProvisionConfig` can be trusted to have resolved,
+        // and one of them IS the refusal that it did not. A white-label deployment must not read the
+        // vendor's name in its own portal, least of all in an error.
+        const rpLabel = provisionLabel(env);
+        if (!auth.principal) throw new HttpError(403, `${rpLabel} Integration requires a delegated ns_t`);
+        requireFeature(auth, 'ringotel.provision.view', env, policies);
+        requireFleetRead(auth.principal, env, `The ${rpLabel} Integration page`);
+        let cfg: ProvisionConfig;
+        try { cfg = resolveProvisionConfig(env); } catch (e) { throw new HttpError(503, `${rpLabel} provisioning is misconfigured: ${(e as Error).message}`); }
+        // The checklist's last row reports the three OTHER rails, and the reconcile step is gated on one
+        // of them. Neither has a safe "unparseable" reading: a rail that will not parse is not a rail that
+        // covers nothing, it is a deployment nobody can answer for — and reading it as "not covered" would
+        // render a confident finding about a setting we failed to read. 503 naming it, before any upstream.
+        const railsErr = nsEventsConfigError(env) ?? ringotelConfigError(env);
+        if (railsErr) throw new HttpError(503, `${rpLabel} provisioning is misconfigured: ${railsErr}`);
+        // The ONLY thing that decides whether a write surface exists — for the page's markup here, and for
+        // the enable route's own `requireWriteFeature` below. A reader is rendered no control at all.
+        const canWrite = can(auth.principal, 'ringotel.provision.write', policies);
+        // `appLabel` on every document this block answers with: the page says the operator's own name for
+        // the app in its title, its chips and its dialogs, and the mirrored renderers read it off the
+        // report rather than holding a literal.
+        const shell = { canWrite, version: VERSION, ssoConfigured: cfg.ssoServiceId !== null, railSet: cfg.rail !== null, appLabel: cfg.appLabel };
+
+        // The page WITHOUT a ?domain= needs no domain set at all: answer before the NetSapiens round-trip,
+        // exactly as the OneBill page does. Only a prefilter, the fleet audit, a checklist and an enable
+        // pay for listDomains.
+        if (url.pathname === '/kit/ringotel' && !url.searchParams.get('domain')) {
+          return new Response(ringotelProvisionHtml(shell), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors, 'Cache-Control': 'private, no-store' } });
+        }
+
+        // The caller's OWN NS-visible domains, minus block/allow — the same derivation the OneBill block
+        // makes, and the only domain set that reaches Ringotel, bounds a write, or validates a prefilter.
+        const nsClient = new NsClient({ server: assertBareServer(env.NS_SERVER), token: auth.token });
+        const allow = domainAllowlist(env);
+        const block = domainBlocklist(env);
+        const nsRecords = auth.lockedDomain ? [{ domain: auth.lockedDomain }] : await listDomains(nsClient);
+        const nsDomains = nsRecords.map((d) => d.domain);
+        const visible = (d: string): boolean => (!allow || allow.has(normDomain(d))) && !block.has(normDomain(d));
+        const doms = nsDomains.filter(visible);
+        /** The NS domain's own description, for the drilldown's head and the create's name default. Read
+         *  from the list this caller was already served, so it costs nothing and cannot name a domain they
+         *  cannot see. */
+        const describe = (d: string): string | null =>
+          (nsRecords.find((x) => normDomain(x.domain) === normDomain(d))?.description ?? '').trim() || null;
+
+        if (url.pathname === '/kit/ringotel') {
+          // The domain the portal was already on when the menu entry was clicked. Accepted ONLY when it
+          // names a domain THIS caller can see — compared with normDomain so a case difference still
+          // matches — and rendered back with `doms`' OWN spelling, never the query string's: a
+          // caller-supplied string never reaches markup unvalidated. Unknown or blocked render no
+          // prefilter, same as no ?domain= at all.
+          const rawPrefilter = url.searchParams.get('domain');
+          const prefilter = rawPrefilter ? doms.find((d) => normDomain(d) === normDomain(rawPrefilter)) : undefined;
+          return new Response(ringotelProvisionHtml({ ...shell, ...(prefilter ? { prefilter } : {}) }), { headers: { 'content-type': 'text/html; charset=utf-8', ...cors, 'Cache-Control': 'private, no-store' } });
+        }
+
+        const scope = scopeOf(env);
+        const overrides = parseOverrides(env);
+        const reader = makeReadClient(env);
+        const refresh = url.searchParams.get('refresh') === '1';
+        const eventsCfg = parseNsEventsConfig(env);
+        const rtCfg = resolveRingotelConfig(env);
+        /** The three OTHER rails, for this domain. Pure, read from this deployment's own settings and
+         *  never from the request — the `rails` checklist row and the fleet row both take them from here,
+         *  so a finding on one cannot disagree with the other. */
+        const railsFor = (d: string) => ({
+          eventsCovered: isDomainEnabled(eventsCfg, d),
+          prepopCovered: prepopArmed(d, rtCfg),
+          writeCovered: isDomainWritable(d, rtCfg.writeDomains),
+        });
+        // The fleet audit's cached dig and the lock that coalesces its Refresh. Declared HERE rather than
+        // inside the fleet branch because the WRITE path has to drop both — see `invalidateFleet`.
+        const fleetKey = `${CACHE_ORIGIN}/${scope}/provision/fleet`;
+        const fleetRefreshKey = `${CACHE_ORIGIN}/${scope}/provision/fleet-refresh`;
+        /**
+         * After a write: drop the fleet entry AND the lock that would refuse to re-dig it.
+         *
+         * ⚠️ BOTH, OR THE PAGE LIES. The page re-reads the fleet the moment an enable reports a step that
+         * ran, and that read is a forced refresh — which the coalescer downgrades inside its 60 s window,
+         * to an entry that can be five minutes old. The operator would then watch a row they just changed
+         * report its previous state. Dropping the entry alone is not enough either: the next PLAIN read
+         * would re-dig, but a refresh inside the window is exactly what arrives first, and it would
+         * repopulate the entry from... nothing, having been downgraded. A write is the one legitimate
+         * reason to re-dig inside the window, so it clears the window too.
+         */
+        const invalidateFleet = async (): Promise<void> => {
+          await caches.default.delete(new Request(fleetKey));
+          await caches.default.delete(new Request(fleetRefreshKey));
+        };
+        /**
+         * Does `RINGOTEL_OVERRIDES` replace this domain's branch address?
+         *
+         * Looked up EXACTLY as `matchOrgsForDomain` does — the same key, no normalisation — so this is
+         * true precisely when the override is the one actually in effect. A looser reading would block a
+         * domain whose override does nothing, and a different one would miss a domain whose override
+         * does. Both halves of this feature ask through here: the checklist, so no fix is offered, and
+         * the write route, so none is accepted.
+         *
+         * `!= null`, and the LOOSE comparison is the point: it is precisely the test `??` itself makes, so
+         * a JSON `null` value — which `overrides[dom] ?? dom` falls through on, leaving the domain NOT
+         * overridden — reads the same here as it does there. `!== undefined` would have blocked
+         * provisioning on an override that does nothing.
+         */
+        const overridden = (dom: string): boolean => overrides[dom] != null;
+        /** The RAW organization the planner reads (`packageid`, `params`), not the library's projected
+         *  entry, which carries neither. `domain` is optional upstream and required here: the label is
+         *  what this whole page compares against, so an absent one reads as '' and mismatches loudly
+         *  rather than being silently skipped. */
+        const orgView = (o: Organization | null): OrgView | null => (o ? { ...o, id: String(o.id), domain: String(o.domain ?? '') } : null);
+
+        if (url.pathname === '/kit/ringotel/fleet') {
+          const catalog = await loadCatalog(reader, cfg);
+          // The fleet dig, briefly cached under a PROVISION-scoped key — its own, not the directory's:
+          // this entry is the raw orgs and branches (packages, params, connector config), which the
+          // projected index does not carry, and merging the two would give one of them the other's TTL.
+          // ⚠️ A REFRESH BUTTON IS AN AMPLIFIER unless something bounds it. This dig is 1 + N Ringotel
+          // calls and the page puts a Refresh beside a table an operator is already impatient with — so a
+          // forced refresh is COALESCED exactly as `getDirectory`'s is, on the same 60 s window and the
+          // same read-then-write lock: the first press per window re-digs, the rest are served the entry
+          // it wrote. Downgraded, never refused — the caller still gets the fleet, just not a new one.
+          let doRefresh = refresh;
+          if (doRefresh) {
+            if (await cacheGet<{ t: number }>(caches.default, fleetRefreshKey)) doRefresh = false;
+            else await cachePut(caches.default, fleetRefreshKey, { t: 1 }, INDEX_REFRESH_MIN_INTERVAL);
+          }
+          let entry = doRefresh ? undefined : await cacheGet<{ generatedAt: string; snap: FleetSnapshot }>(caches.default, fleetKey);
+          if (!entry) {
+            entry = { generatedAt: new Date().toISOString(), snap: await loadFleetSnapshot(reader) };
+            await cachePut(caches.default, fleetKey, entry, PROVISION_FLEET_TTL);
+          }
+          // `inIndex` is a fact about OUR cache, not about Ringotel, so it is read from the cached
+          // directory — the same entry every other feature resolves a domain through. A row that said
+          // "in the index" from a fresh dig would be answering a different question from the one the
+          // `index` checklist row offers to fix.
+          const index = await getDirectory(reader, caches.default, scope, doRefresh);
+          const rows = doms.map((d) => {
+            const snap = snapshotForDomain(entry!.snap, d, overrides);
+            return fleetState({
+              domain: d, cfg, org: orgView(snap.org), branches: snap.branches,
+              template: catalog.template, packages: catalog.packages,
+              inIndex: !!resolveDomainToOrg(index, d, overrides), orgCount: snap.orgCount, orgCountBy: snap.orgCountBy,
+              addressOverride: overridden(d), ...railsFor(d),
+            });
+          });
+          // COUNTED, NEVER NAMED. Same predicate the OneBill report is handed, applied to the NS domain
+          // list: a domain this deployment's allow/block lists removed is reported as a number so the
+          // operator knows the table is not the whole fleet, and is not discoverable from the page that
+          // says so. An explicitly BLOCKED domain counts whether or not this token could list it.
+          const nsSeen = new Set(nsDomains.map(normDomain));
+          const hidden = (value: string): boolean => block.has(normDomain(value)) || (nsSeen.has(normDomain(value)) && !visible(value));
+          const report: FleetReport = {
+            rows, hidden: nsDomains.filter(hidden).length, generatedAt: entry.generatedAt,
+            template: catalog.template?.name ?? null, templateProblem: catalog.templateProblem,
+            appLabel: cfg.appLabel,
+          };
+          return json(report, 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+        }
+
+        /** One domain's checklist as it now reads. The GET answers with it and so does an enable, which is
+         *  the point of building it once: the page redraws the same document either way, so a step that ran
+         *  and a step that was only read cannot render different findings from the same state. */
+        const domainReport = async (d: string, snap: DomainSnapshot, catalog: Catalog, reconciled: boolean | null): Promise<DomainReport> => {
+          const index = await getDirectory(reader, caches.default, scope);
+          // The connection-less organization a create here would collide with, so the page can prefill
+          // ITS domain name instead of the derivation and say why. Two sources, one meaning: the record
+          // the snapshot adopted, or — when nothing was adopted — one an earlier run created under a
+          // CUSTOM label, found by the name this create would give it (`applyOrg`'s own rule, through
+          // `orphanNamed`, so the prefill and the refusal cannot name different records). The default
+          // name is what the page prefills into the Name field: the NS description, else the derivation.
+          const orphan = snap.adopted
+            ? snap.org
+            : snap.org ? null : orphanNamed(snap.orphans, describe(d) ?? deriveOrgLabel(d)) ?? null;
+          const rows = planChecklist({
+            domain: d, cfg, org: orgView(snap.org), branches: snap.branches,
+            template: catalog.template, packages: catalog.packages,
+            inIndex: !!resolveDomainToOrg(index, d, overrides), reconciled,
+            // The same fact the write route refuses on, so the page cannot offer a fix the route declines.
+            addressOverride: overridden(d), ...railsFor(d),
+          });
+          return {
+            domain: d, rows,
+            label: { derived: deriveOrgLabel(d), current: snap.org ? String(snap.org.domain ?? '') : null },
+            packages: catalog.packages.map((p) => p.name),
+            defaultPackage: cfg.defaultPackage,
+            // EVERY template, in the order `loadCatalog` sorted them (newest first) — the picker draws
+            // what it is handed rather than re-deriving an order the create would not share. The ms-epoch
+            // stamp becomes an ISO string here, because the page is the only thing that reads it and a
+            // date is what it shows; an unusable stamp is null rather than a `new Date()` that throws.
+            templates: catalog.templates.map((t) => ({ name: t.name, createdAt: isoStamp(t.created), hasProvision: t.hasProvision, hasCountry: t.hasCountry })),
+            defaultTemplate: cfg.templateName,
+            ssoConfigured: cfg.ssoServiceId !== null,
+            orgName: snap.org ? String(snap.org.name ?? '') || null : null,
+            nsDescription: describe(d),
+            appLabel: cfg.appLabel,
+            ...(orphan ? { orphanLabel: String(orphan.domain ?? '') } : {}),
+          };
+        };
+
+        if (url.pathname === '/kit/ringotel/domain') {
+          // Validated exactly as the page's prefilter is, and refused with the wording every other
+          // invisible-domain refusal uses: "you may not ask about this" must not be distinguishable from
+          // "there is nothing to say about it", or the route becomes an existence oracle for another
+          // reseller's domains.
+          const raw = url.searchParams.get('domain') ?? '';
+          const d = doms.find((x) => normDomain(x) === normDomain(raw));
+          if (!d) throw new HttpError(403, OB_DOMAIN_403);
+          // FRESH, not the fleet entry. A read by a view-holder costs 1 + N Ringotel calls and that is
+          // accepted (CONFIG.md says so): this is the document an operator decides from, and deciding from
+          // a five-minute-old dig is deciding from a fleet that may already have the org being created.
+          const [catalog, snap] = await Promise.all([loadCatalog(reader, cfg), loadDomainSnapshot(reader, d, overrides)]);
+          // `reconciled: null` — whether the directory reconcile has ever run for this domain is not
+          // recorded anywhere, and null is "unknown". Only running it here turns it true.
+          return json(await domainReport(d, snap, catalog, null), 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+        }
+
+        // ── POST /kit/ringotel/enable ──────────────────────────────────────────────────────────────
+        // Both write gates on top of the read chain above, then a fresh /jwt: a server-side logout must
+        // not leave a cached verdict good enough to create an organization in a vendor's tenant.
+        requireWriteFeature(auth, 'ringotel.provision.write', policies);
+        await requireFreshAuth(auth, env);
+        const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+        const rawDomain = typeof body?.domain === 'string' ? body.domain.trim() : '';
+        // A body with no domain at all is a client bug, not a domain the caller may not see — and
+        // answering it with the invisible-domain refusal would send an operator hunting for a permission
+        // problem that is not there. An EMPTY string is not a domain claim, so saying so leaks nothing.
+        if (!rawDomain) throw new HttpError(422, RP_BODY_422);
+        const d = doms.find((x) => normDomain(x) === normDomain(rawDomain));
+        if (!d) throw new HttpError(403, OB_DOMAIN_403);
+        const step = typeof body?.step === 'string' ? body.step : '';
+        if (!RP_STEPS.has(step)) throw new HttpError(422, RP_BODY_422);
+        // Every choice field is bounded HERE, before the rail and before any upstream call. They are short
+        // labels an operator typed, and one of them becomes a durable Ringotel organization name — so the
+        // bound is on the way in, not on the way to the write. An empty value is ABSENT rather than a
+        // refusal: `applyStep` already reads "" as "use the configured default" for the package and the
+        // label, and a form that submits its untouched fields must not be a 422.
+        const bounded = (v: unknown): string | null | undefined => {
+          if (v === undefined || v === null) return undefined;
+          if (typeof v !== 'string') return null;
+          const t = v.trim();
+          if (!t) return undefined;
+          return t.length > 64 || RP_CONTROL_RE.test(t) ? null : t;
+        };
+        const rawChoice = body?.choice && typeof body.choice === 'object' && !Array.isArray(body.choice) ? body.choice as Record<string, unknown> : {};
+        const pkg = bounded(rawChoice.pkg), label = bounded(rawChoice.label), orgName = bounded(rawChoice.orgName);
+        const template = bounded(rawChoice.template);
+        if (pkg === null || label === null || orgName === null || template === null) throw new HttpError(422, RP_BODY_422);
+        const signin: 'sso' | 'credentials' | undefined = rawChoice.signin === 'sso' || rawChoice.signin === 'credentials' ? rawChoice.signin : undefined;
+        if (rawChoice.signin !== undefined && signin === undefined) throw new HttpError(422, RP_BODY_422);
+        const choice = { ...(pkg ? { pkg } : {}), ...(label ? { label } : {}), ...(orgName ? { orgName } : {}), ...(template ? { template } : {}), ...(signin ? { signin } : {}) };
+
+        // ⚠️ THE RAIL, BEFORE ANY RINGOTEL CALL. `RINGOTEL_PROVISION_DOMAINS` bounds WHERE this feature may
+        // write, orthogonally to WHO may ask; a domain it does not admit costs no upstream read at all, so
+        // the refusal cannot be timed against a read that happened anyway.
+        if (!railAdmits(cfg.rail, d)) throw new HttpError(403, 'That domain is not in RINGOTEL_PROVISION_DOMAINS');
+        // ⚠️ AN OVERRIDDEN DOMAIN NEVER CONVERGES. Every create here writes `address: <the NS domain>`,
+        // while matching goes through the override — so the connection this would build is not the one the
+        // override points at, the checklist would go on offering the same create, and each press would add
+        // another connection. 422, not 403: the caller may ask, this page cannot carry it out. The
+        // checklist blocks the same rows from the same fact, so the page never offers what this refuses.
+        // ⚠️ AND IT IS NOT ONLY THE CREATES. An override points this domain at an organization that may be
+        // serving OTHER domains too — so `signin`, which rewrites that organization's `params`, would be a
+        // cross-domain write made on one domain's behalf, and the reconcile would populate that
+        // organization's directory from this domain's users. Every writing step is refused, not just the
+        // two that would build something at the wrong address.
+        if (overridden(d)) throw new HttpError(422, 'This domain has an address override; provisioning from this page is not supported for it');
+
+        // ⚠️ ONE ENABLE PER DOMAIN AT A TIME, and the lock is taken BEFORE the first Ringotel read.
+        // Two concurrent enables of a fresh domain both dig, both see no organization, and both create one
+        // — leaving the domain with two, which is the state `applyOrg` refuses everything on and no button
+        // here can undo. The read-then-write below is the same best-effort coalescer the reconcile uses
+        // (see `takePrepopLock`: a same-colo serializer, not a distributed mutex) and it buys the case that
+        // actually happens — one operator, two tabs, or a double-click.
+        //
+        // The SAME key as the reconcile's, deliberately: both write to this domain's Ringotel records, and
+        // two locks would let an enable and a cron reconcile run against it at once while each held its
+        // own. Released before the reconcile step below, which takes it again itself.
+        const run = await takePrepopLock(caches.default, scope, d);
+        if (!run) throw new HttpError(409, 'An enable is already running for this domain');
+
+        const outcomes: ProvisionOutcome[] = [];
+        let stoppedAt: { step: string; error: string } | undefined;
+        let reconciled: boolean | null = null;
+        // One structured line per step, carrying the ids a later question ("which org did that create?")
+        // needs and NOTHING the operator typed: no label, no package, no organization name, no credential.
+        const note = (o: ProvisionOutcome): void => {
+          outcomes.push(o);
+          console.log(JSON.stringify({ msg: 'ringotel provision', domain: d, step: o.step, outcome: o.action, ...(o.orgid ? { orgid: o.orgid } : {}), ...(o.branchid ? { branchid: o.branchid } : {}) }));
+        };
+        const stop = (s: string, e: unknown): void => {
+          // A refusal is this feature's OWN verdict and is safe to repeat; anything else is an upstream
+          // fault whose message can carry a response body, so it is logged and never returned. Same rule
+          // the generic NS 502 has had a regression guard for since the info-leak fix.
+          if (e instanceof ProvisionRefused || e instanceof HttpError) stoppedAt = { step: s, error: e.message };
+          else {
+            console.error(JSON.stringify({ msg: 'ringotel provision failed', domain: d, step: s, error: (e as Error).message }));
+            stoppedAt = { step: s, error: 'That step failed against Ringotel. The reason is in this deployment’s logs.' };
+          }
+        };
+
+        const all = step === 'all';
+
+        /**
+         * The Ringotel write phase, inside the lock.
+         *
+         * Its own function for the reason `runDomainReconcile` is one: the release has to sit in a
+         * `finally` that cannot be separated from the body it releases for, or a run that throws wedges
+         * the domain until the TTL lapses. It returns the catalog and the snapshot the last write left
+         * behind, because the checklist at the end is built from them.
+         */
+        const writePhase = async (): Promise<{ catalog: Catalog; snap: DomainSnapshot }> => {
+          try {
+            const catalog = await loadCatalog(reader, cfg);
+            // ⚠️ FAIL CLOSED ON THE CONFIGURED STANDARD, BEFORE THE FIRST WRITE. The checklist already
+            // refuses to offer a create when `RINGOTEL_CONNECTION_TEMPLATE` resolves to nothing — the org
+            // row is not fixable — and this is the route saying the same thing, so a hand-made POST cannot
+            // do what the page will not offer. It holds WHATEVER the body chose: a deployment whose
+            // standard does not resolve has no audit to bring a domain to, and creating one from a
+            // different template would leave a connection nothing here can ever compare.
+            if ((all || step === 'org' || step === 'connector') && catalog.template === null) {
+              throw new ProvisionRefused(`RINGOTEL_CONNECTION_TEMPLATE does not resolve to a single connection template, so nothing can be created here: ${catalog.templateProblem ?? 'the setting names no template this tenant has.'}`, 422);
+            }
+            // ⚠️ AND THE CHOSEN TEMPLATE, ALSO BEFORE THE FIRST WRITE. `all` applies org, then sign-in,
+            // then connector — so a template that cannot build a connection (unknown, ambiguous, or
+            // carrying no PBX settings) would refuse at the LAST of the three and leave the domain with an
+            // organization and no connection for somebody to finish by hand. Asked here for the throw;
+            // `applyConnector` asks the same function again for the answer, so the two cannot disagree.
+            if (all || step === 'connector') resolveTemplateChoice(catalog, cfg, choice.template);
+            // FRESH, and re-dug after every writing step below. Nothing cached ever decides a write here.
+            // ⚠️ THE TYPED LABEL REACHES THE DIG. A first run under a custom label leaves an organization
+            // whose domain name this domain does not derive, so the snapshot cannot recognise it from the
+            // domain alone — and the retry, whose label input the page prefilled with that very label,
+            // would be refused and told to type it. Handing `choice.label` down is what makes the
+            // resubmitted run `org: noop`, `connector: created` instead of a second dead end.
+            let snap = await loadDomainSnapshot(reader, d, overrides, choice.label);
+            const writer = makeWriteClient(env);
+            const writeSteps: ApplyStep[] = all ? ['org', 'signin', 'connector'] : step === 'org' || step === 'signin' || step === 'connector' ? [step] : [];
+            for (const s of writeSteps) {
+              // ENABLE MEANS "bring this domain to the standard", so a step the world already satisfies is a
+              // `noop` — not the 409 `applyStep` answers a deliberate re-run with. The operator who asks for
+              // `org` on a domain that already has one is saying something different from the operator who
+              // presses Enable on a half-finished domain, and the two deserve different answers. The refusals
+              // themselves stay in `applyStep`: this skips a step, it never decides one is safe.
+              if (all && s === 'org' && snap.orgCount === 1) { note({ step: 'org', action: 'noop', ...(snap.org ? { orgid: String(snap.org.id) } : {}) }); continue; }
+              if (all && s === 'connector' && snap.orgCount === 1 && snap.branches.length > 0) { note({ step: 'connector', action: 'noop', ...(snap.org ? { orgid: String(snap.org.id) } : {}) }); continue; }
+              try {
+                const out = await applyStep(s, writer, { domain: d, cfg, catalog, snap, choice });
+                note(out);
+                if (out.action !== 'noop') {
+                  // The fleet moved. Drop this scope's index so the next read rebuilds, drop the org's user
+                  // list, and RE-DIG before the next step — one snapshot for the whole loop would have
+                  // `signin` and `connector` 409 against the organization `org` has just created.
+                  await invalidateDirectory(caches.default, scope);
+                  await invalidateFleet();
+                  if (out.orgid) await invalidateOrgUsers(caches.default, scope, out.orgid);
+                  snap = await loadDomainSnapshot(reader, d, overrides, choice.label);
+                  // ⚠️ AN ORGANIZATION WITH NO CONNECTION IS INVISIBLE TO THE DIG. The index is per-BRANCH and
+                  // a branch is what carries the address, so the organization `org` has just created matches
+                  // nothing until `connector` runs — and `signin` in between would refuse it as "the
+                  // organization must exist". That is a fact about the sequence, which is this route's to
+                  // know: the dig is not wrong, it simply cannot answer an address question about a record
+                  // that has no address yet. Bound as tightly as it can be — the id came back from THIS run's
+                  // own create, and the re-dig is what confirms the record is really in the tenant, so nothing
+                  // here can adopt an organization we did not make.
+                  if (snap.orgCount === 0 && out.orgid) {
+                    const mine = snap.orgs.find((o) => String(o.id) === out.orgid);
+                    if (mine) snap = { ...snap, org: mine, orgCount: 1, branches: [] };
+                  }
+                }
+              } catch (e) { stop(s, e); break; }
+            }
+
+            if (!stoppedAt && (all || step === 'index')) {
+              // A cache drop of OURS, not a write: the index is evicted rather than force-refreshed, because
+              // `getDirectory(refresh)` is rate-limited by a 60 s lock and silently serves the cached entry
+              // inside it — which, right after an organization was created, is the wrong answer.
+              await invalidateDirectory(caches.default, scope);
+              await getDirectory(reader, caches.default, scope);
+              note({ step: 'index', action: 'refreshed' });
+            }
+            return { catalog, snap };
+          } finally {
+            // Released BEFORE the reconcile step below, which takes this SAME key itself and would otherwise
+            // report `abort`/`locked` against our own lock — an enable that silently reconciled nothing.
+            await releasePrepopLock(caches.default, scope, d, run);
+          }
+        };
+        const { catalog, snap } = await writePhase();
+
+        if (!stoppedAt && (all || step === 'reconcile')) {
+          // ⚠️ THE WRITE RAIL FIRST, and here rather than inside `reconcileDomainDirectory`: that function
+          // is reached by four independent doors and every one of them asserts this itself (see the
+          // prepop/apply route). Surfaced as a BLOCKED OUTCOME rather than a 500 because on an `all` run
+          // it is the last step and the four before it really did happen — an enable that created an
+          // organization and then answered 500 would read as "nothing was enabled".
+          let blocked: string | null = null;
+          // BOTH halves of the refusal. `HttpError.message` says which domain was refused and `reason`
+          // says which setting refused it — the actionable half, and the one an operator needs to go fix.
+          // Joined here because an outcome carries one string, and dropping either leaves a dead end.
+          try { assertDomainWritable(d, rtCfg.writeDomains); } catch (e) { if (e instanceof HttpError) blocked = [e.message, e.reason].filter(Boolean).join(' — '); else throw e; }
+          if (blocked) note({ step: 'reconcile', action: 'blocked', reason: blocked });
+          else {
+            try {
+              const res = await reconcileDomainDirectory(env, caches.default, nsClient, d);
+              // An ABORTED plan (locked, or an unusable NetSapiens list) reconciled nothing, so it must not
+              // leave the checklist saying it did. `reconciled` stays null and the row reports unknown.
+              reconciled = res.plan.status === 'ok' ? true : null;
+              note({ step: 'reconcile', action: res.plan.status === 'ok' ? 'reconciled' : 'noop', ...(res.orgid ? { orgid: res.orgid } : {}) });
+            } catch (e) { stop('reconcile', e); }
+          }
+        }
+
+        // The checklist as it NOW reads — built from the snapshot the last write left behind, so the page
+        // closes onto the truth rather than onto the state the domain was in before the operator changed
+        // it. 200 even when a step was refused: the outcomes and `stoppedAt` are the answer, and a status
+        // code cannot say "three steps ran and the fourth would not".
+        const report = await domainReport(d, snap, catalog, reconciled);
+        return json({ outcomes, ...(stoppedAt ? { stoppedAt } : {}), report }, 200, { ...cors, 'Cache-Control': 'no-store', Vary: 'Origin, Authorization' });
+      } catch (err) {
+        // A ProvisionRefused reaching here came from OUTSIDE the step loop (the loop records one as
+        // `stoppedAt` and still answers with the checklist). It is this feature's own verdict and carries
+        // its own status — 403/409/422 — so it is repeated verbatim into JSON, which the page escapes.
+        // ⚠️ It may quote text the caller typed; it must never reach server-rendered HTML.
+        if (err instanceof ProvisionRefused) return json({ error: err.message }, err.status, cors);
+        if (err instanceof HttpError) return json({ error: err.message, ...(err.reason ? { reason: err.reason } : {}) }, err.status, cors);
+        console.error(JSON.stringify({ msg: 'request failed', path: url.pathname, error: (err as Error).message }));
+        return json({ error: 'Request failed' }, 500, cors);
+      }
+    }
+
     // ── The operator console: GET /kit/status (the document) and GET /kit/spk.js (the bundle — bytes
     // ship starting Task 7). Both are gated by the SAME two checks — resolveAuth, the kit.status feature
     // gate, then requireFleetRead — run HERE, ahead of Group 2, so a deployment broken in one of Group
@@ -2557,7 +3090,13 @@ export default {
         // to reseller — a wider audience than the console's — so the bundle must ship to them too, and
         // the console flag is not in it (spkFeaturePolicyKeys filters each flag by `can`).
         const canOnebill = url.pathname === '/kit/spk.js' && onebillEnabled(env) && can(auth.principal, 'onebill.view', policies);
-        if (!canConsole && !canCapture && !canOnebill) {
+        // A fourth: the Ringotel Integration menu entry rides the same bundle, on the same terms as
+        // OneBill's. `ringotel.provision.view` also defaults to reseller — wider than the console's — so
+        // the bundle must ship to them, and `spkFeaturePolicyKeys` filters each flag by `can` so nothing
+        // else in it does. `ringotel.provision.write` carries NO flag: it gates a route, and the page is
+        // drawn from the answer the server already gave.
+        const canProvision = url.pathname === '/kit/spk.js' && provisionEnabled(env) && can(auth.principal, 'ringotel.provision.view', policies);
+        if (!canConsole && !canCapture && !canOnebill && !canProvision) {
           // If nobody at all can reach the console (off, or no superadmin named), say so and name the
           // setting to fix — that's actionable. Otherwise this caller just isn't on a list that does
           // admit others, and the terse message is correct as-is (naming who IS admitted would leak it).
@@ -2598,14 +3137,14 @@ export default {
         // their bundle reads the labels already on the page in front of them.
         // Name the surface the caller actually asked for: a domain-locked account admitted by name to
         // onebill.view alone meets this refusal on the speculative bundle fetch, before any console exists for it.
-        if (canConsole || canOnebill) {
+        if (canConsole || canOnebill || canProvision) {
           // …and when that is the ONLY thing admitting them, the refusal is the same steady state as the
           // one above: every authenticated user fetches this bundle on every page load, so it answers
           // 204 rather than adding a permanent 403 rate. `canOnebill` is set on /kit/spk.js alone, so
           // the three /kit/onebill* routes keep the loud 403 with the page's own wording — those are
           // only ever requested by someone who clicked the menu item.
           if (!canConsole && !fleetReadAllowed(auth.principal, env)) return new Response(null, { status: 204, headers: { ...cors } });
-          requireFleetRead(auth.principal, env, canConsole ? undefined : 'The OneBill Integration page');
+          requireFleetRead(auth.principal, env, canConsole ? undefined : canOnebill ? 'The OneBill Integration page' : `The ${provisionLabel(env)} Integration page`);
         }
         if (url.pathname === '/kit/spk.js') {
           // Both gates above already ran (kit.status + requireFleetRead) — this is the tier-cached bundle

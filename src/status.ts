@@ -32,7 +32,7 @@ import { isLocalRequest } from './localRequest.js';
 import { kitConfigError, primaryBasename, type KitEnv } from './kit.js';
 import { menuConfigError, resolveMenus, appsHideSources, bothAppsHideSet, unreachableDefaults, availableApps, MENU_NAMES, type MenuEnv } from './menus.js';
 import { appAccessConfigError, parseDownloads, type AppAccessEnv } from './appAccess.js';
-import { nsEventsConfigError, parseNsEventsConfig, resolveWriteIdentity, type NsWriteIdentity, type NsEventsEnv } from './nsEvents.js';
+import { nsEventsConfigError, parseDomainRail, parseNsEventsConfig, resolveWriteIdentity, type NsWriteIdentity, type NsEventsEnv } from './nsEvents.js';
 import { nsDeviceDetailsEnabled, type NsDeviceEnv } from './nsDevices.js';
 import { identityUsable, type NsIdentityEnv } from './nsIdentity.js';
 
@@ -41,10 +41,11 @@ import { identityUsable, type NsIdentityEnv } from './nsIdentity.js';
 import { scopeOf, ringotelEnabled, type RingotelEnv as RingotelDataEnv } from './ringotel.js';
 import { resolveRingotelConfig, ringotelConfigError, RingotelConfigError, type RingotelEnv as EligibilityEnv } from './eligibility.js';
 import { onebillEnabled, onebillConfigError, ONEBILL_SETTING_NAMES, type OnebillEnv } from './onebill.js';
+import { type ProvisionEnv } from './ringotelProvision.js';
 
 export type StatusEnv = FeaturesEnv & KitEnv & SetupEnv & MenuEnv
   & AppAccessEnv & RingotelDataEnv & EligibilityEnv & NsEventsEnv & NsDeviceEnv
-  & BrandEnv & NsIdentityEnv & OnebillEnv;
+  & BrandEnv & NsIdentityEnv & OnebillEnv & ProvisionEnv;
 
 export interface BuildStatusOpts {
   principal: Principal | null;
@@ -221,6 +222,13 @@ need('me.resetPassword', 'RINGOTEL_API_KEY');
 // The write rail, layered on top of the four write features (each already needs RINGOTEL_API_KEY above,
 // except me.resetPassword, which was just given it on the line above).
 for (const k of ['ringotel.activate', 'ringotel.resetPassword', 'ringotel.prepop', 'me.resetPassword']) need(k, 'RINGOTEL_WRITE_DOMAINS');
+// The provisioning page is a SECOND gate on top of the API key, and the loop above cannot know it: both
+// keys match `ringotel.`, so they inherited RINGOTEL_API_KEY and nothing else — which reported the page
+// `on` while its routes answered 404. The template is what turns the page on at all; the rail is what
+// lets an enable actually write, so the write key needs both and the view key needs only the first.
+need('ringotel.provision.view', 'RINGOTEL_CONNECTION_TEMPLATE');
+need('ringotel.provision.write', 'RINGOTEL_CONNECTION_TEMPLATE');
+need('ringotel.provision.write', 'RINGOTEL_PROVISION_DOMAINS');
 // The admin entry point, the self entry point, and every me.* need portal-backend mode. `me.*` is
 // derived from the registry (like RINGOTEL_KEYS above) so a new `me.*` feature cannot silently miss
 // this — a hardcoded list would need remembering to update.
@@ -242,6 +250,24 @@ function prereqSatisfied(name: string, env: StatusEnv): boolean {
         if (!(e instanceof RingotelConfigError)) throw e;
         return false; // ringotelConfigError (a configError, not "missing") already reports this loudly
       }
+    case 'RINGOTEL_CONNECTION_TEMPLATE':
+      // This setting's OWN value, not `provisionEnabled`, which ANDs in RINGOTEL_API_KEY. Both are
+      // prerequisites of the view key and each is listed separately, so the aggregate would report the
+      // template unsatisfied on a deployment that had set it and not the key — blaming the setting the
+      // operator got right, which is the same failure the rail case below avoids. Every case in this
+      // switch answers for exactly the setting it names; the page-level gate is `provisionEnabled`, and
+      // it lives where a page-level question is asked (the probe, and the routes).
+      return (env.RINGOTEL_CONNECTION_TEMPLATE ?? '').trim() !== '';
+    case 'RINGOTEL_PROVISION_DOMAINS': {
+      // The rail ALONE, through the parser that owns it — deliberately not `resolveProvisionConfig(env)
+      // .rail`, which resolves five settings at once and throws if any one of them is blank. A deployment
+      // with the rail set and RINGOTEL_DEFAULT_PACKAGE still empty would then be told its rail does not
+      // satisfy the requirement, naming the one setting the operator had already got right. An aggregate
+      // cannot say which of its inputs disagreed, and this list reports per setting. `parseDomainRail` is
+      // the same call the resolver makes for this value, so the two cannot read one rail differently.
+      const raw = (env.RINGOTEL_PROVISION_DOMAINS ?? '').trim();
+      return raw !== '' && parseDomainRail(raw, 'RINGOTEL_PROVISION_DOMAINS').ok;
+    }
     case 'NS_SERVER':
       return nsServerConfigured(env);
     default:

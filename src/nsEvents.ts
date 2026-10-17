@@ -516,6 +516,60 @@ export interface DecodedBatch {
   domainMismatch: number;
   /** Events carrying no domain field — allowed, since the path domain is already verified. */
   domainAbsent: number;
+  /**
+   * Shape (never values) of up to 5 distinct unidentified-event payloads, so an unfamiliar delivery can be
+   * diagnosed without ever logging PII. Each entry is that event's sorted top-level key NAMES joined by
+   * ',' — never a value — with a nested `data`/`subscriber`/`object` object value expanded one level as
+   * `data.{a,b,c}` in place of the bare key. Capped at 40 keys per event, 5 shapes per batch, de-duplicated.
+   */
+  unidentifiedShapes: string[];
+}
+
+/** data/subscriber/object: the only nested fields worth expanding — the ones NS has actually nested a record under. */
+const NESTED_SHAPE_KEYS = new Set(['data', 'subscriber', 'object', 'user']);
+const MAX_SHAPE_KEYS = 40;
+const MAX_SHAPES_PER_BATCH = 5;
+
+/**
+ * Key-names-only fingerprint of an unidentified event, for diagnosing an unfamiliar payload shape without
+ * ever logging a value (PII). One level of nesting under `data`/`subscriber`/`object` is expanded so a
+ * record NS wrapped one level down doesn't just show up as a single opaque key name.
+ */
+function eventShape(rec: Record<string, unknown>): string {
+  const topKeys = Object.keys(rec).sort().slice(0, MAX_SHAPE_KEYS);
+  const parts = topKeys.map((k) => {
+    const v = rec[k];
+    if (NESTED_SHAPE_KEYS.has(k) && v && typeof v === 'object' && !Array.isArray(v)) {
+      const inner = v as Record<string, unknown>;
+      const nestedKeys = Object.keys(inner).sort().slice(0, MAX_SHAPE_KEYS).map((n) => `${n}:${valueKind(inner[n])}`);
+      return `${k}.{${nestedKeys.join(',')}}`;
+    }
+    return `${k}:${valueKind(v)}`;
+  });
+  return parts.sort().join(',');
+}
+
+/**
+ * Value CLASS of a scalar, never the value: enough to tell `user: ""` from `user: "1046"` from
+ * `user: "admin@…"` when a shape stays unidentified after its keys are known (prod 2026-09-15: the
+ * delete record `{domain, remove, user}` was still unidentified once `user` was decoded in login and
+ * nested forms, so the key names alone had stopped being informative).
+ */
+function valueKind(v: unknown): string {
+  if (v === null) return 'null';
+  if (v === undefined) return 'undef';
+  if (Array.isArray(v)) return `arr${v.length}`;
+  if (typeof v === 'object') return 'obj';
+  if (typeof v === 'boolean') return 'bool';
+  if (typeof v === 'number') return 'num';
+  if (typeof v !== 'string') return typeof v;
+  const t = v.trim();
+  if (t === '') return 'empty';
+  const cls = /^[0-9]+$/.test(t) ? 'digits' : /^[A-Za-z0-9._-]+$/.test(t) ? 'word' : t.includes('@') ? 'login' : 'text';
+  // A `text` value carries a character-class MASK (d digit, a letter, _ space, x other; capped) so its
+  // structure can be recognised. Still no character of the value itself is logged.
+  const mask = cls === 'text' ? '/' + t.slice(0, 16).replace(/./g, (c) => (/[0-9]/.test(c) ? 'd' : /[A-Za-z]/.test(c) ? 'a' : c === ' ' ? '_' : 'x')) : '';
+  return `${cls}${t.length}${mask}`;
 }
 
 /**
@@ -543,6 +597,31 @@ function extFromLogin(rec: Record<string, unknown>): string | undefined {
   return ext || undefined;
 }
 
+/**
+ * The DELETE record NetSapiens sends is `{domain, remove, user}` (prod, 2026-09-15, captured by the
+ * keys-only diagnostic after a delete of demo ext 4444 went unidentified the day before). Its `user`
+ * is NOT the bare extension `firstString` accepts: `<ext>@<domain>` is the only other shape the
+ * verified `subscriber_login` field uses, and a nested object is the other way a "user" arrives.
+ * Both are accepted here; when the login form carries a domain it must match the path domain, or
+ * the record is treated as a domain mismatch (never as an unidentified extension).
+ */
+function extFromUserField(rec: Record<string, unknown>, pathDomain: string): { ext?: string; mismatch?: true } {
+  const v = rec['user'];
+  if (typeof v === 'string' && v.includes('@')) {
+    const at = v.lastIndexOf('@');
+    const ext = v.slice(0, at).trim();
+    const dom = v.slice(at + 1).trim().toLowerCase().replace(/\.+$/, '');
+    if (dom && dom !== pathDomain) return { mismatch: true };
+    return ext ? { ext } : {};
+  }
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const inner = v as Record<string, unknown>;
+    const ext = firstString(inner, EXT_KEYS) ?? extFromLogin(inner);
+    return ext ? { ext } : {};
+  }
+  return {};
+}
+
 function domainFromLogin(rec: Record<string, unknown>): string | undefined {
   const login = rec['subscriber_login'];
   if (typeof login !== 'string' || !login.includes('@')) return undefined;
@@ -565,6 +644,8 @@ export function decodeEventBatch(body: unknown, pathDomain: string, maxEvents: n
   const events = Array.isArray(body) ? body : body && typeof body === 'object' ? [body] : [];
   const out: ChangedUser[] = [];
   const seen = new Set<string>();
+  const unidentifiedShapes: string[] = [];
+  const seenShapes = new Set<string>();
   let unidentified = 0;
   let domainMismatch = 0;
   let domainAbsent = 0;
@@ -591,9 +672,27 @@ export function decodeEventBatch(body: unknown, pathDomain: string, maxEvents: n
     // `/domains/x/users/..` would resolve to `GET /domains/x/` and `/users/.` to the full user list. Not
     // exploitable to deactivate anyone (it can't manufacture a 404 for a live user, and the response here
     // is discarded), but it contradicts this branch's own strict-grammar-before-any-API-path stance.
-    const ext = firstString(rec, EXT_KEYS) ?? extFromLogin(rec);
+    let ext = firstString(rec, EXT_KEYS);
+    // A login-form value (`<ext>@<domain>`) can never pass the extension grammar; route it through the
+    // user-field decoder below instead of counting it as unidentified.
+    if (ext === undefined || ext.includes('@')) ext = extFromLogin(rec);
+    if (ext === undefined) {
+      const viaUser = extFromUserField(rec, pathDomain);
+      if (viaUser.mismatch) {
+        domainMismatch++;
+        continue;
+      }
+      ext = viaUser.ext;
+    }
     if (!ext || !/^(?=[^A-Za-z0-9]*[A-Za-z0-9])[A-Za-z0-9._-]{1,32}$/.test(ext)) {
       unidentified++;
+      if (unidentifiedShapes.length < MAX_SHAPES_PER_BATCH) {
+        const shape = eventShape(rec);
+        if (!seenShapes.has(shape)) {
+          seenShapes.add(shape);
+          unidentifiedShapes.push(shape);
+        }
+      }
       continue;
     }
 
@@ -607,7 +706,7 @@ export function decodeEventBatch(body: unknown, pathDomain: string, maxEvents: n
     out.push({ domain: pathDomain, ext });
   }
 
-  return { users: out, total: events.length, truncated, unidentified, domainMismatch, domainAbsent };
+  return { users: out, total: events.length, truncated, unidentified, domainMismatch, domainAbsent, unidentifiedShapes };
 }
 
 /** Shape-only diagnostic for an unfamiliar payload: keys and sizes, never values. */

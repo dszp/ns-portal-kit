@@ -142,6 +142,27 @@ An unofficial [OneBill](https://www.onebillsoftware.com/) integration, on the Ma
 Off unless all four `ONEBILL_*` credentials are set. See [SETUP.md](./SETUP.md#onebill-links) and
 [CONFIG.md](./CONFIG.md#group-onebill).
 
+### Ringotel Integration
+
+A [Ringotel](https://www.ringotel.com/) provisioning page, on the Management menu, that audits every
+NetSapiens domain against the Ringotel Connection template this deployment treats as standard, and brings a
+domain up to it in one confirmed action.
+
+- **A per-domain checklist** showing exactly what a domain is missing against the template —
+  organization, connection, and sign-in mode — read fresh every time it's opened.
+- **Enable all** works through a fixed sequence: create the organization if none exists, set its sign-in
+  mode, create its connection from the template, refresh this deployment's cached organization list, and
+  run the directory sync once. It's idempotent — re-running it on an already-enabled domain reports every
+  step as a no-op, so pressing it again is always safe.
+- **The organization label is derived, not typed**: the NetSapiens domain with its territory suffix
+  stripped (`acme.12345.service` becomes `acme`) — it's what a user types into the app to find their
+  organization before SSO takes over.
+
+Governed by `ringotel.provision.view` (default `reseller`) and `ringotel.provision.write` (default
+`superadmin`). Off unless `RINGOTEL_API_KEY` and `RINGOTEL_CONNECTION_TEMPLATE` are set, alongside
+`RINGOTEL_PROVISION_DOMAINS`, `RINGOTEL_SSO_SERVICE_ID`, `RINGOTEL_DEFAULT_PACKAGE` and `RINGOTEL_REGION`.
+See [CONFIG.md](./CONFIG.md#group-provision).
+
 ### Future Integrations
 
 Under consideration for future integrations that are not yet available:

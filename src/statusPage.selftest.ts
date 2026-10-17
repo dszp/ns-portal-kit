@@ -260,14 +260,17 @@ const DOC = () => buildStatus(
   // message type: there are several replies now (probe results, the observed-page facts, the menu reads),
   // and a rule that only covered the first would have gone quiet on the next one exactly when it was newest.
   //
-  // ⚠️ FOUR REPLIES ARE DELIBERATELY EXCLUDED. The same bundle also serves the OneBill links page, a
-  // SECOND consumer with its own message pairs (SPK_BRIDGE.onebillRequest/Response, accountRequest/Response,
-  // baselineRequest/Response, assignRequest/Response) and their own payload fields (onebill, account,
-  // baseline, assign). The console neither sends nor reads any of them, so folding them in would assert the
-  // union of two protocols against one page — and the fix would be to list a key here that the console must
-  // never carry. That page's own half of this guard lives in onebillPage.selftest.ts, scoped the same way.
+  // ⚠️ FIVE REPLIES ARE DELIBERATELY EXCLUDED. The same bundle also serves the OneBill links page and
+  // the Ringotel Integration page, a SECOND and THIRD consumer with their own message pairs
+  // (SPK_BRIDGE.onebillRequest/Response, accountRequest/Response, baselineRequest/Response,
+  // assignRequest/Response, provisionRequest/Response) and their own payload fields (onebill, account,
+  // baseline, assign, provision). The console neither sends nor reads any of them, so folding them in
+  // would assert the union of three protocols against one page — and the fix would be to list a key here
+  // that the console must never carry. The OneBill page's own half of this guard lives in
+  // onebillPage.selftest.ts, scoped the same way; the Ringotel page's reply-key contract (fleet/checklist
+  // wrapping) is asserted directly in kit.selftest.ts's [provision] block instead.
   const sendRe = new RegExp(`postMessage\\(\\{([^}]*${SPK_BRIDGE.tag}[^}]*)\\}`, 'g');
-  const OTHER_PAGE = [SPK_BRIDGE.onebillResponse, SPK_BRIDGE.accountResponse, SPK_BRIDGE.baselineResponse, SPK_BRIDGE.assignResponse];
+  const OTHER_PAGE = [SPK_BRIDGE.onebillResponse, SPK_BRIDGE.accountResponse, SPK_BRIDGE.baselineResponse, SPK_BRIDGE.assignResponse, SPK_BRIDGE.provisionResponse];
   const fieldsSent = new Set(
     [...bundle.matchAll(sendRe)]
       .filter((m) => !OTHER_PAGE.some((t) => m[1]!.includes(t)))

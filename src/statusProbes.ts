@@ -34,7 +34,9 @@ import { OneBillApiError } from '@dszp/onebill-lib';
 import { PROBE_CATALOG, probeCatalogFor } from './statusModel.js';
 import type { ProbeResult, ProbeCatalogEntry, ProbeTable } from './statusModel.js';
 import type { StatusEnv } from './status.js';
-import { ringotelEnabled } from './ringotel.js';
+import { ringotelEnabled, makeReadClient as makeRingotelReadClient } from './ringotel.js';
+import { provisionEnabled, provisionLabel, resolveProvisionConfig, ProvisionConfigError, type ProvisionConfig } from './ringotelProvision.js';
+import { loadCatalog, byName } from './ringotelProvisionApply.js';
 import { onebillEnabled, makeReadClient, resolveOnebillConfig, groupSetup, setupChecklist } from './onebill.js';
 import { resolveWriteIdentity, parseNsEventsConfig, ownedPrefix, type NsEventsConfig } from './nsEvents.js';
 import { getServiceToken, NsIdentityError } from './nsIdentity.js';
@@ -127,6 +129,57 @@ async function onebillProbe(env: StatusEnv): Promise<ProbeOutcome> {
   } catch (e) {
     if (e instanceof OneBillApiError) return { state: 'fail', detail: `OneBill rejected the request (HTTP ${e.status}).` };
     return { state: 'fail', detail: 'Could not reach the OneBill API.' };
+  }
+}
+
+/**
+ * The three account-level catalog reads `loadCatalog` makes — `getTemplates`, `getPackages`, `getRegions`
+ * — and nothing else. Never the fleet dig: this answers "can this deployment provision at all", not
+ * "what is the state of the fleet", and the latter costs 1 + N calls.
+ *
+ * Each configured name is checked on its own rather than as one "the catalog loaded" verdict, and
+ * through the write path's own `byName` rather than a local copy of the comparison. A package
+ * that does not resolve is what a customer gets billed on, and a region that does not resolve decides
+ * where their media lands; merging the three into one assertion would report either as the template's
+ * problem, or not at all.
+ *
+ * The two interpolated messages are this deployment's own: `ProvisionConfigError` carries our wording
+ * plus a setting name, and `templateProblem` is the sentence `ringotelProvisionApply.ts` writes for the
+ * page. Neither is an upstream body, so rule 2 of the module doc comment holds.
+ */
+async function provisionProbe(env: StatusEnv): Promise<ProbeOutcome> {
+  // The operator's own word for the app, read STRAIGHT OFF env for the reason the provisioning route
+  // reads it there: every sentence below can be produced before `resolveProvisionConfig` has resolved,
+  // and one of them IS the report that it did not. A white-label deployment must not read the vendor's
+  // name in its own console.
+  const appLabel = provisionLabel(env);
+  if (!provisionEnabled(env)) {
+    return { state: 'skip', detail: 'Provisioning is not configured — RINGOTEL_API_KEY and RINGOTEL_CONNECTION_TEMPLATE must both be set.' };
+  }
+  let cfg: ProvisionConfig;
+  try {
+    cfg = resolveProvisionConfig(env);
+  } catch (e) {
+    return {
+      state: 'fail',
+      detail: e instanceof ProvisionConfigError
+        ? `The provisioning settings are incomplete: ${e.message}.`
+        : 'The provisioning settings could not be read.',
+    };
+  }
+  try {
+    const cat = await loadCatalog(makeRingotelReadClient(env), cfg);
+    if (cat.templateProblem) return { state: 'fail', detail: cat.templateProblem };
+    if (!byName(cat.packages, cfg.defaultPackage)) {
+      return { state: 'fail', detail: `No package in this ${appLabel} tenant is named "${cfg.defaultPackage}". RINGOTEL_DEFAULT_PACKAGE must name one exactly.` };
+    }
+    if (!byName(cat.regions, cfg.region)) {
+      return { state: 'fail', detail: `No region in this ${appLabel} tenant is named "${cfg.region}". RINGOTEL_REGION must name one exactly.` };
+    }
+    return { state: 'pass', detail: 'Template, package and region resolved.' };
+  } catch (e) {
+    if (e instanceof RingotelApiError) return { state: 'fail', detail: `${appLabel} rejected a catalog read (HTTP ${e.status}).` };
+    return { state: 'fail', detail: `Could not read the ${appLabel} provisioning catalogs.` };
   }
 }
 
@@ -394,6 +447,7 @@ export async function runProbes(env: StatusEnv, ctx: ProbeCtx): Promise<ProbeRes
   const nsEvents = await guarded('ns-events', () => nsEventsProbe(env, nsIdentity.state === 'pass'));
   const banner = await guarded('status-banner', () => statusBannerProbe(env, ctx));
   const onebill = await guarded('onebill', () => onebillProbe(env));
+  const provision = await guarded('provision', () => provisionProbe(env));
   const documo = documoProbeResult();
   // Access gates the STANDALONE deployment's stored token; a portal-mode Worker has no stored credential
   // for it to protect, and an Access gate in front of one would refuse the plain <script src> that loads
@@ -401,6 +455,6 @@ export async function runProbes(env: StatusEnv, ctx: ProbeCtx): Promise<ProbeRes
   // could not adopt -- and a check for it implies otherwise. The Config tab already removed the Access
   // SETTINGS in portal mode for the same reason; this is the half that was missed.
   const wanted = new Set(probeCatalogFor().map((c) => c.id));
-  const all = [nsRead, nsIdentity, ringotel, nsEvents, banner, onebill, documo];
+  const all = [nsRead, nsIdentity, ringotel, nsEvents, banner, onebill, provision, documo];
   return all.filter((r) => wanted.has(r.id));
 }

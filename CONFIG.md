@@ -20,6 +20,7 @@ shows every setting *with the value yours currently has*, its real default, and 
 - [Portal injection](#group-injection) — `PRIMARY_BASENAME` · `PORTAL_HANDOFF_URL` · `PORTAL_SECONDARIES` · `PORTAL_FEATURES` · `PORTAL_SUPERADMINS` · `PORTAL_RELEASE_NOTES_URL` · `STATUS_BANNER_WEBHOOK` · `RINGOTEL_APP_BASE_URL`
 - [Portal menus](#group-menus) — `PORTAL_MENUS` · `PORTAL_HANDOFF_ORIGINS` · `PORTAL_APPS_HIDE`
 - [App integration](#group-ringotel) — `RINGOTEL_API_KEY` and its display settings
+- [Ringotel provisioning](#group-provision) — `RINGOTEL_PROVISION_DOMAINS` · `RINGOTEL_CONNECTION_TEMPLATE` · `RINGOTEL_SSO_SERVICE_ID` · `RINGOTEL_DEFAULT_PACKAGE` · `RINGOTEL_REGION`
 - [OneBill](#group-onebill) — `ONEBILL_TENANT_ID` and its three secrets · `ONEBILL_LINK_GROUP` · `ONEBILL_USAGE_OFFERS` · `ONEBILL_USAGE_IGNORE` · `ONEBILL_RECURRING_RULES` · `NS_FAX_SERVER_HOSTS` · `NS_DEVICE_SUFFIXES`
 - [Activation rules](#group-eligibility) — the write rail and the exclusion lists
 - [Self-service app access](#group-appaccess) — `RINGOTEL_SSO_SERVICE` · `SSO_AUTO_ACTIVATE` · `PORTAL_APP_DOWNLOADS`
@@ -623,6 +624,167 @@ activation invalidates the stranger.
 A device the activation *creates* is not rotated (it is already exclusive), and per-login paths never
 rotate — doing so on every sign-in would churn the credential and could race a re-registration. Rotation
 is best-effort: if it fails, activation still succeeds using the existing password.
+
+---
+
+<a id="group-provision"></a>
+
+## Ringotel provisioning
+
+Enabling a NetSapiens domain for the app: creating its organization and connection, and auditing every
+existing organization against the connection template this deployment calls standard. `RINGOTEL_API_KEY`
+and `RINGOTEL_CONNECTION_TEMPLATE` together are the gate — without both, the page is inert: the
+Management-menu entry is absent and the routes return 404. Reading is separate from writing:
+[`RINGOTEL_PROVISION_DOMAINS`](#RINGOTEL_PROVISION_DOMAINS) unset still renders the audit for every domain
+you can read; set it to decide which of them this deployment may actually enable.
+
+**A connection template is a saved connector, not a form this page fills in.** Build the standard the
+normal way: configure one connection in the Ringotel panel the way you want every domain's to look, then
+**Save As** a template from it, and name that template in `RINGOTEL_CONNECTION_TEMPLATE`. This page never
+writes a template. Creating a connection copies the template's `provision` settings — proxy, forwarding,
+voicemail and the rest — but its `address`, `domain` and `name` always come from the NetSapiens domain
+being enabled, never from the template; a connection inheriting the template's own address would collide
+with it. **The drift audit compares only the fields the template defines** — a setting present on a
+connection and absent from the template is never reported, because the template has no opinion about it
+and Ringotel fills a newly created connector with server-side defaults nobody chose (`maxregs`, for one).
+A field the template defines and the connection lacks still is a difference. Rotating the standard later
+(Save As again from a live connector) changes what new connections and the drift audit compare against; it
+does not touch anything already created.
+
+**Creating a connection offers every template, not only the standard.** The template picker beside the
+licensing choice lists every connection template in the Ringotel tenant, newest first, each with the date
+it was saved, and preselects the one `RINGOTEL_CONNECTION_TEMPLATE` names. Pick a different one and the
+connection is built from that one instead — useful when a customer needs a variant connector that is not
+your standard. The drift audit is unaffected: it always compares against the configured standard, because
+Ringotel records nothing about which template a connection was created from. That also means the choice is
+offered only where no connection exists yet, and the enable outcome naming the template it used is the
+only record you get of a non-standard one. A template that carries no connection settings at all, or that names
+no dialling country, is listed but cannot be picked — the option says which of the two it is, and the
+create refuses it for the same reason. If
+`RINGOTEL_CONNECTION_TEMPLATE` names a template your tenant does not have, nothing is preselected and
+**every create is refused outright**, whatever the picker was set to: a deployment whose standard does not
+resolve has no audit to bring a domain to, and building a connection from something else would leave one
+this page can never compare.
+
+**The organization label is derived, not typed.** A new organization's `domain` field — what a user types
+into the app to find their organization, before SSO takes over — is set to the NetSapiens domain with its
+`.<territory>.service` suffix stripped: `acme.12345.service` becomes `acme`; a bare domain with no suffix
+is its own label unchanged. Get this wrong and a user cannot find the right organization to sign into.
+Ringotel does not currently allow editing a label after creation, so a mismatch is reported as a finding
+here, never auto-fixed.
+
+**What this page costs upstream.** The fleet audit — the domain list and its state column — digs the
+whole tenant once (one call for the organization list, plus one `getBranches` call per organization) and
+caches the result for 5 minutes; its **Refresh** button forces a new dig but is coalesced to at most once
+every 60 seconds, so a second press inside that window is served the cached entry the first one wrote —
+up to 5 minutes old — or, if none is there, a fresh dig, rather than each press triggering its own
+fleet-wide read. Opening one domain's checklist always reads fresh — the same per-organization dig,
+scoped to the one match — because deciding whether to enable a domain from a five-minute-old picture
+risks acting against an organization someone else just created. **Enable** re-reads the fleet that way
+before its first write and again after every step that changed something — up to four fresh reads in a
+run — plus up to three writes (create or update the organization, create the connection), one index
+rebuild, and one directory reconcile.
+
+**Enable runs a fixed sequence and is safe to re-run.** Pressing it — or a single row's **Fix** — works
+through, in order: create the organization if none exists; set its sign-in mode; create its connection
+from the template; rebuild this deployment's cached organization index; run the directory reconcile once.
+The reconcile step additionally needs the domain covered by
+[`RINGOTEL_WRITE_DOMAINS`](#RINGOTEL_WRITE_DOMAINS), a separate write rail from
+`RINGOTEL_PROVISION_DOMAINS` above; when it is not, that step alone reports `blocked` and the rest of the
+run stands — the organization, sign-in and connector steps, and the index rebuild, having already
+succeeded. A step the domain already satisfies reports `noop` instead of repeating it, so re-running
+Enable on an already-enabled domain changes nothing and every step reports `noop`. A run that created the
+organization and then failed before its connection is **resumed, not duplicated**: the next Enable finds
+that organization by the domain name this domain derives, reports the organization step as `noop`, and
+creates the connection it never got. If the first run used a label you typed rather than the derived one,
+the page prefills that label and says so; submitting it is what finds that organization and finishes it,
+where any other label would create a second one for the same customer. A run otherwise stops
+at the first step it cannot complete — a taken label, an unresolvable package, an upstream refusal — and
+reports which step failed and why; the writes that already happened in that run are not rolled back,
+because they already moved the domain closer to standard.
+
+**The package is set once, on create, and never rewritten.**
+[`RINGOTEL_DEFAULT_PACKAGE`](#RINGOTEL_DEFAULT_PACKAGE) decides what a *new* organization gets; an
+existing organization on a different package — Pro instead of Essentials, say — is reported as a finding,
+but this page never changes it. That choice is deliberate on a live organization, and not this feature's
+business to undo.
+
+**Sign-in mode is either SSO or credentials, decided per domain.** With
+[`RINGOTEL_SSO_SERVICE_ID`](#RINGOTEL_SSO_SERVICE_ID) set, choosing SSO sets the organization's
+`params.sso` to that id; choosing credentials clears it. Under SSO users sign in with their NetSapiens
+credentials and the app never emails a password; under app credentials each activation sends a welcome
+email. **The sign-in check judges the SSO service and nothing else.** A new organization is created with
+`hidePassInEmail` true, so its welcome emails hide the password behind a link rather than printing it —
+but that is a setting about emails, not about signing in, so changing it in the Ringotel panel is never
+reported as a sign-in finding and the sign-in fix never rewrites it. Where a welcome email is actually
+sent, the sign-in row states which of the two the organization does. Leave `RINGOTEL_SSO_SERVICE_ID` unset
+and this deployment does no Ringotel SSO at all: the sign-in-mode choice is not offered, and an
+organization with no SSO bound is not reported as a finding.
+
+**A domain with a [`RINGOTEL_OVERRIDES`](#RINGOTEL_OVERRIDES) entry is refused outright**, in the
+checklist and at the write route alike. An override points the domain's match at a different connector
+address than the one Enable would create, so nothing this page does would ever converge — and a write to
+the organization behind an overridden domain could reach other domains that share it.
+
+**An organization this page creates is live on your whole Ringotel tenant immediately** — Ringotel has one
+shared account, not one per deployment. Any other deployment pointed at the same tenant picks it up the
+moment its own cached directory expires (that deployment's own cache TTL, not this one's), and from then
+on its fleet-wide rails — offboarding, the directory reconcile, event subscriptions set to `*` — treat it
+exactly like an organization built by hand in the panel. Enabling a domain from a dev deployment is not a
+dev-only action.
+
+<a id="RINGOTEL_PROVISION_DOMAINS"></a>
+
+### `RINGOTEL_PROVISION_DOMAINS` · `vars` · gated by `RINGOTEL_API_KEY`
+
+The write safety rail: which NetSapiens domains may be enabled for the app from this deployment — `*` for
+all, a CSV list for some, or `*` with `!domain` exclusions.
+
+- **Example** `*, !lab.example`
+- **Unset** No domain can be enabled; the audit still renders for every domain you can read.
+
+<a id="RINGOTEL_CONNECTION_TEMPLATE"></a>
+
+### `RINGOTEL_CONNECTION_TEMPLATE` · `vars` · gated by `RINGOTEL_API_KEY`
+
+The name of the Ringotel connection template every connection is created from and audited against; it
+must match exactly one template in your tenant.
+
+- **Example** `Standard SIP`
+- **Unset** The page is inert: the Management-menu entry is absent and its routes answer 404.
+
+<a id="RINGOTEL_SSO_SERVICE_ID"></a>
+
+### `RINGOTEL_SSO_SERVICE_ID` · `vars` · gated by `RINGOTEL_API_KEY`
+
+The full Ringotel SSO service id — the whole value an organization's `params.sso` carries — which is a
+different value from [`RINGOTEL_SSO_SERVICE`](#RINGOTEL_SSO_SERVICE), the name half used by the
+self-service app-access surface.
+
+- **Example** `12345/netsapiens_sso`
+- **Unset** This deployment does no Ringotel SSO: no sign-in-mode step, and an organization without SSO
+  is not reported as a finding.
+
+<a id="RINGOTEL_DEFAULT_PACKAGE"></a>
+
+### `RINGOTEL_DEFAULT_PACKAGE` · `vars` · gated by `RINGOTEL_API_KEY`
+
+The name of the subscription package a new organization is created with, resolved against your tenant's
+package list.
+
+- **Example** `Essentials`
+- **Unset** The page is misconfigured: it answers 503, and the provisioning check fails naming this
+  setting.
+
+<a id="RINGOTEL_REGION"></a>
+
+### `RINGOTEL_REGION` · `vars` · gated by `RINGOTEL_API_KEY`
+
+The name of the region a new organization is created in, resolved against your tenant's region list.
+
+- **Example** `US East`
+- **Unset** The page is misconfigured: it answers 503, and the provisioning check fails naming this
+  setting.
 
 ---
 
@@ -1603,6 +1765,8 @@ call-center is exact and orthogonal.
 | `ringotel.resetPassword` | Reset a user's app password from the profile page (**write**) | `office_manager` |
 | `ringotel.profileAppAccess` | The user-visible app sign-in message, on the profile page | `office_manager` |
 | `ringotel.prepop` | Preview/create inactive directory entries for a domain (**write**) | `reseller` |
+| `ringotel.provision.view` | The Ringotel Integration page: audit every domain's organization and connection against the template | `reseller` |
+| `ringotel.provision.write` | Enable a domain for the app — create its organization and connection, fix a finding (**write**) | `superadmin` |
 | `portal.domainCreate` | The portal's own **Add Domain** control (see [below](#domain-record-keys)) | `reseller` |
 | `portal.domainEdit` | The portal's own **Edit** controls for a domain's configuration record (see [below](#domain-record-keys)) | `reseller` |
 | `portal.domainDelete` | The portal's own **delete** control for a domain (see [below](#domain-record-keys)) | `reseller` |
