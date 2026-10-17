@@ -22,6 +22,18 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-10-17
+
+### Fixed
+
+- **Call-flow PNG and SVG downloads have a white background**, matching the PDF. 0.9.0 exported them on the
+  diagram panel's light grey.
+
+### Changed
+
+- The call-flow window shows how many boxes a diagram has ("24 nodes") without the edge count.
+- Requires `@dszp/netsapiens-lib` 0.13.1.
+
 ## [0.9.0] — 2026-10-17
 
 ### Added
@@ -2448,6 +2460,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.9.1]: https://github.com/dszp/ns-portal-kit/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/dszp/ns-portal-kit/compare/v0.8.5...v0.9.0
 [0.8.5]: https://github.com/dszp/ns-portal-kit/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/dszp/ns-portal-kit/compare/v0.7.1...v0.8.4

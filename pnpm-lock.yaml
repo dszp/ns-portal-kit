@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@dszp/netsapiens-lib':
-        specifier: ^0.13.0
-        version: 0.13.0
+        specifier: ^0.13.1
+        version: 0.13.1
       '@dszp/onebill-lib':
         specifier: ^0.6.0
         version: 0.6.1
@@ -86,8 +86,8 @@ packages:
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
     engines: {node: '>=12'}
 
-  '@dszp/netsapiens-lib@0.13.0':
-    resolution: {integrity: sha512-7VIm4h4EVvF03wGQiu0R+ERSwNhIV0rKAXTqx4ItfZndJ9Ni2HD2DF5p4oQGbnOuK2Jw7eWo1wMb3DBtvdZN2w==}
+  '@dszp/netsapiens-lib@0.13.1':
+    resolution: {integrity: sha512-NaH/42eRERkfQfdINGsvlYsMoud2uPA9xwKXDk1tDY5W7QE1SbWPnFYITa9D4/TUFgF8hcZ5zhFulD5aKAh4vw==}
     engines: {node: '>=20'}
 
   '@dszp/onebill-lib@0.6.1':
@@ -705,7 +705,7 @@ snapshots:
     dependencies:
       '@jridgewell/trace-mapping': 0.3.9
 
-  '@dszp/netsapiens-lib@0.13.0': {}
+  '@dszp/netsapiens-lib@0.13.1': {}
 
   '@dszp/onebill-lib@0.6.1': {}
 

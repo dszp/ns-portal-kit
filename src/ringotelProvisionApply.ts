@@ -304,6 +304,12 @@ export function snapshotForDomain(dig: FleetSnapshot, domain: string, overrides:
  *     Narrow — it needs the first domain's connector to have failed and nobody to have finished it — and
  *     recoverable by deleting that connection, where the state it replaces (a permanent dead end) is not.
  *     Nothing at this layer can tell the two apart: a snapshot is asked about one domain at a time.
+ *   - WHO may do this is a decision, not an oversight (David, 2026-10-17): adopting any connection-less
+ *     organization by a typed name is ordinary administration, and a reseller granted
+ *     `ringotel.provision.write` may do it. Every organization in the Ringotel tenant belongs to the one
+ *     operator this deployment serves; the bound is the write rail (`RINGOTEL_PROVISION_DOMAINS`) on the
+ *     NS domain being enabled, not proof that this deployment created the organization. A review that
+ *     flags this as a cross-tenant write should be answered here, not by narrowing the adoption.
  *
  * The two handles are ONE candidate set, not a preference order. Two different connection-less
  * organizations, one under each name, is a tenant nothing here can choose between — so the count stands
