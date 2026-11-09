@@ -33,3 +33,7 @@ worker-configuration.d.ts
 # Python bytecode from tools/ (build-capture-tuples.py imports its rule module).
 __pycache__/
 *.pyc
+
+# Claude Code per-user files: they can hold tokens copied from approved commands
+**/.claude/settings.local.json
+**/CLAUDE.local.md
