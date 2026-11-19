@@ -1330,7 +1330,8 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
       const all: any[] = [];
       const node = (tag: string): any => {
         const el: any = {
-          tagName: tag.toUpperCase(), attrs: {} as Record<string, string>, children: [] as any[], parentNode: null, _t: '',
+          tagName: tag.toUpperCase(), attrs: {} as Record<string, string>, children: [] as any[], parentNode: null, _t: '', style: {} as Record<string, string>, _cs: null as any, _rect: null as any, offsetHeight: 0,
+          getBoundingClientRect() { return this._rect || { top: 0, height: 0, width: 0 }; },
           setAttribute(k: string, v: unknown) { this.attrs[k] = String(v); },
           getAttribute(k: string) { return k in this.attrs ? this.attrs[k] : null; },
           appendChild(c: any) { if (c.parentNode) c.parentNode.removeChild(c); c.parentNode = this; this.children.push(c); return c; },
@@ -1432,6 +1433,50 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
       ok(!bar(d), '[notice] null removes the bar');
       d.api.snDraw({ ...n, until: '2000-01-01T00:00:00Z' });
       ok(!bar(d), '[notice] a notice past its until is not drawn, even from a cache');
+    }
+
+    // snFit — the portal's own FIXED top bars ("You are viewing the … domain", the masquerade bar). They
+    // are position:fixed at the top with the page padded down beneath them, so an in-flow bar at the top
+    // of <body> ends up underneath them. With one present, the notice becomes fixed at the very top, the
+    // portal's bars move down by its height, and the page padding grows by the same amount.
+    {
+      const d = run();
+      const portalBar = d.node('div'); portalBar._cs = { position: 'fixed', top: '0px' }; portalBar._rect = { top: 0, height: 95, width: 1200 };
+      const inner = d.node('span'); portalBar.appendChild(inner); d.body.appendChild(portalBar);
+      const content = d.node('div'); d.body.appendChild(content);
+      d.body._cs = { paddingTop: '95px', position: 'static' };
+      const contains = (a: any, b: any): boolean => a === b || (b && b.parentNode ? contains(a, b.parentNode) : false);
+      for (const el of [d.body, portalBar, inner, content]) el.contains = function (x: any) { return contains(this, x); };
+      let hits: any[] = [inner];
+      d.ctx.getComputedStyle = (el: any) => ({ position: 'static', top: 'auto', paddingTop: '0px', ...(el._cs || {}) });
+      d.ctx.window.innerWidth = 1200; d.ctx.window.innerHeight = 800;
+      (d.document as any).elementsFromPoint = () => hits;
+      const api = runInNewContext(`${src}; ({snPick:snPick,snDraw:snDraw,snFit:snFit})`, d.ctx) as any;
+      api.snDraw(api.snPick({ notices: [NOTICE] }, Date.now()));
+      const b = bar(d); b.offsetHeight = 44; b.contains = function (x: any) { return contains(this, x); };
+      hits = [b, inner];
+      api.snFit();
+      ok(b.style.position === 'fixed' && b.style.top === '0px', '[notice] with a fixed portal bar present, the notice is fixed at the very top');
+      ok(portalBar.style.top === '44px', '[notice] the portal\'s fixed bar moves down by the notice\'s height');
+      ok(d.body.style.paddingTop === '139px', '[notice] and the page padding grows by the same amount');
+      api.snFit();
+      ok(portalBar.style.top === '44px' && d.body.style.paddingTop === '139px', '[notice] fitting again is idempotent');
+      b.offsetHeight = 60; hits = [b]; api.snFit();
+      ok(portalBar.style.top === '60px' && d.body.style.paddingTop === '155px', '[notice] a taller bar (narrow window) re-fits the portal bar it already moved');
+      api.snDraw(null);
+      ok(portalBar.style.top === '' && d.body.style.paddingTop === '', '[notice] taking the notice down restores the portal bar and the padding');
+
+      // A fixed element that is NOT a top bar (a modal backdrop covering the page) is left alone.
+      const e = run();
+      const backdrop = e.node('div'); backdrop._cs = { position: 'fixed', top: '0px' }; backdrop._rect = { top: 0, height: 800, width: 1200 }; e.body.appendChild(backdrop);
+      e.ctx.getComputedStyle = (el: any) => ({ position: 'static', top: 'auto', paddingTop: '0px', ...(el._cs || {}) });
+      e.ctx.window.innerWidth = 1200; e.ctx.window.innerHeight = 800;
+      (e.document as any).elementsFromPoint = () => [backdrop];
+      const api2 = runInNewContext(`${src}; ({snPick:snPick,snDraw:snDraw,snFit:snFit})`, e.ctx) as any;
+      api2.snDraw(api2.snPick({ notices: [NOTICE] }, Date.now()));
+      const b2 = bar(e); b2.offsetHeight = 44; b2.contains = () => false;
+      api2.snFit();
+      ok(b2.style.position !== 'fixed' && backdrop.style.top === undefined && !e.body.style.paddingTop, '[notice] no fixed top bar ⇒ the notice stays in the flow and nothing else moves');
     }
 
     // serviceNotice — fetch, cache, failure

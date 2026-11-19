@@ -1576,17 +1576,60 @@ for(var i=0;i<n.c.length;i++){var k=snLink(n.c[i].h,0);k.appendChild(snIcon(n.c[
 if(n.u){var m=snLink(n.u,1);m.setAttribute('class','_svxn-m');m.setAttribute('aria-hidden','true');m.setAttribute('tabindex','-1');m.textContent='See updates \u2192';g.appendChild(m)}}
 return d}
 var _snCur=null,_snKey='';
+// THE PORTAL'S OWN FIXED TOP BARS. Viewing a domain (and masquerading) puts a position:fixed bar across
+// the top — "You are viewing the … domain" — with the page padded down beneath it. An in-flow notice at
+// the top of <body> lands UNDER that bar (David, 2026-11-18, screenshot). So when one is there, the notice
+// becomes fixed at the very top itself, each portal bar moves down by the notice's height, and the body's
+// padding grows by the same amount: the stack reads notice, portal bar, page, and stays that way while
+// scrolling. With no such bar the notice stays in the flow, which is the case that already looked right.
+//
+// Found by what is at the top of the viewport (elementsFromPoint lists every layer, including what our own
+// fixed bar covers), not by the portal's class names — so the masquerade bar and any later variant are
+// handled the same way. A full-height fixed layer is a modal or backdrop, not a bar, and is left alone.
+// Everything moved is recorded with its original value and restored when the notice comes down.
+var _snMoved=[],_snPad=null;
+function snPx(v){var n=parseFloat(v);return isNaN(n)?0:n}
+function snFixedAt(el,bar){
+for(var e=el;e&&e!==document.body&&e!==document.documentElement;e=e.parentNode){
+if(e===bar||(bar&&bar.contains&&bar.contains(e)))return null;
+var cs=getComputedStyle(e);if(cs&&(cs.position==='fixed'||cs.position==='sticky'))return e}
+return null}
+function snUnfit(bar){
+for(var i=0;i<_snMoved.length;i++)_snMoved[i].el.style.top=_snMoved[i].top;
+_snMoved=[];
+if(_snPad&&document.body){document.body.style.paddingTop=_snPad.inl;_snPad=null}
+if(bar){bar.style.position='';bar.style.top='';bar.style.left='';bar.style.right='';bar.style.zIndex=''}}
+function snFit(){try{
+var bar=document.getElementById('_svxnotice'),b=document.body;
+if(!bar||!b){snUnfit(null);return}
+var h=bar.offsetHeight||0,W=window.innerWidth||0,H=window.innerHeight||0,found=[];
+var add=function(e){if(e&&found.indexOf(e)<0)found.push(e)};
+for(var i=0;i<_snMoved.length;i++)if(_snMoved[i].el.parentNode)add(_snMoved[i].el);
+var hs=document.elementsFromPoint?document.elementsFromPoint(Math.floor(W/2),1):[];
+for(var j=0;j<hs.length;j++){var f=snFixedAt(hs[j],bar);if(!f)continue;
+var r=f.getBoundingClientRect();if(r.top<=1&&r.height<H/2&&r.width>=W/2)add(f)}
+if(!found.length){snUnfit(bar);return}
+bar.style.position='fixed';bar.style.top='0px';bar.style.left='0px';bar.style.right='0px';bar.style.zIndex='2147483000';
+var kept=[];
+for(var k=0;k<found.length;k++){var el=found[k],m=null;
+for(var q=0;q<_snMoved.length;q++)if(_snMoved[q].el===el)m=_snMoved[q];
+if(!m)m={el:el,top:el.style.top||'',base:snPx(getComputedStyle(el).top)};
+el.style.top=(m.base+h)+'px';kept.push(m)}
+_snMoved=kept;
+if(!_snPad)_snPad={inl:b.style.paddingTop||'',base:snPx(getComputedStyle(b).paddingTop)};
+b.style.paddingTop=(_snPad.base+h)+'px'}catch(e){}}
 function snDraw(n){
 var old=document.getElementById('_svxnotice');
 // Re-checked here, not only in snPick: a remembered notice must not outlive its window either.
 if(n&&n.until!=null){var u=Date.parse(n.until);if(isNaN(u)||Date.now()>u)n=null}
 _snCur=n||null;
-if(!n){_snKey='';if(old&&old.parentNode)old.parentNode.removeChild(old);return}
-var key=JSON.stringify(n);if(old&&key===_snKey)return;
+if(!n){_snKey='';snUnfit(old);if(old&&old.parentNode)old.parentNode.removeChild(old);return}
+var key=JSON.stringify(n);if(old&&key===_snKey){snFit();return}
 var b=document.body;if(!b)return;
 if(!document.getElementById('_svxnotice_css')){var st=document.createElement('style');st.id='_svxnotice_css';st.textContent=SN_CSS;(document.head||document.documentElement).appendChild(st)}
 var d=snBuild(n);_snKey=key;
-if(old&&old.parentNode)old.parentNode.replaceChild(d,old);else b.insertBefore(d,b.firstChild)}
+if(old&&old.parentNode)old.parentNode.replaceChild(d,old);else b.insertBefore(d,b.firstChild);
+snFit()}
 // A sample for checking the look when nothing is up: ?svxnotice=ongoing or ?svxnotice=resolved on any
 // portal page. Fixed text and placeholder contacts; nothing from the URL is rendered, nothing is fetched,
 // and nothing is remembered, so it shows only on that one page load for whoever typed it.
@@ -1601,6 +1644,8 @@ if(!_KC.sn)return;
 // whose until has passed while the page sat open.
 if(window.__svxNoticeAsked){if(_snCur)snDraw(_snCur);return}
 window.__svxNoticeAsked=1;
+// The bar's height changes as the window narrows and the text wraps; the moved portal bars must follow.
+if(typeof window.addEventListener==='function')window.addEventListener('resize',snFit);
 var pv=snPreview();if(pv){snDraw(pv);return}
 // DRAW THE LAST ANSWER FIRST. The portal is a full page load per click, so a bar that waited for the
 // network would push every page down a moment after it painted. What is remembered is the RAW feed with

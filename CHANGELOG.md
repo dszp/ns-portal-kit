@@ -22,6 +22,14 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-11-18
+
+### Fixed
+
+- **The service notice no longer hides under the portal's own fixed top bar** (shown while viewing a domain
+  or masquerading). When such a bar is present, the notice is fixed at the very top, the portal's bar moves
+  down beneath it, and the page moves down by the same amount.
+
 ## [0.10.0] — 2026-11-18
 
 ### Added
@@ -2483,6 +2491,8 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.10.1]: https://github.com/dszp/ns-portal-kit/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/dszp/ns-portal-kit/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/dszp/ns-portal-kit/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/dszp/ns-portal-kit/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/dszp/ns-portal-kit/compare/v0.8.5...v0.9.0
