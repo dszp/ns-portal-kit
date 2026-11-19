@@ -35,7 +35,7 @@ type Rec = Record<string, unknown>;
  * (409) user. The worker maps `.status` straight through.
  */
 export class RingotelWriteError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly code?: 'vendor-brick' | 'partial' | 'inactive') {
     super(message);
     this.name = 'RingotelWriteError';
   }
@@ -333,6 +333,196 @@ export async function resetPassword(opts: ActivationOpts): Promise<ActivationRes
   // Only now — after the canonical's password is reset — best-effort clean up any siblings.
   await dedupSiblings(opts, existing);
   return { action: 'reset', rtUserId: id };
+}
+
+/**
+ * Did this Ringotel failure come from a record the vendor has locked? A record SSO-approved while
+ * deleted/inactive becomes un-editable: `updateUser` fails "Invalid User ID" and `deleteUser` silently
+ * no-ops. Only Ringotel support can remove it, so a caller must stop rather than work around it — a
+ * `createUser` beside it is a second record at the extension that can never be cleaned up.
+ */
+export function isVendorBrick(e: unknown): boolean {
+  const x = e as { message?: unknown; rpcError?: { message?: unknown } } | null;
+  const texts = [x?.rpcError?.message, x?.message].map((v) => String(v ?? ''));
+  return texts.some((t) => /invalid user id/i.test(t));
+}
+
+/**
+ * PURE: is the extension's canonical record the one a working app needs — active, carrying the
+ * `<ext><suffix>` SIP identity in both `username` and `authname`, on the NS-connected branch, and (when
+ * `expectId` is given) the record we just wrote? Read-back, not the write's ack, is the evidence:
+ * `updateUser` acknowledges fields it silently dropped.
+ */
+export function verifyRepaired(users: User[], opts: Pick<ActivationOpts, 'branchid' | 'ext' | 'suffix'>, expectId?: string): boolean {
+  let c: User | undefined;
+  // `users` goes LAST: callers pass their whole options object, whose own (stale) `users` must not win.
+  try { c = resolveCanonical({ ...opts, users }); } catch { return false; }
+  if (!c) return false;
+  const sip = opts.ext + opts.suffix;
+  return Number(c.status) === 1
+    && String(c.username ?? '') === sip
+    && String(c.authname ?? '') === sip
+    && String(c.branchid ?? '') === opts.branchid
+    && (expectId === undefined || String(c.id) === expectId);
+}
+
+export interface RepairOpts extends ActivationOpts {
+  /** Force-fresh org users. Called after each write, because only a read-back proves a write took. */
+  reread: () => Promise<User[]>;
+  /** The user's app-access mode resolved to 'sso': they never use an app password, so a recreated
+   *  record sends no credentials email. */
+  ssoMode: boolean;
+}
+
+export interface RepairResult {
+  device: 'recreated';
+  record: 'updated' | 'recreated';
+  rtUserId: string;
+  verified: boolean;
+  /** Records at the extension before the final cleanup minus after (attached secondaries excluded). */
+  duplicatesRemoved: number;
+  /** More than one record is still at the extension — an undeletable phantom survived. */
+  duplicateRemains: boolean;
+  /** Ringotel mailed the user a new app password (a recreated record, password mode). */
+  emailed: boolean;
+}
+
+/** The record-level half of `verifyRepaired`, for a record we already hold by id. */
+function isRepairedRecord(u: User, opts: Pick<ActivationOpts, 'branchid' | 'ext' | 'suffix'>): boolean {
+  const sip = opts.ext + opts.suffix;
+  return Number(u.status) === 1
+    && String(u.username ?? '') === sip
+    && String(u.authname ?? '') === sip
+    && String(u.branchid ?? '') === opts.branchid;
+}
+
+/**
+ * Repair an ACTIVATED user whose app does not work: recreate the `<ext><suffix>` device with a fresh
+ * SIP password, write that identity onto the EXISTING record (status 1, name, email), and read it back.
+ * Only when the read-back shows that record and shows it wrong is the record recreated — new one first,
+ * then the old one deleted, so the extension never has zero records (the window an SSO login could
+ * brick).
+ *
+ * This is the uncheck/recheck fix without its deactivate step, which moved the record to `status:-1`
+ * under a new id. Refuses, before anything is written: no record (404), an inactive one (409 — the
+ * activate checkbox owns that), an ambiguous one (409), and a vendor-locked one (502 `vendor-brick`,
+ * found by a no-op `status:1` probe, so a record that still places calls keeps its device password).
+ * Anything that fails AFTER the device delete is a 502 `partial`: the device and the record may now
+ * disagree, and running repair again is the fix (every step tolerates the state a previous run left).
+ *
+ * After the first write the canonical record is tracked BY ID, never re-resolved by rule: a record
+ * that kept `username` but dropped `authname` and then survived its delete shares the SIP identity with
+ * the new record, and `resolveCanonical` would refuse that as ambiguous halfway through a repair.
+ */
+export async function repair(opts: RepairOpts): Promise<RepairResult> {
+  let existing = resolveCanonical(opts);
+  // A tombstone that still carries <ext><suffix> wins resolveCanonical's SIP-identity rule over the active
+  // record a tech re-created by hand beside it. The user IS activated; repair the one active record and
+  // let the cleanup below take the tombstone.
+  if (existing && Number(existing.status) !== 1) {
+    const active = usersForExt(opts.users, opts.branchid, opts.ext).filter((u) => u.userid == null && Number(u.status) === 1);
+    if (active.length === 1) existing = active[0];
+  }
+  if (!existing) throw new RingotelWriteError(`no app user to repair for extension ${opts.ext}`, 404);
+  if (Number(existing.status) !== 1) {
+    throw new RingotelWriteError(`the app user for extension ${opts.ext} is not active — use the activate checkbox`, 409, 'inactive');
+  }
+  const oldId = String(existing.id);
+  const deviceName = opts.ext + opts.suffix;
+  // NetSapiens is the source of truth for the address, but a failed or masked read (`undefined`) is not a
+  // removal: a recreated record keeps the address the old one had.
+  const email = opts.email !== undefined ? opts.email : rtEmailOf(existing);
+
+  try {
+    await opts.rtWrite.updateUser(oldId, opts.orgid, { status: 1 });
+  } catch (e) {
+    if (isVendorBrick(e)) {
+      throw new RingotelWriteError(`the app user for extension ${opts.ext} cannot be edited (Invalid User ID) — the app provider must remove it`, 502, 'vendor-brick');
+    }
+    throw e;
+  }
+
+  try {
+    await opts.nsWrite.deleteDevice(opts.domain, opts.ext, deviceName);
+  } catch (e) {
+    if ((e as { status?: number }).status !== 404) throw e;
+  }
+
+  const partial = (step: string) =>
+    new RingotelWriteError(`repair of extension ${opts.ext} stopped at ${step} — run Repair again`, 502, 'partial');
+  try {
+    const dev = await ensureDevice(opts.nsWrite, opts.domain, opts.ext, deviceName, { mayCreate: true });
+    // A DELETE NetSapiens accepts but applies later leaves the OLD device listed, and ensureDevice then
+    // returns its password with created:false. Writing that onto the record would report a repair that
+    // the delete undoes moments later. Stop before the record is touched.
+    if (!dev.created || !dev.password) throw partial('the device (it was not recreated)');
+    const password = dev.password;
+
+    const changes: Rec = { status: 1, username: deviceName, authname: deviceName, password };
+    if (opts.name) changes.name = opts.name;
+    if (opts.email !== undefined && emailDiffers(existing, opts.email)) changes.email = opts.email;
+    await opts.rtWrite.updateUser(oldId, opts.orgid, changes);
+
+    let latest = await opts.reread();
+    if (!Array.isArray(latest)) latest = [];
+    const byId = (id: string) => latest.find((u) => String(u.id) === id);
+    let record: RepairResult['record'] = 'updated';
+    let rtUserId = oldId;
+    let verified: boolean;
+    const old = byId(oldId);
+    if (!old) {
+      // The read-back does not show the record at all: no evidence the update failed, so no recreate.
+      verified = false;
+    } else if (isRepairedRecord(old, opts)) {
+      verified = true;
+    } else {
+      const created = await opts.rtWrite.createUser({
+        orgid: opts.orgid,
+        branchid: opts.branchid,
+        extension: opts.ext,
+        name: opts.name || opts.ext,
+        email,
+        username: deviceName,
+        authname: deviceName,
+        password,
+        status: 1,
+        domain: opts.domain,
+        noemail: opts.ssoMode,
+      });
+      record = 'recreated';
+      const newId = created && created.id != null ? String(created.id) : undefined;
+      try { await opts.rtWrite.deleteUser(oldId, opts.orgid); } catch { /* an undeletable phantom is reported below */ }
+      latest = await opts.reread();
+      if (!Array.isArray(latest)) latest = [];
+      const fresh = newId ? byId(newId) : undefined;
+      if (newId) rtUserId = newId;
+      verified = !!fresh && isRepairedRecord(fresh, opts);
+    }
+
+    const atExt = () => usersForExt(latest, opts.branchid, opts.ext).filter((u) => u.userid == null).length;
+    const before = atExt();
+    const keep = byId(rtUserId);
+    if (before > 1 && keep) {
+      await dedupSiblings({ ...opts, users: latest }, keep);
+      latest = await opts.reread();
+      if (!Array.isArray(latest)) latest = [];
+    }
+    const after = atExt();
+    return {
+      device: 'recreated',
+      record,
+      rtUserId,
+      verified,
+      duplicatesRemoved: Math.max(0, before - after),
+      duplicateRemains: after > 1,
+      emailed: record === 'recreated' && !opts.ssoMode && email.trim() !== '',
+    };
+  } catch (e) {
+    if (e instanceof RingotelWriteError) throw e;
+    // The upstream error stays on `cause` for the server log; its text (routes, response bodies) must not
+    // reach the caller.
+    throw Object.assign(partial('a later step'), { cause: e });
+  }
 }
 
 /** What a background identity sync did. `changed` names the fields actually written. */

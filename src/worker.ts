@@ -53,7 +53,7 @@ import { enrichFlowGraph, ringotelEnabled, orgStatusForDomain, usersStatusForDom
 // so the two can't drift. Only this deployment's config parsing is local.
 import { evaluateEligibility, type EligUser } from '@dszp/netsapiens-lib';
 import { resolveRingotelConfig, ringotelConfigError, prepopArmed, type RingotelConfig } from './eligibility.js';
-import { activate, deactivate, resetPassword, isDomainWritable, RingotelWriteError } from './ringotelActivation.js';
+import { activate, deactivate, resetPassword, repair, isDomainWritable, RingotelWriteError } from './ringotelActivation.js';
 import { planDirectoryReconcile, applyDirectoryReconcile, planExtensionReconcile, applyDirectoryPrepop, emptyPlan, type PrepopInput, type ReconcileWriter } from './ringotelPrepop.js';
 import { enrichDeviceDetails, nsDeviceDetailsEnabled } from './nsDevices.js';
 import { planDomainSweep, type SweepPlan } from './nsOffboard.js';
@@ -286,6 +286,8 @@ interface Env {
   /** Endpoint the status banner asks for the caller's message. Unset ⇒ the feature is inert. Must be https:
    *  the request carries the caller's live ns_t, so it may only be an endpoint the operator controls. */
   STATUS_BANNER_WEBHOOK?: string;
+  /** Public service-notice feed the browser fetches with no credentials. https only; unset ⇒ inert. */
+  SERVICE_NOTICE_URL?: string;
   /** Optional app-dashboard link base for gated features (empty ⇒ plain label). Gated bundle only. */
   RINGOTEL_APP_BASE_URL?: string;
   /** OPTIONAL private R2 binding serving `r2:` manifest secondaries. Structural so selftests can mock it;
@@ -434,6 +436,7 @@ export const ROUTES = {
   '/rapp/prepop/apply': { sensitivity: 'write' },
   '/rapp/activate': { sensitivity: 'write' },
   '/rapp/resetPassword': { sensitivity: 'write' },
+  '/rapp/repair': { sensitivity: 'write' },
   '/kit/portal.js': { sensitivity: 'read' },
   '/kit/self.js': { sensitivity: 'read' },
   // `read` is correct here: the console BUNDLE carries no configuration — it is neutral menu + bridge JS.
@@ -479,7 +482,7 @@ export const ROUTES = {
 } satisfies Record<string, { sensitivity: CallSensitivity }>;
 
 /** POST paths — the write routes. Everything else is GET-only (405 otherwise). */
-const WRITE_PATHS = new Set(['/rapp/activate', '/rapp/resetPassword', '/me/resetPassword', '/rapp/prepop/apply', '/kit/onebill/apply', '/kit/onebill/baseline', '/kit/onebill/assign', '/kit/ringotel/enable']);
+const WRITE_PATHS = new Set(['/rapp/activate', '/rapp/resetPassword', '/rapp/repair', '/me/resetPassword', '/rapp/prepop/apply', '/kit/onebill/apply', '/kit/onebill/baseline', '/kit/onebill/assign', '/kit/ringotel/enable']);
 
 /**
  * Routes matched by PREFIX rather than exact pathname, because they carry path parameters.
@@ -3832,12 +3835,68 @@ export default {
         return json({ ok: true, ...result }, 200, cors);
       }
 
+      // Repair an ACTIVATED user's app (reseller by default): recreate the <ext><suffix> device, fix the
+      // existing record in place, and recreate the record only if a read-back shows the fix did not take.
+      // The uncheck/recheck workaround without its deactivate step. See ringotelActivation.ts `repair`.
+      if (url.pathname === '/rapp/repair' && request.method === 'POST') {
+        if (!ringotelEnabled(env)) return json({ error: 'Not found' }, 404, cors);
+        const body = (await request.json().catch(() => null)) as { domain?: string; ext?: string } | null;
+        const ext = str(body?.ext);
+        if (!ext) return json({ error: 'Provide { ext }' }, 400, cors);
+        requireWriteFeature(auth, 'ringotel.repair', policies);
+        const domain = requireDomainValue(auth, str(body?.domain), env);
+        const rtConfig = resolveRingotelConfig(env);
+        assertDomainWritable(domain, rtConfig.writeDomains);
+        await assertDomainReadable(client, domain);
+        if (needsFreshAuth(ROUTES['/rapp/repair'].sensitivity)) await requireFreshAuth(auth, env);
+
+        const res = await resolveForWrite(env, caches.default, domain);
+        const target = resolveWriteConnection(res, ext, { mayCreate: false });
+        const nsUser = (await client.get(`/domains/${encPath(domain)}/users/${encPath(ext)}`).catch(() => null)) as Record<string, unknown> | null;
+        if (!nsUser) return json({ error: 'User not found' }, 404, cors);
+        const nsWrite = new NsWriteClient({ server: env.NS_SERVER, token: auth.token });
+        const devices = await nsWrite.getDevices(domain, ext);
+        // Derived from the caller, never assumed: the feature key can be widened by config, and `force`
+        // (the soft-exclusion bypass) is a reseller privilege whoever else is let through.
+        const isReseller = isResellerScope(auth.principal!.scope);
+        const elig = evaluateEligibility(nsUserToElig(nsUser, ext, devices.length), { domain, isReseller, force: true }, rtConfig);
+        if (!elig.activatable) return json({ error: 'Not eligible for activation', tier: elig.tier, reasons: elig.reasons }, 403, cors);
+        const ssoMode = (await computeAppAccessProjection(client, ext, domain, nsUser, env, isReseller, caches.default)).mode === 'sso';
+        // Invalidate in `finally`: a repair that fails past its first write has still changed the org's
+        // records, and the cached list is the pre-write one this request just stored.
+        let result;
+        try {
+          result = await repair({
+            nsWrite,
+            rtWrite: makeWriteClient(env),
+            users: res.users ?? [],
+            orgid: target.orgid,
+            branchid: target.branchid,
+            domain,
+            ext,
+            suffix: rtConfig.suffix,
+            name: nsDisplayName(nsUser) || ext,
+            email: emailForWrite(nsUser, ext, auth.principal),
+            reread: async () => (await resolveForWrite(env, caches.default, domain)).users ?? [],
+            ssoMode,
+          });
+        } catch (e) {
+          if (e instanceof RingotelWriteError && e.code === 'partial') {
+            console.error(JSON.stringify({ msg: 'repair partial', domain, ext, error: String((e.cause as Error)?.message ?? e.message).slice(0, 300) }));
+          }
+          throw e;
+        } finally {
+          await invalidateOrgUsers(caches.default, scopeOf(env), target.orgid);
+        }
+        return json({ ok: true, ...result }, 200, cors);
+      }
+
       return json({ error: 'Not found' }, 404, cors);
     } catch (err) {
       if (err instanceof HttpError) return json({ error: err.message, ...(err.reason ? { reason: err.reason } : {}) }, err.status, cors);
       // A write resolve/precondition failure (ambiguous extension, reset on absent/non-active user) carries
       // its own status (409/404); the message is our own descriptive text (ext number only, no secrets).
-      if (err instanceof RingotelWriteError) return json({ error: err.message }, err.status, cors);
+      if (err instanceof RingotelWriteError) return json({ error: err.message, ...(err.code ? { code: err.code } : {}) }, err.status, cors);
       const status = err instanceof NsApiError ? (err.status === 401 || err.status === 403 ? err.status : 502) : 500;
       // Log the full error (incl. upstream NS path + response body) server-side only. The client gets a
       // generic message — NsApiError.message embeds internal API routes and up to 500 chars of the NS

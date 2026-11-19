@@ -999,6 +999,12 @@ export const SETTINGS: SettingDef[] = [
     whenUnset: 'The status banner is inert — nothing is requested and nothing is drawn.',
     affects: ['injection', 'portal.statusBanner'] },
 
+  { name: 'SERVICE_NOTICE_URL', group: 'injection', kind: 'config',
+    importance: 'minor', example: 'https://www.example.com/status/active.json',
+    what: 'The https URL of a public JSON feed with your current service notice (`{"notices":[…]}`), shown as a bar across the top of every portal page for everyone signed in. The browser fetches it directly with no token, cookies or referrer, so the feed must allow cross-origin reads. Yellow while ongoing, green once resolved, gone after `until`; rendered as text only.',
+    whenUnset: 'No service notice — nothing is requested and nothing is drawn.',
+    affects: ['injection', 'portal.serviceNotice'] },
+
   { name: 'RINGOTEL_APP_BASE_URL', group: 'injection', kind: 'config',
     importance: 'minor', gatedBy: 'RINGOTEL_API_KEY', example: 'https://app.example.com',
     what: 'Optional base URL for an app-dashboard deep link shown on gated feature surfaces.',

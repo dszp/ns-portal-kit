@@ -88,7 +88,7 @@ ok(envBadge('svc.example.com', 'dev') === 'DEV', 'CACHE_SCOPE=dev wins over a pr
   // silently — deleting a registry entry left it green. Same reason EXPECTED_SUBSYSTEM_IDS below is a set
   // and not a count: adding a feature should be a deliberate edit here. 28 with the Ringotel Integration
   // page's view/write pair.
-  ok(doc.features.length === 28, `every registry feature gets a card, and there are exactly 28 (got ${doc.features.length})`);
+  ok(doc.features.length === 30, `every registry feature gets a card, and there are exactly 30 (got ${doc.features.length})`);
   ok(doc.features.every((f) => f.name && f.description), 'cards carry a name and description');
 
   ok(byKey('me.devices').state === 'off', 'a feature gated `off` reports off');
@@ -285,7 +285,7 @@ ok(/nobody|no one|denied/i.test(gateInWords('off', ['boss@example.com'])), 'gate
   // 75 with RINGOTEL_PREPOP_AUTO, the arming rail for the automatic directory reconcile. 76 with
   // RINGOTEL_UNLISTED_USERS, which grades NetSapiens' *List in Directory* switch. 81 with the five
   // `provision` settings the Ringotel Integration page reads.
-  ok(SETTINGS.length === 81, `sanity: the descriptor table has exactly 81 rows (got ${SETTINGS.length})`);
+  ok(SETTINGS.length === 82, `sanity: the descriptor table has exactly 82 rows (got ${SETTINGS.length})`);
   // Every row is rendered now: there is one deployment shape, so no setting is inapplicable to it.
   ok(doc.settings.length === SETTINGS.length,
     `every row is rendered (${doc.settings.length} of ${SETTINGS.length})`);

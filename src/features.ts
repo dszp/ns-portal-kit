@@ -244,6 +244,7 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
     default: 'reseller',
   },
   { key: 'ringotel.activate', name: 'App activate/deactivate', description: 'Activate or deactivate the app for a user from the profile page (write).', default: 'office_manager' },
+  { key: 'ringotel.repair', name: 'App repair', description: 'Recreate the app device and fix the app record for an activated user from the profile page (write).', default: 'reseller' },
   { key: 'ringotel.resetPassword', name: 'App password reset', description: 'Reset the app password for a user from the profile page (write).', default: 'office_manager' },
   { key: 'ringotel.profileAppAccess', name: 'App sign-in details on profile', description: 'The user-visible app sign-in message (domain/username/password + downloads) on the user-profile page.', default: 'office_manager' },
   // Self-service tier (own-account features; orthogonal to the admin ladder). See
@@ -357,6 +358,28 @@ export const FEATURE_REGISTRY: FeatureDef[] = [
       'It removes the control, not the capability — the same caveat as the other two, and it matters most here, because this is the irreversible one. Nothing in a browser can stop a determined request; only the platform\'s own scopes can.',
       '### The usual shape',
       'A deny: `{"users":{"deny":["100@example.com"]}}` — this key\'s default (`reseller`) minus that account. Pair it with `portal.domainCreate` and leave `portal.domainEdit` alone to get "may adjust a customer\'s limits, may never delete the customer"; the three keys are independent, so one you do not name keeps its default. Naming a level too — `{"levels":["reseller"],"users":{"deny":["100@example.com"]}}` — says both halves explicitly, and is worth it only when you are also changing which levels hold the key.',
+    ],
+  },
+  {
+    key: 'portal.serviceNotice',
+    name: 'Service notice',
+    description: 'A bar across the top of every portal page showing your service status from a public feed you publish — outages and their resolution.',
+    default: 'all',
+    // Self bundle for the same reason as the status banner: it must reach every signed-in user.
+    deliveredBy: 'self',
+    audience: 'admin',
+    detail: [
+      'A full-width bar at the very top of every portal page, pushing the page down, showing the notice from a feed you publish at `SERVICE_NOTICE_URL`. It is for fleet-wide service status — an outage and then its resolution — so everyone signed in sees the same bar. A message for particular customers belongs in the status banner instead.',
+      '### The feed',
+      'A public `GET` returning `{"notices":[{"state":"ongoing"|"resolved","summary","url","until","contacts":[{"method":"phone"|"email","label","href"}]}]}`, with at most one notice and `notices: []` when nothing is up. It must allow cross-origin reads (`Access-Control-Allow-Origin: *`), because the browser fetches it directly. No token, cookies, custom headers or referrer are sent.',
+      '### What is shown',
+      'The `summary`, linked to `url`, then any contact links, then a "See updates" link. Yellow while ongoing, green once resolved, and gone once `until` has passed. Everything is rendered as text. The incident link must be `https:` and contact links `tel:` or `mailto:`; anything else is dropped.',
+      '### Failures',
+      'If the feed cannot be reached, answers non-2xx, takes longer than 5 seconds, or returns something else, no bar is shown. The last answer is remembered for the browser session (up to 15 minutes) so the bar is drawn immediately on the next page instead of pushing the page down after it loads.',
+      '### Previewing',
+      'Add `?svxnotice=ongoing` or `?svxnotice=resolved` to any portal page address to see a sample notice. It shows only on that page load and fetches nothing.',
+      '### When it is off',
+      'Leave `SERVICE_NOTICE_URL` unset and nothing is requested or drawn.',
     ],
   },
  {

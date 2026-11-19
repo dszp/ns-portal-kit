@@ -43,6 +43,9 @@ export interface KitEnv {
   /** Endpoint returning the status-banner message for the caller. Unset ⇒ the feature is inert.
    *  Receives the caller's live ns_t, so it must be an endpoint the operator controls. */
   STATUS_BANNER_WEBHOOK?: string;
+  /** Public JSON feed of the operator's fleet-wide service notice (`{notices:[…]}`). https only; unset or
+   *  empty ⇒ the feature is inert. Fetched by the browser with no credentials. */
+  SERVICE_NOTICE_URL?: string;
   /** Structural for `kitConfigError`'s ASSETS-binding check; see the Worker `Env`'s own doc comment. */
   ASSETS?: { get(key: string): Promise<{ text(): Promise<string> } | null> };
 }
@@ -70,6 +73,7 @@ export const FEATURE_KEYS = [
   { flag: 'profileStatus', key: 'ringotel.profileStatus' },
   { flag: 'activate', key: 'ringotel.activate' },
   { flag: 'resetPassword', key: 'ringotel.resetPassword' },
+  { flag: 'repair', key: 'ringotel.repair' },
   { flag: 'profileAppAccess', key: 'ringotel.profileAppAccess' },
   // Drives the users-list freshness control. That list stays cached ~10 minutes on purpose (it is a bulk
   // view; making it always-fresh would put a getUsers on every page view of a large domain), so the
@@ -110,6 +114,7 @@ export const SELF_FEATURE_KEYS = [
   { flag: 'menuConfig', key: 'me.menuConfig' },
   { flag: 'statusBanner', key: 'portal.statusBanner' },
   { flag: 'versionLine', key: 'portal.versionLine' },
+  { flag: 'serviceNotice', key: 'portal.serviceNotice' },
 ] as const;
 
 /** The self bundle's policy keys, in order. */
@@ -228,6 +233,11 @@ export function kitConfigError(env: KitEnv): string | null {
   const bw = env.STATUS_BANNER_WEBHOOK;
   if (bw !== undefined && bw.trim() !== '' && !/^https:\/\/\S+$/i.test(bw.trim()))
     return 'STATUS_BANNER_WEBHOOK must be an https URL (it receives the caller\'s live ns_t), or unset to turn the banner off';
+  // SERVICE_NOTICE_URL carries no credential, but its reply becomes a bar on every page and the bundle
+  // drops a non-https value — so, as above, a bad value is loud here rather than a silently absent bar.
+  const sn = env.SERVICE_NOTICE_URL;
+  if (sn !== undefined && sn.trim() !== '' && !/^https:\/\/\S+$/i.test(sn.trim()))
+    return 'SERVICE_NOTICE_URL must be an https URL (the public service-notice feed), or unset to turn the notice off';
   // PORTAL_RELEASE_NOTES_URL becomes an <a href> in the portal footer and the console header. Escaping
   // does not neutralise a javascript: value in an href position, and this was the one operator URL
   // rendered that way with no scheme check -- the others above have had one since they shipped. '' is a
@@ -1043,6 +1053,9 @@ hookSave(d,ext);
 function done(r2){rebuildAct(panel,d,ext,email,r2?{active:r2.active,status:r2.status,eligibility:r&&r.eligibility}:r)}
 jpost('/rapp/activate',{domain:d,ext:ext,activate:pend}).then(function(){pollUntil(d,ext,pend,done)}).catch(function(){done(null)});
 }
+// One-shot outcome of a repair, shown by the NEXT render of this user's block: a repair ends in
+// rebuildAct, which throws the old block away, so a note written into it would vanish with it.
+var _repNote=null;
 function actSection(panel,d,ext,email,r,noRefresh){
 if(document.getElementById('_svx_act'))return;
 // No app org bound to this domain ⇒ render NOTHING. On /rapp/user, active means "org present" (NOT
@@ -1073,6 +1086,39 @@ else if(!active&&elig&&!elig.activatable){dis=true;tip=(elig.reasons&&elig.reaso
 if(dis){chk.disabled=true;wc.style.opacity='.6';st.style.opacity='.6';wc.title=tip}
 chk.addEventListener('change',setL);
 wc.appendChild(chk);wc.appendChild(st);cc.appendChild(wc);
+// Repair: recreate the <ext><suffix> device and fix the app record in place (the server recreates the
+// record only if a read-back shows the fix did not take). Reseller-only by default; the route enforces
+// ringotel.repair on its own, so hiding the button is presentation, not the gate. Only for an ACTIVATED
+// user -- activation itself stays with the checkbox. Orange outline when the health check calls it broken.
+if(_AF.repair&&_isRes()&&active){
+var pb=document.createElement('button');pb.type='button';pb.className='btn btn-default';pb.textContent='Repair '+_KC.label;pb.style.cssText='display:block;margin-top:8px';
+if(r&&r.status&&r.status.health&&r.status.health.severity==='broken')pb.style.border='1px solid #e8930c';
+var pw=document.createElement('span');pw.style.display='block';
+if(masq()){var ptip='Cannot repair while masquerading.';pb.disabled=true;pb.title=ptip;pw.title=ptip;pw.style.opacity='.6'}
+pb.addEventListener('click',function(){if(!confirm('Repair '+_KC.label+' for this user? The app disconnects for a moment while its device is recreated.'))return;pb.disabled=true;pb.textContent='Repairing…';
+jpost('/rapp/repair',{domain:d,ext:ext}).then(function(x){
+var t=x.record==='recreated'?'Repaired: device and record recreated.':'Repaired: device recreated, record updated.';
+if(x.emailed)t+=' A new app password was emailed.';
+var bad=!!x.duplicateRemains||x.verified===false;
+if(x.duplicateRemains)t+=' A duplicate record could not be removed.';
+if(x.verified===false)t+=' The record could not be confirmed. Check it before the user signs in.';
+_repNote={ext:ext,text:t,bad:bad};rebuildAct(panel,d,ext,email,r)
+}).catch(function(e){var b=e&&e.body,c=b&&b.code,s=e&&e.status;
+// Fixed panel text chosen by status/code. The server's message names the vendor and internals; it stays
+// in the response for whoever reads the network log, never on the page (same rule as Reset's text).
+var m=c==='vendor-brick'?'This app record cannot be edited. Contact the app provider to remove it.'
+:c==='partial'?'Repair did not finish. Run Repair again.'
+:c==='inactive'?"This user's app is not active. Use the activation checkbox."
+:s===409?'This user has more than one app record with the same sign-in, so Repair cannot choose one.'
+:s===404?'No app record was found for this user.'
+:s===403?'This user is not eligible for the app, or you cannot repair it.'
+:'Repair failed.';
+if(c==='partial'){_repNote={ext:ext,text:m,bad:true};rebuildAct(panel,d,ext,email,r);return}
+pb.disabled=c==='vendor-brick';pb.textContent='Repair '+_KC.label;
+var bn=document.createElement('div');bn.style.cssText='font-size:12px;margin-top:6px;color:#c0392b';bn.textContent=m;pw.appendChild(bn)})});
+pw.appendChild(pb);cc.appendChild(pw);
+}
+if(_repNote&&_repNote.ext===ext){var rn=document.createElement('div');rn.style.cssText='font-size:12px;margin-top:6px;color:'+(_repNote.bad?'#c0392b':'#3a7d3a');rn.textContent=_repNote.text;cc.appendChild(rn);_repNote=null}
 // Shown while masquerading, but DISABLED — matching the activation checkbox above rather than
 // vanishing. Two reasons it must not just disappear: a control that silently absents itself reads as
 // "this user cannot be reset" instead of "you cannot do this from here", and under a mask the portal
@@ -1457,6 +1503,125 @@ var mdl=aaModel(r,L);
 if(mdl.signable){mdl.fields.forEach(function(f){ul.appendChild(row(f.k,f.v,null,f.copy));ul.appendChild(note(f.hint,f.warn))})}
 else{ul.appendChild(note(mdl.advisory.t,true))}
 })}
+// ── The service notice (portal.serviceNotice) ──
+// A FLEET-WIDE notice from a public feed — the operator's own service status, the same notice their website
+// shows — not a message for this caller. That is why it is separate from the status banner below: nothing
+// about the reader is sent (a plain GET, credentials omitted, no token), and every signed-in user sees the
+// same bar. Contract: {notices:[{state,summary,url,until,contacts}]}, at most one notice, notices:[] when
+// none is up.
+//
+// A bar at the TOP OF <body>, in normal flow, pushing the whole portal down — deliberately unlike the
+// status banner, which overlays the header. A service notice is the one thing that should move the page.
+//
+// TEXT only. The feed is remote, so its strings go in through textContent and its hrefs are held to a
+// scheme rule (https for the incident page; tel:/mailto: for contacts).
+var SN_K='__svxNoticeFeed',SN_MAXAGE=15*60e3,SN_TIMEOUT=5000;
+// Material Icons paths (Apache-2.0). Inline rather than an icon font: the portal's own assets are not ours
+// to depend on, and a missing font would draw a box where the warning sign should be.
+var SN_ICON={warn:'M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z',
+ok:'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z',
+phone:'M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z',
+email:'M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z'};
+// The site's own look, copied: yellow while ongoing, green once resolved, no dark variant. Scoped to the
+// bar's id so the portal's stylesheet cannot reach in and ours cannot leak out. A stylesheet rather than
+// inline styles because hover and focus-visible have no inline form.
+var SN_CSS='#_svxnotice{--svxn-bg:#ffc400;--svxn-ink:#1a1612;display:block;position:relative;z-index:1000;margin:0;padding:0;background:var(--svxn-bg);color:var(--svxn-ink);border-bottom:1px solid rgba(26,22,18,.15);font-size:14px;line-height:1.45;text-align:left}'+
+'#_svxnotice.is-resolved{--svxn-bg:#17733a;--svxn-ink:#fff;border-bottom-color:rgba(0,0,0,.15)}'+
+'#_svxnotice p,#_svxnotice a{font-family:inherit;font-size:inherit;line-height:inherit;letter-spacing:normal}'+
+'#_svxnotice ._svxn-c{box-sizing:border-box;display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;width:100%;max-width:1180px;margin:0 auto;padding:10px 16px;padding:10px clamp(16px,4vw,32px)}'+
+'#_svxnotice svg{width:18px;height:18px;flex:none;fill:currentColor}'+
+'#_svxnotice ._svxn-t{flex:1 1 320px;margin:0;padding:0;font-weight:600}'+
+'#_svxnotice ._svxn-a{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;margin:0;padding:0}'+
+'#_svxnotice a,#_svxnotice a:hover,#_svxnotice a:focus,#_svxnotice a:visited{color:var(--svxn-ink);font-weight:700;text-decoration:underline;text-underline-offset:2px}'+
+'#_svxnotice ._svxn-t a,#_svxnotice ._svxn-t a:visited{font-weight:600;text-decoration:none}'+
+'#_svxnotice ._svxn-t a:hover{text-decoration:underline}'+
+'#_svxnotice ._svxn-a a{display:inline-flex;align-items:center;gap:5px}'+
+'#_svxnotice ._svxn-a svg{width:15px;height:15px}'+
+'#_svxnotice a._svxn-m,#_svxnotice a._svxn-m:hover,#_svxnotice a._svxn-m:visited{background:var(--svxn-ink);color:var(--svxn-bg);text-decoration:none;border-radius:4px;padding:4px 10px}'+
+'#_svxnotice a:focus-visible{outline:2px solid var(--svxn-ink);outline-offset:2px}';
+// The feed's notice, normalised, or null for "show nothing". Every rule here is the feed's contract:
+// a past until is gone, a blank summary is nothing, and a link is only ever one of the schemes above.
+function snPick(j,now){
+var a=j&&typeof j==='object'&&j.notices;if(!a||!a.length)return null;
+var n=a[0];if(!n||typeof n!=='object')return null;
+var s=typeof n.summary==='string'?n.summary.trim():'';if(!s)return null;
+// An until that cannot be read counts as passed: a notice that never comes down is worse than one that
+// comes down early, and the feed's own page still carries it.
+if(n.until!=null){var u=Date.parse(n.until);if(isNaN(u)||now>u)return null}
+var url=typeof n.url==='string'&&/^https:\/\//i.test(n.url)?n.url:'';
+var cs=[],c=Array.isArray(n.contacts)?n.contacts:[];
+for(var i=0;i<c.length;i++){var x=c[i];
+if(!x||typeof x.href!=='string'||typeof x.label!=='string'||!x.label.trim())continue;
+if(!/^(tel:|mailto:)/i.test(x.href))continue;
+cs.push({m:(x.method==='email'||/^mailto:/i.test(x.href))?'email':'phone',l:x.label.trim(),h:x.href})}
+return {s:s,r:n.state==='resolved',u:url,c:cs,until:typeof n.until==='string'?n.until:null}}
+function snIcon(k){
+var NS='http://www.w3.org/2000/svg',s=document.createElementNS(NS,'svg'),p=document.createElementNS(NS,'path');
+s.setAttribute('viewBox','0 0 24 24');s.setAttribute('width','18');s.setAttribute('height','18');s.setAttribute('aria-hidden','true');s.setAttribute('focusable','false');
+p.setAttribute('d',SN_ICON[k]);s.appendChild(p);return s}
+function snEl(tag,cls){var e=document.createElement(tag);if(cls)e.setAttribute('class',cls);return e}
+function snLink(href,tab){var a=document.createElement('a');a.setAttribute('href',href);
+// The incident page opens in a new tab: following it should not navigate the reader out of the portal.
+if(tab){a.setAttribute('target','_blank');a.setAttribute('rel','noopener noreferrer')}return a}
+function snBuild(n){
+var d=snEl('aside',n.r?'is-resolved':'');d.id='_svxnotice';d.setAttribute('aria-label','Service notice');
+var c=snEl('div','_svxn-c');d.appendChild(c);
+c.appendChild(snIcon(n.r?'ok':'warn'));
+var t=snEl('p','_svxn-t');c.appendChild(t);
+if(n.u){var a=snLink(n.u,1);a.textContent=n.s;t.appendChild(a)}else t.textContent=n.s;
+if(n.c.length||n.u){var g=snEl('p','_svxn-a');c.appendChild(g);
+for(var i=0;i<n.c.length;i++){var k=snLink(n.c[i].h,0);k.appendChild(snIcon(n.c[i].m));k.appendChild(document.createTextNode(n.c[i].l));g.appendChild(k)}
+// The pill repeats the summary's link, so it is hidden from assistive tech and the tab order — the same
+// choice the website makes, for the same reason: one destination, one stop.
+if(n.u){var m=snLink(n.u,1);m.setAttribute('class','_svxn-m');m.setAttribute('aria-hidden','true');m.setAttribute('tabindex','-1');m.textContent='See updates \u2192';g.appendChild(m)}}
+return d}
+var _snCur=null,_snKey='';
+function snDraw(n){
+var old=document.getElementById('_svxnotice');
+// Re-checked here, not only in snPick: a remembered notice must not outlive its window either.
+if(n&&n.until!=null){var u=Date.parse(n.until);if(isNaN(u)||Date.now()>u)n=null}
+_snCur=n||null;
+if(!n){_snKey='';if(old&&old.parentNode)old.parentNode.removeChild(old);return}
+var key=JSON.stringify(n);if(old&&key===_snKey)return;
+var b=document.body;if(!b)return;
+if(!document.getElementById('_svxnotice_css')){var st=document.createElement('style');st.id='_svxnotice_css';st.textContent=SN_CSS;(document.head||document.documentElement).appendChild(st)}
+var d=snBuild(n);_snKey=key;
+if(old&&old.parentNode)old.parentNode.replaceChild(d,old);else b.insertBefore(d,b.firstChild)}
+// A sample for checking the look when nothing is up: ?svxnotice=ongoing or ?svxnotice=resolved on any
+// portal page. Fixed text and placeholder contacts; nothing from the URL is rendered, nothing is fetched,
+// and nothing is remembered, so it shows only on that one page load for whoever typed it.
+function snPreview(){
+var m=/[?&]svxnotice=(ongoing|resolved)(?:&|$)/.exec((location&&location.search)||'');if(!m)return null;
+var r=m[1]==='resolved';
+return {s:r?'Sample notice: the service problem is resolved. This is a preview, not a real notice.':'Sample notice: some customers may have trouble placing calls. This is a preview, not a real notice.',
+r:r,u:'https://www.example.com/',c:[{m:'phone',l:'555-0100',h:'tel:+15550100'},{m:'email',l:'support@example.com',h:'mailto:support@example.com'}],until:null}}
+function serviceNotice(){
+if(!_KC.sn)return;
+// Once per page load. Later passes only put a bar back that a portal re-render removed, and drop one
+// whose until has passed while the page sat open.
+if(window.__svxNoticeAsked){if(_snCur)snDraw(_snCur);return}
+window.__svxNoticeAsked=1;
+var pv=snPreview();if(pv){snDraw(pv);return}
+// DRAW THE LAST ANSWER FIRST. The portal is a full page load per click, so a bar that waited for the
+// network would push every page down a moment after it painted. What is remembered is the RAW feed with
+// the time it arrived, and it goes back through snPick: a remembered answer is held to every rule a
+// fetched one is (shape, link schemes, until), and an old or malformed entry is simply not drawn. An
+// answer older than SN_MAXAGE is not drawn either — a tab left overnight should not repaint last
+// night's outage before the fetch corrects it.
+try{var c=JSON.parse(sessionStorage.getItem(SN_K)||'null');
+if(c&&typeof c.t==='number'&&Date.now()-c.t<SN_MAXAGE){var cn=snPick(c.j,Date.now());if(cn)snDraw(cn)}}catch(e){}
+var done=function(j){try{if(j)sessionStorage.setItem(SN_K,JSON.stringify({t:Date.now(),j:j}));else sessionStorage.removeItem(SN_K)}catch(e){}
+try{snDraw(j?snPick(j,Date.now()):null)}catch(e){}};
+// A failed, unreadable or slow fetch shows nothing — the feed's own rule. Slow means SN_TIMEOUT: a hung
+// feed host must not leave a remembered bar on every page until the browser gives up.
+var ac=typeof AbortController==='function'?new AbortController():null;
+var to=ac?setTimeout(function(){try{ac.abort()}catch(e){}},SN_TIMEOUT):0;
+// No referrer: the page address can name the user being viewed, and the feed has no use for it.
+var init={credentials:'omit',referrerPolicy:'no-referrer'};if(ac)init.signal=ac.signal;
+fetch(_KC.sn,init)
+.then(function(r){return r&&r.ok?r.json():null})
+.then(function(j){if(to)clearTimeout(to);done(j&&typeof j==='object'?j:null)})
+.catch(function(){if(to)clearTimeout(to);done(null)})}
 // ── The status banner (portal.statusBanner) ──
 // The message comes from an endpoint the OPERATOR hosts, asked once per page load. The kit holds no
 // message store and makes no eligibility decision — it sends who is asking and shows what comes back.
@@ -1638,7 +1803,8 @@ window.addEventListener('resize',place)}
 else{
 d.style.cssText='padding:8px 14px;background:#e8f2fb;border-bottom:1px solid #b8d4ea;color:#123;font-weight:700;font-size:14px;line-height:1.4;text-align:center';
 bannerHtml(d,msg);
-var b=document.body;if(b)b.insertBefore(d,b.firstChild)}})
+// Below the service notice when there is one: that bar is the top band of every page.
+var b=document.body;if(b){var sn=document.getElementById('_svxnotice');b.insertBefore(d,sn?sn.nextSibling:b.firstChild)}}})
 .catch(function(){})}
 // ── The footer version line (portal.versionLine) ──
 // Joined onto the footer's LAST paragraph with the same separator the platform's own version entries use,
@@ -1771,6 +1937,7 @@ var F=[{p:/^\/portal\/home/,m:homeStatus,a:function(){return !!_AF.appStatus}},
 // The trade, recorded because it is real: one webhook call per portal page load rather than six page types.
 // If that volume ever matters, the endpoint already receives the path and can answer empty, or the six
 // above are here to be turned into a setting.
+{p:/^\//,m:serviceNotice,a:function(){return !!_AF.serviceNotice}},
 {p:/^\//,m:statusBanner,a:function(){return !!_AF.statusBanner}}];
 function run(){for(var i=0;i<F.length;i++){try{var f=F[i];if(f.p.test(location.pathname)&&(!f.a||f.a()))f.m()}catch(e){}}}
 var raf=0;function sched(){if(raf)return;raf=requestAnimationFrame(function(){raf=0;run()})}
@@ -1792,6 +1959,7 @@ setTimeout(function(){ob.disconnect()},8000);
 var VLT=[2000,5000,12000,25000];
 for(var vi=0;vi<VLT.length;vi++)setTimeout(function(){
 try{if(_AF.versionLine)verLine()}catch(e){}
+try{if(_AF.serviceNotice)serviceNotice()}catch(e){}
 try{if(_AF.menuConfig||_AF.appAccess)menuHides()}catch(e){}},VLT[vi]);`;
 
 /** Shared bundle preamble: the `(function(){ _AF; _KC; base; <body> }())` wrapper. `featureKeys` is the
@@ -1881,10 +2049,13 @@ function wrapBundle(featureKeys: ReadonlyArray<{ flag: string; key: string }>, a
   // caller's ns_t, and sending a live credential over plain http is not a mistake worth supporting.
   const bwRaw = (env.STATUS_BANNER_WEBHOOK ?? '').trim();
   const bw = allowedKeys.includes('portal.statusBanner') && /^https:\/\//i.test(bwRaw) ? { bw: bwRaw } : {};
+  // The service-notice feed, same rule: only for a tier that carries the feature, and https only.
+  const snRaw = (env.SERVICE_NOTICE_URL ?? '').trim();
+  const sn = allowedKeys.includes('portal.serviceNotice') && /^https:\/\//i.test(snRaw) ? { sn: snRaw } : {};
   const vl = allowedKeys.includes('portal.versionLine')
     ? { vl: { name: productName(env), ver: VERSION, url: releaseNotesUrl(env) ?? '' } }
     : {};
-  const cfg = JSON.stringify({ label, labelShort, appBase, dl: parseDownloads(env), ...vl, ...bw });
+  const cfg = JSON.stringify({ label, labelShort, appBase, dl: parseDownloads(env), ...vl, ...bw, ...sn });
   return `(function(){
 "use strict";
 var _AF={${af}};

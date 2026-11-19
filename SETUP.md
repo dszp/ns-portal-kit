@@ -83,7 +83,7 @@ hourly with nobody clicking it.
 copy-and-paste step where extensions get transposed. These are writes, so they are gated harder than
 anything else here and bounded by an explicit list of domains they may touch.
 
-*Feature keys `ringotel.activate`, `ringotel.resetPassword`, `ringotel.prepop`. Needs
+*Feature keys `ringotel.activate`, `ringotel.resetPassword`, `ringotel.repair`, `ringotel.prepop`. Needs
 [`RINGOTEL_WRITE_DOMAINS`](./CONFIG.md#RINGOTEL_WRITE_DOMAINS) — **empty means every write is refused**.*
 
 ### Sign-in instructions, written for the person reading them
@@ -358,6 +358,7 @@ its own minimum is met.
 | **Automatic app directory** (the reconcile) | the write rail **+** [`RINGOTEL_PREPOP_AUTO`](./CONFIG.md#RINGOTEL_PREPOP_AUTO) **+** [`NS_API_KEY`](./CONFIG.md#NS_API_KEY) (or admin credentials) **+** a cron trigger | The hourly door needs the service identity even with change events off — it reads NetSapiens with no caller to act as. Arming it is a step of its own: [below](#auto-directory). |
 | **Sign-in instructions** | `RINGOTEL_API_KEY`, then any of [`RINGOTEL_SSO_SERVICE`](./CONFIG.md#RINGOTEL_SSO_SERVICE), [`SSO_AUTO_ACTIVATE`](./CONFIG.md#SSO_AUTO_ACTIVATE), [`PORTAL_APP_DOWNLOADS`](./CONFIG.md#PORTAL_APP_DOWNLOADS) | All three fail closed. Unset means no SSO is claimed and no links are shown — never a wrong instruction. |
 | **Menu customization** | [`PORTAL_MENUS`](./CONFIG.md#PORTAL_MENUS) alone | No other integration required. With no app configured, static add, hide and rename still work. |
+| **Service notice** | [`SERVICE_NOTICE_URL`](./CONFIG.md#SERVICE_NOTICE_URL) — a public JSON feed | It must allow cross-origin reads. No token, cookies or referrer are sent. Preview with `?svxnotice=ongoing`. |
 | **Status banner** | [`STATUS_BANNER_WEBHOOK`](./CONFIG.md#STATUS_BANNER_WEBHOOK) — an `https` endpoint **you host** | ⚠️ It receives the signed-in user's live `ns_t` on every page load. Name only something you control. |
 | **Change events** | [`NS_EVENTS_BASE_URL`](./CONFIG.md#NS_EVENTS_BASE_URL) + [`NS_EVENTS_DOMAINS`](./CONFIG.md#NS_EVENTS_DOMAINS) + [`NS_EVENTS_PATH_SECRET`](./CONFIG.md#NS_EVENTS_PATH_SECRET) + [`NS_API_KEY`](./CONFIG.md#NS_API_KEY) (or admin credentials) + a cron trigger | Also needs a NetSapiens release with the flat `/subscriptions` endpoints. Read [the depth notes](./CONFIG.md#events-reference) before enabling — retiring it has an order. |
 | **OneBill links and the account panel** | [`ONEBILL_TENANT_ID`](./CONFIG.md#ONEBILL_TENANT_ID) + [`ONEBILL_CLIENT_SECRET`](./CONFIG.md#ONEBILL_CLIENT_SECRET) + [`ONEBILL_USERNAME`](./CONFIG.md#ONEBILL_USERNAME) + [`ONEBILL_PASSWORD`](./CONFIG.md#ONEBILL_PASSWORD) | All four are the gate: any one missing and there are no OneBill calls, no menu entry and no routes. The custom-field group named by [`ONEBILL_LINK_GROUP`](./CONFIG.md#ONEBILL_LINK_GROUP) must already exist in OneBill — [declare it first](#onebill-group), or the page shows a setup card instead of the table. |

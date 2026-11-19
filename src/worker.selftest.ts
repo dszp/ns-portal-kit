@@ -76,6 +76,10 @@ let nsFail500 = false; // when set, the /domains list read returns a 500 (drives
 let rtOrgs: any[] = [];
 let rtBranches: any[] = [];
 let rtUsers: any[] = [];
+/** When set, the Ringotel stub fails `updateUser` the way a vendor-locked record does (HTTP 500, in-band error). */
+let rtUpdateFail: string | null = null;
+/** When set, the NS device-create stub fails (HTTP 500). */
+let nsDevicePostFail = false;
 let rtRpc: Array<{ method: string; params: any }> = []; // captured Ringotel RPC bodies (write-route asserts)
 // The three ACCOUNT-level catalogs the provisioning page resolves its config against, and the counter
 // behind the ids a create hands back. Empty unless the /kit/ringotel block below fills them — every other
@@ -204,6 +208,7 @@ const nf = () => new Response('[]', { status: 404 });
     ringotelCalls++;
     const { method, params } = JSON.parse(String(init?.body ?? '{}'));
     rtRpc.push({ method, params });
+    if (method === 'updateUser' && rtUpdateFail) return new Response(JSON.stringify({ error: { message: rtUpdateFail } }), { status: 500 });
     // getBranches(orgid) is per-org on the real API — filter to match, so buildOrgBranchIndex's per-org
     // fan-out doesn't cross-assign another org's branches (matches the portal.selftest stub).
     const result =
@@ -283,6 +288,7 @@ const nf = () => new Response('[]', { status: 404 });
   // Write-route stubs: device collection (list/create), one device (get/delete), single-user read.
   m = path.match(/^\/domains\/([^/]+)\/users\/([^/]+)\/devices$/);
   if (m) {
+    if (init?.method === 'POST' && nsDevicePostFail) return new Response('{"error":"upstream device failure"}', { status: 500 });
     if (init?.method === 'POST') { const d = JSON.parse(String(init.body ?? '{}')); nsDeviceCalls.push(`POST:${d.device}`); return j({ device: d.device, 'device-sip-registration-password': 'GENPW1234567890' }); }
     nsDeviceCalls.push(`GET:${decodeURIComponent(m[2]!)}`);
     if (nsDevicesFail) return new Response('{"error":"upstream"}', { status: 500 });
@@ -290,7 +296,7 @@ const nf = () => new Response('[]', { status: 404 });
   }
   m = path.match(/^\/domains\/([^/]+)\/users\/([^/]+)\/devices\/([^/]+)$/);
   if (m) {
-    if (init?.method === 'DELETE') return j({});
+    if (init?.method === 'DELETE') { nsDeviceCalls.push(`DELETE:${decodeURIComponent(m![3]!)}`); return j({}); }
     return j(nsDevices.find((x: any) => x.device === decodeURIComponent(m![3]!)) ?? {});
   }
   m = path.match(/^\/domains\/([^/]+)\/users\/([^/]+)$/);
@@ -933,6 +939,39 @@ const ok = (c: boolean, m: string) => {
     const r = await wcall('/rapp/activate', { domain, ext: '999999', activate: false });
     ok(r.status === 200 && (await r.json()).action === 'deactivated',
        '[single] deactivate on an extension with NO app record still 200s { action:deactivated } (mayCreate stays true)');
+  }
+  // ── /rapp/repair (reseller): recreate the device, fix the record in place ──
+  {
+    const omTok = mkTok({ user_scope: 'Office Manager' });
+    rtUsers = [];
+    ok((await wcall('/rapp/repair', { domain, ext: '100' })).status === 404, '[repair] no RT user → 404');
+    rtUsers = [{ id: 'ur', extension: '100', branchid: 'RTBR', status: -1 }];
+    ok((await wcall('/rapp/repair', { domain, ext: '100' })).status === 409, '[repair] inactive RT user → 409');
+    // The stub serves the same rtUsers on every read, so an already-correct record reads back correct.
+    rtUsers = [{ id: 'ur', extension: '100', branchid: 'RTBR', status: 1, username: '100r', authname: '100r' }];
+    rtRpc = []; nsDeviceCalls.length = 0;
+    const r = await wcall('/rapp/repair', { domain, ext: '100' });
+    const b = await r.json();
+    ok(r.status === 200 && b.ok === true && b.record === 'updated' && b.device === 'recreated' && b.verified === true, '[repair] active record → 200 record:updated');
+    ok(nsDeviceCalls.indexOf('DELETE:100r') !== -1 && nsDeviceCalls.indexOf('DELETE:100r') < nsDeviceCalls.indexOf('POST:100r'), '[repair] the 100r device is deleted, then created');
+    const uu = rtRpc.find((c) => c.method === 'updateUser' && c.params.password); // the first updateUser is the no-op lock probe
+    ok(uu?.params.status === 1 && uu?.params.authname === '100r' && uu?.params.password === 'GENPW1234567890', '[repair] the record gets the new device password and the 100r identity');
+    ok((await wcall('/rapp/repair', { domain, ext: '100' }, wEnv, omTok)).status === 403, '[repair] office-manager token → 403 (the hidden button is not the gate)');
+    nsUserRec = { user: '100', srv_code: '9', email: `u@${domain}` };
+    ok((await wcall('/rapp/repair', { domain, ext: '100' })).status === 403, '[repair] system user (hard) → 403 even for a reseller');
+    nsUserRec = { user: '100', srv_code: '', email: `u@${domain}`, 'first-name': 'Test' };
+    rtUpdateFail = 'Invalid User ID';
+    const brick = await wcall('/rapp/repair', { domain, ext: '100' });
+    ok(brick.status === 502 && (await brick.json()).code === 'vendor-brick', '[repair] Invalid User ID from updateUser → 502 code:vendor-brick');
+    rtUpdateFail = null;
+    // A device that cannot be created after the old one is deleted → 502 partial, and the response carries
+    // no upstream text.
+    nsDevicePostFail = true;
+    const part = await wcall('/rapp/repair', { domain, ext: '100' });
+    const pb = await part.json();
+    ok(part.status === 502 && pb.code === 'partial' && !/upstream|ns-api/i.test(JSON.stringify(pb)), '[repair] a failure after the device delete → 502 partial, no upstream text');
+    nsDevicePostFail = false;
+    rtUsers = [];
   }
   // Reset requires an existing RT user.
   {

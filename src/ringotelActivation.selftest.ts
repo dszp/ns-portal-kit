@@ -1,6 +1,6 @@
 /** Offline test for the Ringotel activation orchestration (device-ensure + create/update/deactivate/
  *  reset) with recording mock clients, plus the write-domain safety rail. pnpm test:ringotelwrite */
-import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter, syncIdentity, generateSipPassword, deactivateAppOnly, deleteAppRecords, repairDeviceForEvent, resolveCanonical, isPlaceholder } from './ringotelActivation.js';
+import { activate, deactivate, resetPassword, ensureDevice, isDomainWritable, SIP_PW_FIELD, RingotelWriteError, type DeviceWriter, type RingotelUserWriter, syncIdentity, generateSipPassword, deactivateAppOnly, deleteAppRecords, repairDeviceForEvent, resolveCanonical, isPlaceholder, repair, isVendorBrick, verifyRepaired } from './ringotelActivation.js';
 import type { User } from '@dszp/ringotel-lib';
 
 let pass = 0, fail = 0;
@@ -879,6 +879,185 @@ const base = () => ({ orgid: 'ORG1', branchid: 'B1', domain: 'acme.example', ext
     ok(!isPlaceholder(rt({ id: 'T', extension: '1042', status: -1, authname: '1042r' })), 'isPlaceholder: a tombstone (authname) is NOT a placeholder');
     ok(!isPlaceholder(rt({ id: 'A', extension: '1042', status: 1, username: '1042' })), 'isPlaceholder: an ACTIVE record is NOT a placeholder');
     ok(!isPlaceholder(rt({ id: 'S', extension: '1042', status: -1, username: '1042r' })), 'isPlaceholder: the SIP identity in `username` alone disqualifies it');
+  }
+
+  // ── repair(): recreate the device, fix the record in place, recreate the record only if the
+  //    read-back shows the in-place update did not take. ───────────────────────────────────────────
+  {
+    // Records as Ringotel would return them after a write. `fixed` carries the SIP identity.
+    const broken = () => rtUser({ id: 'u1', ext: '100', status: 1, username: '', authname: '' });
+    const fixed = (id = 'u1') => rtUser({ id, ext: '100', status: 1, username: '100r', authname: '100r' });
+    /** Scripted reread: each call returns the next list; the last one repeats. */
+    const rereads = (...lists: any[][]) => { let i = 0; return async () => lists[Math.min(i++, lists.length - 1)] as User[]; };
+    const rtWith = (updateErr?: Error) => {
+      const m = mockRt();
+      if (updateErr) m.rw.updateUser = async (userid: string, orgid: string, changes: any) => { m.calls.push({ m: 'updateUser', args: { userid, orgid, ...changes } }); throw updateErr; };
+      return m;
+    };
+    const order = (calls: Array<{ m: string; args: any }>) => calls.map((c) => c.m === 'deleteUser' ? `deleteUser:${c.args.userid}` : c.m);
+    const rejects = async (p: Promise<unknown>) => { try { await p; return undefined; } catch (e) { return e as any; } };
+
+    // no record → 404, and no device is touched
+    {
+      const { dw, calls } = mockDevices({ '100r': 'OLDPW' }); const { rw } = mockRt();
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [], reread: rereads([]), ssoMode: false }));
+      ok(e instanceof RingotelWriteError && e.status === 404 && !calls.some((c) => c.startsWith('deleteDevice')), 'repair: no record → 404, no device write');
+    }
+    // inactive record → 409
+    {
+      const { dw, calls } = mockDevices({ '100r': 'OLDPW' }); const { rw } = mockRt();
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [rtUser({ id: 'u1', ext: '100', status: -1 })], reread: rereads([]), ssoMode: false }));
+      ok(e instanceof RingotelWriteError && e.status === 409 && e.code === 'inactive' && calls.length === 0, 'repair: inactive record → 409 code:inactive, no device calls');
+    }
+    // two records share 100r → 409 before any device write
+    {
+      const { dw, calls } = mockDevices({ '100r': 'OLDPW' }); const { rw } = mockRt();
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [fixed('a'), fixed('b')], reread: rereads([]), ssoMode: false }));
+      ok(e instanceof RingotelWriteError && e.status === 409 && !calls.includes('deleteDevice:100r'), 'repair: two records share 100r → 409 before any device write');
+    }
+    // in-place happy path
+    {
+      const { dw, calls } = mockDevices({ '100r': 'OLDPW' }); const { rw, calls: rc } = mockRt();
+      const r = await repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [broken()], reread: rereads([fixed()]), ssoMode: false });
+      ok(calls.indexOf('deleteDevice:100r') !== -1 && calls.indexOf('deleteDevice:100r') < calls.indexOf('createDevice:100r'), 'repair: deletes the 100r device, then creates it');
+      // The first updateUser is the vendor-lock probe ({status:1}); the repair write is the one with the password.
+      ok(rc[0]?.m === 'updateUser' && rc[0].args.status === 1 && rc[0].args.password === undefined, 'repair: probes the record with a no-op status:1 before any device write');
+      const uu = rc.filter((c) => c.m === 'updateUser' && c.args.password);
+      ok(uu.length === 1 && uu[0].args.userid === 'u1' && uu[0].args.status === 1 && uu[0].args.username === '100r' && uu[0].args.authname === '100r' && uu[0].args.password === 'GEN1' && uu[0].args.name === 'Jane Doe',
+         'repair: one updateUser on the existing record with status 1, 100r identity, the NEW device password and the NS name');
+      ok(!rc.some((c) => c.m === 'createUser'), 'repair: in-place success creates no record');
+      ok(r.record === 'updated' && r.verified === true && r.emailed === false && r.rtUserId === 'u1' && r.device === 'recreated' && r.duplicateRemains === false,
+         'repair: in-place happy path → record:updated, verified, nothing emailed');
+    }
+    // ack without effect → fallback recreate, create BEFORE delete
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' }); const { rw, calls: rc } = mockRt();
+      const r = await repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [broken()], reread: rereads([broken()], [fixed('NEWID')]), ssoMode: false });
+      const cu = rc.find((c) => c.m === 'createUser');
+      ok(cu?.args.username === '100r' && cu?.args.authname === '100r' && cu?.args.password === 'GEN1' && cu?.args.status === 1 && cu?.args.noemail === false,
+         'repair: a read-back that disagrees with the ack falls back to createUser with the SIP identity (password mode emails)');
+      const o = order(rc);
+      ok(o.indexOf('createUser') !== -1 && o.indexOf('createUser') < o.indexOf('deleteUser:u1'), 'repair: the new record is created BEFORE the old one is deleted');
+      ok(r.record === 'recreated' && r.rtUserId === 'NEWID' && r.verified === true && r.emailed === true, 'repair: fallback → record:recreated, emailed');
+    }
+    // fallback in sso mode sends no email
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' }); const { rw, calls: rc } = mockRt();
+      const r = await repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [broken()], reread: rereads([broken()], [fixed('NEWID')]), ssoMode: true });
+      ok(rc.find((c) => c.m === 'createUser')?.args.noemail === true && r.emailed === false, 'repair: fallback in sso mode sets noemail and reports emailed:false');
+    }
+    // the old record survives its delete
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' }); const { rw } = mockRt();
+      const r = await repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [broken()], reread: rereads([broken()], [broken(), fixed('NEWID')]), ssoMode: false });
+      ok(r.duplicateRemains === true, 'repair: an old record that survives deleteUser is reported as duplicateRemains');
+    }
+    // vendor brick stops, no create
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' }); const { rw, calls: rc } = rtWith(new Error('Invalid User ID'));
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [broken()], reread: rereads([broken()]), ssoMode: false }));
+      ok(e instanceof RingotelWriteError && e.status === 502 && e.code === 'vendor-brick' && !rc.some((c) => c.m === 'createUser'), 'repair: Invalid User ID → 502 vendor-brick, never createUser');
+    }
+    // other updateUser failure propagates
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' }); const boom = new Error('boom'); const { rw, calls: rc } = rtWith(boom);
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rw, users: [broken()], reread: rereads([broken()]), ssoMode: false }));
+      ok(e === boom && !rc.some((c) => c.m === 'createUser'), 'repair: any other updateUser failure propagates unchanged, no createUser');
+    }
+    // isVendorBrick reads the RPC error object too
+    ok(isVendorBrick({ message: 'updateUser failed', rpcError: { message: 'Invalid User ID' } }) && !isVendorBrick(new Error('timeout')), 'isVendorBrick: matches the RPC error message, not other failures');
+    // verifyRepaired: wrong branch is not repaired
+    ok(!verifyRepaired([rtUser({ id: 'u1', ext: '100', status: 1, username: '100r', authname: '100r', branchid: 'B2' })], { branchid: 'B1', ext: '100', suffix: 'r' }),
+       'verifyRepaired: a correct record on another branch is not repaired');
+    ok(!verifyRepaired([fixed('other')], { branchid: 'B1', ext: '100', suffix: 'r' }, 'u1'), 'verifyRepaired: expectId must match');
+
+    // ── Stateful mocks (review fixes): Ringotel and device state persist across calls, so a write's
+    //    effect — or its silent absence — is what the next read actually sees. ─────────────────────
+    const statefulRt = (seed: any[], o: { dropOnUpdate?: string[]; undeletable?: string[]; brick?: string[]; failCreate?: boolean } = {}) => {
+      let recs = seed.map((u) => ({ ...u }));
+      const calls: Array<{ m: string; args: any }> = [];
+      let seq = 0;
+      const rw: RingotelUserWriter = {
+        async createUser(input: any) { calls.push({ m: 'createUser', args: input }); const u = { id: `NEW${++seq}`, ...input }; recs.push(u); return { id: u.id }; },
+        async updateUser(userid: string, orgid: string, changes: any) {
+          calls.push({ m: 'updateUser', args: { userid, orgid, ...changes } });
+          if (o.brick?.includes(userid)) throw Object.assign(new Error('updateUser failed'), { rpcError: { message: 'Invalid User ID' } });
+          const r = recs.find((x) => x.id === userid); if (!r) throw new Error('no such user');
+          for (const [k, v] of Object.entries(changes)) if (!o.dropOnUpdate?.includes(k)) (r as any)[k] = v;
+          return { id: userid };
+        },
+        async deactivateUser() { return {}; },
+        async deleteUser(userid: string) { calls.push({ m: 'deleteUser', args: { userid } }); if (!o.undeletable?.includes(userid)) recs = recs.filter((x) => x.id !== userid); return {}; },
+        async resetUserPassword() { return {}; },
+      };
+      return { rw, calls, reread: async () => recs.map((u) => ({ ...u })) as User[], recs: () => recs };
+    };
+    const hand = () => rtUser({ id: 'u1', ext: '100', status: 1, username: '', authname: '', email: 'old@acme.example' });
+
+    // C1: the survivor of a no-op delete carries 100r (updateUser kept username, dropped authname) → no 409
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' });
+      const rt = statefulRt([hand()], { dropOnUpdate: ['authname'], undeletable: ['u1'] });
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: rt.reread, ssoMode: false }));
+      ok(e === undefined, 'repair: a surviving old record that now carries 100r does not turn the fallback into a 409');
+    }
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' });
+      const rt = statefulRt([hand()], { dropOnUpdate: ['authname'], undeletable: ['u1'] });
+      const r = await repair({ ...base(), nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: rt.reread, ssoMode: false }).catch(() => null);
+      ok(r?.record === 'recreated' && r?.rtUserId === 'NEW1' && r?.duplicateRemains === true, 'repair: …it reports the new record as canonical and duplicateRemains:true');
+    }
+    // C2: a device delete the server applies later — ensureDevice finds the old device → stop before the record
+    {
+      const { dw, calls } = mockDevices({ '100r': 'OLDPW' });
+      dw.deleteDevice = async (_d, _u, device) => { calls.push(`deleteDevice:${device}`); return {}; }; // acked, not applied
+      const rt = statefulRt([hand()]);
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: rt.reread, ssoMode: false }));
+      ok(e instanceof RingotelWriteError && e.code === 'partial' && !rt.calls.some((c) => c.m === 'updateUser' && c.args.password), 'repair: a device that was not recreated stops the repair before the record gets a password');
+    }
+    // I1: an empty read-back is no evidence — no create, no delete of a record we just fixed
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' });
+      const rt = statefulRt([hand()]);
+      const r = await repair({ ...base(), nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: async () => [], ssoMode: false });
+      ok(r.record === 'updated' && r.verified === false && !rt.calls.some((c) => c.m === 'createUser' || c.m === 'deleteUser'), 'repair: a read-back missing the record is unverified, never a recreate');
+    }
+    // I2: a masked/unknown email (undefined) keeps the old record's address on a recreate; nothing emailed to nobody
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' });
+      const rt = statefulRt([hand()], { dropOnUpdate: ['authname'] });
+      const r = await repair({ ...base(), email: undefined, nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: rt.reread, ssoMode: false });
+      const cu = rt.calls.find((c) => c.m === 'createUser');
+      ok(r.record === 'recreated' && cu?.args.email === 'old@acme.example', 'repair: an unknown NS email carries the old record address into the new record');
+    }
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' });
+      const rt = statefulRt([{ ...hand(), email: '' }], { dropOnUpdate: ['authname'] });
+      const r = await repair({ ...base(), email: '', nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: rt.reread, ssoMode: false });
+      ok(r.record === 'recreated' && r.emailed === false, 'repair: no address → emailed:false');
+    }
+    // I3: a failure after the device step is reported as partial, so the panel can say "run Repair again"
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' });
+      const rt = statefulRt([hand()]);
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: async () => { throw new Error('read timeout'); }, ssoMode: false }));
+      ok(e instanceof RingotelWriteError && e.code === 'partial' && e.status === 502, 'repair: a failure past the device step is a 502 partial');
+    }
+    // I4: a vendor-locked record is found BEFORE the device is touched
+    {
+      const { dw, calls } = mockDevices({ '100r': 'OLDPW' });
+      const rt = statefulRt([hand()], { brick: ['u1'] });
+      const e = await rejects(repair({ ...base(), nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: rt.reread, ssoMode: false }));
+      ok(e instanceof RingotelWriteError && e.code === 'vendor-brick' && !calls.some((c) => c.startsWith('deleteDevice') || c.startsWith('createDevice')), 'repair: vendor brick stops before any device write');
+    }
+    // I6: an inactive tombstone carrying 100r beside the one active hand-made record → repair the active one
+    {
+      const { dw } = mockDevices({ '100r': 'OLDPW' });
+      const tomb = rtUser({ id: 't1', ext: '100', status: -1, username: '100r', authname: '100r' });
+      const rt = statefulRt([tomb, hand()]);
+      const r = await repair({ ...base(), nsWrite: dw, rtWrite: rt.rw, users: rt.recs() as User[], reread: rt.reread, ssoMode: false }).catch((e) => e);
+      ok(r && r.record === 'updated' && r.rtUserId === 'u1' && rt.calls.some((c) => c.m === 'deleteUser' && c.args.userid === 't1'), 'repair: a 100r tombstone beside the active record does not block it; the tombstone is cleaned up');
+    }
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

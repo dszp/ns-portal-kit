@@ -5,10 +5,10 @@ Notable changes to **ns-portal-kit**.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Which version am I running?** `GET /health` on your deployment reports it:
+**Which version am I running?** `GET /health` on your deployment reports it, matching a heading below:
 
 ```json
-{ "ok": true, "configured": true, "version": "0.2.0" }
+{ "ok": true, "configured": true, "version": "X.Y.Z" }
 ```
 
 Compare that against the latest entry below to see whether there's anything worth pulling. Updating is
@@ -21,6 +21,22 @@ separately have a tag to link to — the entries between them describe changes t
 release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
+
+## [0.10.0] — 2026-11-18
+
+### Added
+
+- **Repair an activated user's app from the profile page.** Resellers see a Repair button beside the app
+  activation checkbox. It deletes and recreates the user's app device with a new SIP password, then writes
+  that password and the matching SIP username onto the user's existing app record, sets it active, and
+  reads it back. If the read-back shows the update did not take, it creates a new record and then deletes
+  the old one, and the new record emails the user an app password unless they sign in with SSO. A record
+  the app provider has locked ("Invalid User ID") is reported and left alone. Feature key
+  `ringotel.repair`, default `reseller`; writes need `RINGOTEL_WRITE_DOMAINS` like every other app write.
+- **Service notice.** A bar across the top of every portal page showing your current service notice from a
+  public JSON feed (`SERVICE_NOTICE_URL`): yellow while ongoing, green once resolved, gone after its end
+  time, with the page link and optional phone and email contacts. Separate from the status banner, and
+  above it when both show. Feature key `portal.serviceNotice`, on for everyone by default.
 
 ## [0.9.2] — 2026-10-17
 

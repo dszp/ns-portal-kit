@@ -91,6 +91,7 @@ ok(can(P('Office Manager'), 'ringotel.userStatus', def) && !can(P('Basic User'),
 ok(can(P('Office Manager'), 'portal.access', def), 'default portal.access admits OM');
 ok(can(P('Office Manager'), 'ringotel.activate', def) && !can(P('Basic User'), 'ringotel.activate', def), 'default ringotel.activate = office_manager (write)');
 ok(can(P('Office Manager'), 'ringotel.profileStatus', def) && can(P('Reseller'), 'ringotel.profileStatus', def), 'default ringotel.profileStatus = office_manager (incl. above)');
+ok(can(P('Reseller'), 'ringotel.repair', def) && !can(P('Office Manager'), 'ringotel.repair', def), 'default ringotel.repair = reseller');
 ok(can(P('Office Manager'), 'ringotel.resetPassword', def) && !can(P('Basic User'), 'ringotel.resetPassword', def), 'default ringotel.resetPassword = office_manager (write)');
 
 // Override: hide + re-level, and a superadmin sees a re-leveled feature.

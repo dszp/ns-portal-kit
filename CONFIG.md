@@ -17,7 +17,7 @@ shows every setting *with the value yours currently has*, its real default, and 
 - [How to read this](#how-to-read-this)
 - [Core](#group-core) — `NS_SERVER` · `NS_PORTAL_ISS` · `ALLOWED_ORIGINS` · `CACHE_SCOPE` · `NS_DEVICE_DETAILS`
 - [Domain limits](#group-domains) — `ALLOWED_DOMAINS` · `BLOCKED_DOMAINS`
-- [Portal injection](#group-injection) — `PRIMARY_BASENAME` · `PORTAL_HANDOFF_URL` · `PORTAL_SECONDARIES` · `PORTAL_FEATURES` · `PORTAL_SUPERADMINS` · `PORTAL_RELEASE_NOTES_URL` · `STATUS_BANNER_WEBHOOK` · `RINGOTEL_APP_BASE_URL`
+- [Portal injection](#group-injection) — `PRIMARY_BASENAME` · `PORTAL_HANDOFF_URL` · `PORTAL_SECONDARIES` · `PORTAL_FEATURES` · `PORTAL_SUPERADMINS` · `PORTAL_RELEASE_NOTES_URL` · `STATUS_BANNER_WEBHOOK` · `SERVICE_NOTICE_URL` · `RINGOTEL_APP_BASE_URL`
 - [Portal menus](#group-menus) — `PORTAL_MENUS` · `PORTAL_HANDOFF_ORIGINS` · `PORTAL_APPS_HIDE`
 - [App integration](#group-ringotel) — `RINGOTEL_API_KEY` and its display settings
 - [Ringotel provisioning](#group-provision) — `RINGOTEL_PROVISION_DOMAINS` · `RINGOTEL_CONNECTION_TEMPLATE` · `RINGOTEL_SSO_SERVICE_ID` · `RINGOTEL_DEFAULT_PACKAGE` · `RINGOTEL_REGION`
@@ -322,6 +322,58 @@ for trusting your own endpoint: this renders into every signed-in user's portal.
 **Placement adapts to the window.** Where there is room it overlays blank space in the header, so nothing
 on the page moves; where there is not, it takes its own row above the button grid. A long message shrinks
 to fit rather than being truncated.
+
+<a id="SERVICE_NOTICE_URL"></a>
+
+### `SERVICE_NOTICE_URL` · `vars`
+
+The `https` URL of a **public** JSON feed with your current service notice. The portal shows it as a bar
+across the top of every page, pushing the page down, for everyone signed in.
+
+- **Example** `https://www.example.com/status/active.json`
+- **Unset or empty** The notice is inert: nothing is requested and nothing is drawn.
+
+**The feed.** The browser fetches it directly with a plain `GET`. It sends no token, no cookies, no custom
+headers and no referrer; the feed sees only the portal's origin, as any cross-origin request does. The feed
+must answer with `Access-Control-Allow-Origin: *` (or your portal's origin). If your portal sends a
+Content-Security-Policy, its `connect-src` must allow the feed's origin and its `style-src` must allow
+inline styles, or the bar draws unstyled.
+
+```jsonc
+{
+  "updated": "2026-11-12T15:04:00Z",
+  "notices": [            // [] when nothing is up; at most one notice
+    {
+      "state": "ongoing",                  // or "resolved"
+      "summary": "Email is delayed for some customers.",
+      "url": "https://www.example.com/status/email-delay/",
+      "until": null,                       // once resolved: when the notice comes down
+      "contacts": [                        // optional
+        { "method": "phone", "label": "555-0100", "href": "tel:+15550100" }
+      ]
+    }
+  ]
+}
+```
+
+**What is shown.** The `summary`, linked to `url`, then each contact, then a **See updates** link. The bar
+is yellow while `state` is `ongoing` and green once it is `resolved`, and it disappears once `until` has
+passed. Everything is rendered as text. The page link must be `https:`; contact links must be `tel:` or
+`mailto:`, and any other link is dropped.
+
+**Failures show nothing.** An unreachable feed, a non-2xx answer, no answer within 5 seconds, or a body
+in another shape draws no bar. The last answer is remembered for the browser session (up to 15 minutes),
+so the next page draws it at once rather than pushing the page down after it loads. An `until` that is
+not a valid date counts as passed.
+
+**Previewing.** Add `?svxnotice=ongoing` or `?svxnotice=resolved` to any portal page address to see a
+sample notice with placeholder text and contacts. It shows only on that page load, for you, and fetches
+and remembers nothing.
+
+This is separate from [`STATUS_BANNER_WEBHOOK`](#STATUS_BANNER_WEBHOOK), which asks your endpoint for a
+message per user. When both are showing, the service notice is the top band.
+
+*Feature key `portal.serviceNotice` (default: everyone).*
 
 <a id="RINGOTEL_APP_BASE_URL"></a>
 
@@ -1054,7 +1106,7 @@ when you edit the value.)
 Which extensions are treated as real people, and the rail that bounds every write. All gated by
 `RINGOTEL_API_KEY`.
 
-The features here — `ringotel.activate`, `ringotel.resetPassword`, `ringotel.profileStatus`,
+The features here — `ringotel.activate`, `ringotel.resetPassword`, `ringotel.repair`, `ringotel.profileStatus`,
 `ringotel.profileAppAccess`, `ringotel.prepop` — let authorized roles manage a user's app account from the
 NetSapiens user profile. They are *writes*, so they are gated harder than the read features; see
 [Features and gating](#features-and-gating) to re-level them.
@@ -1763,6 +1815,7 @@ call-center is exact and orthogonal.
 | `ringotel.profileStatus` | App active/inactive indicator on the user-profile page | `office_manager` |
 | `ringotel.activate` | Activate/deactivate a user's app from the profile page (**write**) | `office_manager` |
 | `ringotel.resetPassword` | Reset a user's app password from the profile page (**write**) | `office_manager` |
+| `ringotel.repair` | Repair an activated user's app from the profile page: recreate its device and fix its app record (**write**) | `reseller` |
 | `ringotel.profileAppAccess` | The user-visible app sign-in message, on the profile page | `office_manager` |
 | `ringotel.prepop` | Preview/create inactive directory entries for a domain (**write**) | `reseller` |
 | `ringotel.provision.view` | The Ringotel Integration page: audit every domain's organization and connection against the template | `reseller` |
@@ -2274,7 +2327,8 @@ limit, but potentially over a free plan's. Size `NS_EVENTS_MAX_EVENTS` according
 
 `NS_SERVER`, `NS_PORTAL_ISS`, `ALLOWED_ORIGINS`, `CACHE_SCOPE`, `NS_DEVICE_DETAILS`,
 `ALLOWED_DOMAINS`, `BLOCKED_DOMAINS`, `PRIMARY_BASENAME`, `PORTAL_HANDOFF_URL`, `PORTAL_SECONDARIES`,
-`PORTAL_FEATURES`, `PORTAL_RELEASE_NOTES_URL`, `STATUS_BANNER_WEBHOOK`, `RINGOTEL_APP_BASE_URL`,
+`PORTAL_FEATURES`, `PORTAL_RELEASE_NOTES_URL`, `STATUS_BANNER_WEBHOOK`, `SERVICE_NOTICE_URL`,
+`RINGOTEL_APP_BASE_URL`,
 `PORTAL_MENUS`, `PORTAL_APPS_HIDE`, `RINGOTEL_BASE_URL`, `RINGOTEL_PRESENCE`, `RINGOTEL_OVERRIDES`,
 `RINGOTEL_ROTATE_SIP_ON_ACTIVATE`, `RINGOTEL_ACTIVATION_SUFFIX`, `RINGOTEL_EXCLUDE_*`,
 `RINGOTEL_UNLISTED_USERS`, `RINGOTEL_RESELLER_OVERRIDE`, `RINGOTEL_PREPOP_INCLUDE_SOFT`,

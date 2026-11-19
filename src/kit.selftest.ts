@@ -116,6 +116,10 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(body.includes('user-toolbar') && body.includes('/rapp/org') && body.includes('svx-appcol') && body.includes('Call Flow Diagram'), '[bundle] folded features present (banner + columns + call-flow)');
     ok(body.includes('/rapp/activate') && body.includes('/rapp/resetPassword') && body.includes('profile-panel-main') && body.includes('jpost'), '[bundle] profile activation feature folded (activate + reset + jpost)');
     ok(body.includes('force:true') && body.includes('Force-activate') && body.includes('_isRes'), '[bundle] reseller runtime force-activate override present');
+    ok(body.includes('repair:true') && body.includes('/rapp/repair'), '[bundle] reseller _AF: repair on, route folded');
+    ok(body.includes("'Repair '+_KC.label"), '[bundle] repair button is white-labeled through _KC.label');
+    ok(!/Repair failed: '\+\(\(b&&b\.error/.test(body) && body.includes('Repair did not finish. Run Repair again.'), '[bundle] repair failures show neutral panel text, never the server message');
+    ok(/_AF\.repair[^\n]*_isRes\(\)/.test(body) && /repair while masquerading/.test(body), '[bundle] repair is reseller-gated client-side and disabled under a mask');
     ok(body.includes('"label":"App"'), '[bundle] gated bundle carries the deployment label from RINGOTEL_LABEL');
     ok(body.includes('"appBase":"https://app.example.com"'), '[bundle] https app-base carried into _KC');
     // The toolbar item's shape, asserted per claim rather than as one merged grep: the DOMAIN carries the
@@ -131,6 +135,7 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     const body = await r.text();
     ok(body.includes('callflow:false') && body.includes('orgStatus:false') && body.includes('userStatus:true') && body.includes('orgList:false'), '[bundle] OM _AF: only userStatus on (per the feature registry defaults)');
     ok(body.includes('profileStatus:true') && body.includes('activate:true') && body.includes('resetPassword:true'), '[bundle] OM _AF: profile activation features on (office_manager default)');
+    ok(body.includes('repair:false'), '[bundle] OM _AF: repair off (reseller default)');
   }
   {
     const a = await (await call('/kit/portal.js', reseller)).text();
@@ -184,7 +189,7 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     ok(brandedSelf.includes(SELF_BRAND_PROBE), '[self] a white-label value reaches the self bundle from env');
     ok(neutralSelf.includes('"label":"Ringotel"') && !neutralSelf.includes(SELF_BRAND_PROBE), '[self] neutral source (mirror-safe)');
     const adm = buildKitBundle(featurePolicyKeys(), baseEnv);
-    ok(adm.includes('callflow:true') && adm.includes('resetPassword:true') && adm.includes('profileAppAccess:true') && !adm.includes('appStatus:'), '[admin] admin bundle carries the 8 admin flags incl. profileAppAccess, no me.* flag');
+    ok(adm.includes('callflow:true') && adm.includes('resetPassword:true') && adm.includes('repair:true') && adm.includes('profileAppAccess:true') && !adm.includes('appStatus:'), '[admin] admin bundle carries the admin flags incl. repair + profileAppAccess, no me.* flag');
   }
 
   // ── Self entry + fence + /kit/self.js route (Task 3, 2026-07-18) ──────────────────
@@ -343,7 +348,13 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     // query, which can carry identifiers and this link may leave for a third party.
     ok(b.includes("split('{page}').join(pg)") && b.includes('encodeURIComponent(location.pathname)'),
       '[menus] {page} is filled client-side from the path only, percent-encoded');
-    ok(!b.includes('location.search'), '[menus] the portal query string is never interpolated into an added link');
+    // The service-notice preview is the one reader of the query string, and it only TESTS it against a fixed
+    // word — nothing from it is rendered or sent. Exclude exactly that function; everything else stays held.
+    const pvAt = b.indexOf('function snPreview('), pvEnd = b.indexOf('function serviceNotice(');
+    const noPreview = pvAt > -1 && pvEnd > pvAt ? b.slice(0, pvAt) + b.slice(pvEnd) : b;
+    ok(!noPreview.includes('location.search'), '[menus] the portal query string is never interpolated into an added link');
+    ok(pvAt < 0 || /var m=\/\[\?&\]svxnotice=\(ongoing\|resolved\)/.test(b.slice(pvAt, pvEnd)),
+      '[menus] and the notice preview only matches it against fixed words');
     // A label/title is read by a human; only the URL needs encoding.
     ok(b.includes('function fillRaw(') && b.includes('a.textContent=fillRaw('), '[menus] {page} renders as a plain path in label/title, encoded only in the href');
     // The Referer on an outbound click carries the full portal URL incl. its query — the very thing
@@ -1276,6 +1287,232 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
   ok(/function myScope\(\)/.test(cap) && !/if\(myScope\(\)/.test(cap),
     '[capture] the locally-decoded scope labels a capture and gates nothing');
 }
+
+// ── the service notice (portal.serviceNotice) ─────────────────────────────────────────────────────────
+// A fleet-wide notice from a PUBLIC feed the operator publishes, drawn as a bar at the very top of every
+// portal page.
+  {
+    const FEED = 'https://status.example.com/status/active.json';
+    const on = buildSelfBundle(selfFeaturePolicyKeys(), { SERVICE_NOTICE_URL: FEED, PORTAL_HANDOFF_URL: '' } as any);
+    ok(/serviceNotice:true/.test(on) && on.includes(`"sn":"${FEED}"`),
+      '[notice] the feed URL rides a tier that carries the feature');
+    const plain = buildSelfBundle(selfFeaturePolicyKeys(), { SERVICE_NOTICE_URL: 'http://status.example.com/a.json' } as any);
+    ok(!plain.includes('status.example.com'), '[notice] a non-https feed is refused, not shipped');
+    const unset = buildSelfBundle(selfFeaturePolicyKeys(), { PORTAL_HANDOFF_URL: '' } as any);
+    ok(!/"sn":/.test(unset), '[notice] unset ⇒ no feed in the bundle');
+    const notMine = buildSelfBundle(selfFeaturePolicyKeys().filter((k) => k !== 'portal.serviceNotice'), { SERVICE_NOTICE_URL: FEED } as any);
+    ok(/serviceNotice:false/.test(notMine) && !notMine.includes(FEED), '[notice] and absent from a tier not granted it');
+    ok(!/"sn":/.test(buildKitBundle(featurePolicyKeys(), { SERVICE_NOTICE_URL: FEED } as any)), '[notice] the admin bundle carries none of it');
+
+    const err = (env: Record<string, unknown>) => kitConfigError({ PORTAL_MODE: '1', ...env } as any);
+    ok(/SERVICE_NOTICE_URL must be an https URL/.test(err({ SERVICE_NOTICE_URL: 'http://x.example/a.json' }) || ''),
+      '[notice] a non-https feed is a loud config error');
+    ok(err({ SERVICE_NOTICE_URL: FEED }) === null && err({ SERVICE_NOTICE_URL: '' }) === null, '[notice] https and empty are accepted');
+
+    // It runs on every page, BEFORE the webhook banner, so the notice is always the top band.
+    const fi = on.indexOf('m:serviceNotice'), bi = on.indexOf('m:statusBanner');
+    ok(fi > -1 && bi > -1 && fi < bi, '[notice] registered on every page, ahead of the webhook banner');
+    ok(/\{p:\/\^\\\/\/,m:serviceNotice,a:function\(\)\{return !!_AF\.serviceNotice\}\}/.test(on), '[notice] gated on its own flag');
+    // The webhook banner's no-header fallback lands BELOW the notice bar, never above it.
+    ok(/var sn=document\.getElementById\('_svxnotice'\);b\.insertBefore\(d,sn\?sn\.nextSibling:b\.firstChild\)/.test(on),
+      '[notice] the webhook banner fallback inserts after the notice bar');
+    // After the 8s observer disconnect only the late timers run; the notice rides them too, so a late
+    // re-render gets the bar back and a page left open drops a notice whose until has passed.
+    ok(/try\{if\(_AF\.serviceNotice\)serviceNotice\(\)\}catch\(e\)\{\}/.test(on.slice(on.indexOf('var VLT='))), '[notice] re-checked on the late passes');
+    ok(/#_svxnotice ._svxn-c\{[^}]*padding:10px 16px;padding:10px clamp/.test(on), '[notice] the padding has a fallback for browsers without clamp()');
+    ok(/#_svxnotice p,#_svxnotice a\{font-family:inherit;font-size:inherit;line-height:inherit/.test(on), '[notice] the portal\'s own p and a rules cannot resize the text');
+    ok(/s\.setAttribute\('width','18'\);s\.setAttribute\('height','18'\)/.test(on), '[notice] icons carry a size of their own if the stylesheet never loads');
+
+    // ── behaviour, against the real emitted code and a DOM stub small enough to be obviously honest ──
+    const src = on.slice(on.indexOf('var SN_K='), on.indexOf('var BAN_TAGS='));
+    ok(src.length > 200, '[notice] the notice block is present in the bundle');
+    const mkDom = () => {
+      const all: any[] = [];
+      const node = (tag: string): any => {
+        const el: any = {
+          tagName: tag.toUpperCase(), attrs: {} as Record<string, string>, children: [] as any[], parentNode: null, _t: '',
+          setAttribute(k: string, v: unknown) { this.attrs[k] = String(v); },
+          getAttribute(k: string) { return k in this.attrs ? this.attrs[k] : null; },
+          appendChild(c: any) { if (c.parentNode) c.parentNode.removeChild(c); c.parentNode = this; this.children.push(c); return c; },
+          insertBefore(c: any, ref: any) { if (c.parentNode) c.parentNode.removeChild(c); c.parentNode = this; const i = ref ? this.children.indexOf(ref) : -1; i < 0 ? this.children.push(c) : this.children.splice(i, 0, c); return c; },
+          removeChild(c: any) { const i = this.children.indexOf(c); if (i > -1) this.children.splice(i, 1); c.parentNode = null; return c; },
+          replaceChild(n: any, o: any) { const i = this.children.indexOf(o); if (n.parentNode) n.parentNode.removeChild(n); n.parentNode = this; this.children[i] = n; o.parentNode = null; return o; },
+          get firstChild() { return this.children[0] || null; },
+          get nextSibling() { const p = this.parentNode; return p ? p.children[p.children.indexOf(this) + 1] || null : null; },
+          get textContent() { return this._t + this.children.map((c: any) => c.textContent).join(''); },
+          set textContent(v: string) { this._t = String(v); this.children = []; },
+          get id() { return this.attrs.id || ''; }, set id(v: string) { this.attrs.id = v; },
+        };
+        all.push(el); return el;
+      };
+      const head = node('head'), body = node('body');
+      const html = node('html'); html.appendChild(head); html.appendChild(body);
+      const find = (el: any, id: string): any => { if (el.attrs.id === id) return el; for (const c of el.children) { const f = find(c, id); if (f) return f; } return null; };
+      const document = {
+        head, body, documentElement: html,
+        createElement: (t: string) => node(t),
+        createElementNS: (_ns: string, t: string) => node(t),
+        createTextNode: (t: string) => { const n = node('#text'); n._t = t; return n; },
+        getElementById: (id: string) => find(html, id),
+      };
+      return { document, head, body, node };
+    };
+    const NOTICE = { id: 'm365', title: 'Microsoft 365 outage', state: 'ongoing', summary: 'Email is delayed for some customers.',
+      url: 'https://status.example.com/status/m365/', started: '2026-11-12T14:00:00Z', updated: null, until: null,
+      contacts: [{ method: 'phone', label: '555-0100', href: 'tel:+15550100' }, { method: 'email', label: 'alt@example.com', href: 'mailto:alt@example.com' }] };
+    const run = (opts: { store?: Record<string, string>; feed?: (init: any) => Promise<any>; preexisting?: boolean; search?: string; timers?: boolean } = {}) => {
+      const dom = mkDom();
+      if (opts.preexisting) { const p = dom.node('div'); p.id = 'portal-wrap'; dom.body.appendChild(p); }
+      const store: Record<string, string> = { ...(opts.store || {}) };
+      const calls: any[] = [];
+      const ctx: any = {
+        document: dom.document, window: {} as any, JSON, Date, Array, isNaN,
+        _KC: { sn: FEED },
+        sessionStorage: { getItem: (k: string) => (k in store ? store[k] : null), setItem: (k: string, v: string) => { store[k] = String(v); }, removeItem: (k: string) => { delete store[k]; } },
+        fetch: (url: string, init: any) => { calls.push({ url, init }); return opts.feed ? opts.feed(init) : new Promise(() => {}); },
+        location: { search: opts.search || '' },
+        AbortController,
+        // Timers are inert unless a test asks for them: the fetch timeout must not fire under the others.
+        setTimeout: (fn: () => void) => { if (opts.timers) fn(); return 1; }, clearTimeout: () => {},
+      };
+      const api = runInNewContext(`${src}; ({snPick:snPick,snDraw:snDraw,serviceNotice:serviceNotice})`, ctx) as any;
+      return { ...dom, api, store, calls, ctx };
+    };
+    const tick = () => new Promise((r) => setTimeout(r, 0));
+    const bar = (d: any) => d.document.getElementById('_svxnotice');
+
+    // snPick — the contract's rules, one per assertion
+    {
+      const { api } = run();
+      const now = Date.parse('2026-11-18T12:00:00Z');
+      ok(api.snPick({ notices: [] }, now) === null, '[notice] notices:[] ⇒ nothing');
+      ok(api.snPick(null, now) === null && api.snPick({}, now) === null && api.snPick('x', now) === null, '[notice] a body that is not the contract ⇒ nothing');
+      const n = api.snPick({ notices: [NOTICE] }, now);
+      ok(n && n.s === NOTICE.summary && n.r === false && n.u === NOTICE.url, '[notice] ongoing: summary, link, not resolved');
+      ok(n && n.c.length === 2 && n.c[0].h === 'tel:+15550100' && n.c[1].m === 'email', '[notice] contacts kept in the feed\'s order');
+      ok(api.snPick({ notices: [{ ...NOTICE, summary: '  ' }] }, now) === null, '[notice] a blank summary ⇒ nothing');
+      ok(api.snPick({ notices: [{ ...NOTICE, summary: 42 }] }, now) === null, '[notice] a non-string summary ⇒ nothing');
+      const res = { ...NOTICE, state: 'resolved', until: '2026-11-19T12:00:00Z' };
+      ok(api.snPick({ notices: [res] }, now)?.r === true, '[notice] resolved and inside its window ⇒ shown green');
+      ok(api.snPick({ notices: [{ ...res, until: '2026-11-18T11:59:59Z' }] }, now) === null, '[notice] past until ⇒ nothing');
+      ok(api.snPick({ notices: [{ ...NOTICE, url: 'javascript:alert(1)' }] }, now)?.u === '', '[notice] a non-https url is not linked');
+      ok(api.snPick({ notices: [{ ...res, until: 'tomorrow' }] }, now) === null, '[notice] an unreadable until counts as expired, not forever');
+      const bad = api.snPick({ notices: [{ ...NOTICE, contacts: [{ method: 'phone', label: 'x', href: 'javascript:alert(1)' }, { method: 'email', label: 'y', href: 'https://evil.example' }, { label: 'z', href: 'tel:1' }] }] }, now);
+      ok(bad && bad.c.length === 1 && bad.c[0].h === 'tel:1', '[notice] only tel: and mailto: contact hrefs survive');
+      const none = api.snPick({ notices: [{ ...NOTICE, contacts: undefined }] }, now);
+      ok(none && Array.isArray(none.c) && none.c.length === 0, '[notice] missing contacts ⇒ []');
+    }
+
+    // snDraw — the bar's shape
+    {
+      const d = run({ preexisting: true });
+      const n = d.api.snPick({ notices: [NOTICE] }, Date.now());
+      d.api.snDraw(n);
+      const b = bar(d);
+      ok(!!b && d.body.firstChild === b, '[notice] the bar is the first thing in <body>, above the page');
+      ok(b.tagName === 'ASIDE' && b.getAttribute('aria-label') === 'Service notice', '[notice] an aside labelled Service notice');
+      ok(!(b.getAttribute('class') || '').includes('is-resolved'), '[notice] ongoing is not styled resolved');
+      const text = JSON.stringify(b, (k, v) => (k === 'parentNode' ? undefined : v));
+      ok(b.textContent.includes(NOTICE.summary) && !b.textContent.includes(NOTICE.title), '[notice] shows the summary, not the title');
+      const links: any[] = []; const walk = (e: any) => { if (e.tagName === 'A') links.push(e); e.children.forEach(walk); }; walk(b);
+      ok(links[0]?.getAttribute('href') === NOTICE.url && links[0].textContent === NOTICE.summary, '[notice] the summary links to the incident page');
+      ok(links[0]?.getAttribute('target') === '_blank' && /noopener/.test(links[0].getAttribute('rel') || ''), '[notice] in a new tab, without an opener');
+      ok(links[1]?.getAttribute('href') === 'tel:+15550100' && links[1].textContent.includes('555-0100'), '[notice] the phone contact');
+      ok(links[2]?.getAttribute('href') === 'mailto:alt@example.com' && links[2].getAttribute('target') === null, '[notice] the email contact, not in a new tab');
+      const pill = links[3];
+      ok(pill && /See updates/.test(pill.textContent) && pill.getAttribute('aria-hidden') === 'true' && pill.getAttribute('tabindex') === '-1',
+        '[notice] the "See updates" pill is last, and hidden from the keyboard since the text is the link');
+      ok(!!d.document.getElementById('_svxnotice_css'), '[notice] its stylesheet is injected');
+      ok(text.length > 0, '[notice] (serialisable)');
+      d.api.snDraw(d.api.snPick({ notices: [{ ...NOTICE, state: 'resolved', until: new Date(Date.now() + 3600e3).toISOString() }] }, Date.now()));
+      ok(d.body.children.filter((c: any) => c.id === '_svxnotice').length === 1, '[notice] a redraw replaces the bar, never adds a second');
+      ok((bar(d).getAttribute('class') || '').includes('is-resolved'), '[notice] resolved switches to the green style');
+      ok(d.head.children.filter((c: any) => c.id === '_svxnotice_css').length === 1, '[notice] and the stylesheet is injected once');
+      d.api.snDraw(null);
+      ok(!bar(d), '[notice] null removes the bar');
+      d.api.snDraw({ ...n, until: '2000-01-01T00:00:00Z' });
+      ok(!bar(d), '[notice] a notice past its until is not drawn, even from a cache');
+    }
+
+    // serviceNotice — fetch, cache, failure
+    await (async () => {
+      const okFeed = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ updated: 'x', notices: [NOTICE] }) });
+      const d = run({ feed: okFeed });
+      d.api.serviceNotice();
+      ok(d.calls.length === 1 && d.calls[0].url === FEED, '[notice] asks the configured feed');
+      const init = d.calls[0].init || {};
+      ok(init.credentials === 'omit' && !init.body && !init.headers && (init.method || 'GET') === 'GET',
+        '[notice] a plain GET with no credentials, no body and no headers — the token never leaves');
+      await tick(); await tick(); await tick();
+      ok(!!bar(d), '[notice] the fetched notice is drawn');
+      ok(JSON.parse(d.store.__svxNoticeFeed || '{}').j?.notices?.[0]?.summary === NOTICE.summary, '[notice] and the feed remembered for the session');
+      d.api.serviceNotice();
+      ok(d.calls.length === 1, '[notice] asked at most once per page load');
+      d.body.removeChild(bar(d));
+      d.api.serviceNotice();
+      ok(!!bar(d) && d.calls.length === 1, '[notice] a page re-render that drops the bar gets it back without a refetch');
+
+      const cached = run({ store: { __svxNoticeFeed: JSON.stringify({ t: Date.now(), j: { notices: [NOTICE] } }) } });
+      cached.api.serviceNotice();
+      ok(!!bar(cached), '[notice] a remembered notice is drawn before the fetch answers, so pages do not jump');
+
+      const gone = run({ store: { __svxNoticeFeed: JSON.stringify({ t: Date.now(), j: { notices: [NOTICE] } }) },
+        feed: () => Promise.resolve({ ok: true, json: () => Promise.resolve({ notices: [] }) }) });
+      gone.api.serviceNotice(); await tick(); await tick(); await tick();
+      ok(!bar(gone) && JSON.parse(gone.store.__svxNoticeFeed || '{}').j?.notices?.length === 0, '[notice] an empty feed takes the bar down');
+
+      const fails = run({ store: { __svxNoticeFeed: JSON.stringify({ t: Date.now(), j: { notices: [NOTICE] } }) },
+        feed: () => Promise.reject(new Error('net')) });
+      fails.api.serviceNotice(); await tick(); await tick(); await tick();
+      ok(!bar(fails) && !('__svxNoticeFeed' in fails.store), '[notice] a failed fetch shows nothing and forgets the feed');
+
+      // ── review fixes (2026-11-18) ──
+      ok((d.calls[0].init || {}).referrerPolicy === 'no-referrer', '[notice] the portal page address is not sent as a Referer');
+      // A remembered entry is RE-VALIDATED, never trusted: wrong shapes, old formats and bad schemes cannot
+      // stop the fetch or reach an href.
+      for (const [label, raw] of [['an old-format entry', JSON.stringify({ n: { s: 'x' } })], ['a string', '"x"'], ['garbage', '{not json'],
+        ['a wrong-shaped feed', JSON.stringify({ t: Date.now(), j: { notices: 'x' } })]] as const) {
+        const m = run({ store: { __svxNoticeFeed: raw, __svxNotice: raw }, feed: okFeed });
+        let threw = false; try { m.api.serviceNotice(); } catch { threw = true; }
+        await tick(); await tick(); await tick();
+        ok(!threw && m.calls.length === 1 && !!bar(m), `[notice] ${label} in storage neither throws nor stops the fetch`);
+      }
+      const evil = run({ store: { __svxNoticeFeed: JSON.stringify({ t: Date.now(), j: { notices: [{ ...NOTICE, url: 'javascript:alert(1)', contacts: [{ method: 'phone', label: 'x', href: 'javascript:alert(2)' }] }] } }) } });
+      evil.api.serviceNotice();
+      const hrefs: string[] = []; const hw = (e: any) => { if (e.attrs?.href) hrefs.push(e.attrs.href); (e.children || []).forEach(hw); }; if (bar(evil)) hw(bar(evil));
+      ok(!!bar(evil) && hrefs.every((h) => !/^javascript:/i.test(h)), '[notice] a remembered feed is held to the same scheme rules as a fetched one');
+      const stale = run({ store: { __svxNoticeFeed: JSON.stringify({ t: Date.now() - 16 * 60e3, j: { notices: [NOTICE] } }) } });
+      stale.api.serviceNotice();
+      ok(!bar(stale) && stale.calls.length === 1, '[notice] a remembered feed older than 15 minutes is not drawn, only refetched');
+      // A hung feed must not leave anything up: the fetch is aborted, and an abort shows nothing.
+      const hung = run({ timers: true, store: { __svxNoticeFeed: JSON.stringify({ t: Date.now(), j: { notices: [NOTICE] } }) },
+        feed: (init) => new Promise((_r, rej) => { if (init?.signal?.aborted) rej(new Error('abort')); init?.signal?.addEventListener?.('abort', () => rej(new Error('abort'))); }) });
+      hung.api.serviceNotice(); await tick(); await tick(); await tick();
+      ok(!!hung.calls[0]?.init?.signal && !bar(hung), '[notice] a feed that does not answer is aborted, and shows nothing');
+
+      // PREVIEW: a sample notice on demand, for checking the look when nothing is up. Nothing from the URL
+      // is rendered, nothing is fetched, nothing is remembered.
+      for (const st of ['ongoing', 'resolved']) {
+        const pv = run({ search: `?x=1&svxnotice=${st}`, feed: okFeed });
+        pv.api.serviceNotice(); await tick();
+        const pb = bar(pv);
+        ok(!!pb && pv.calls.length === 0 && Object.keys(pv.store).length === 0, `[notice] ?svxnotice=${st} draws a sample with no fetch and no memory`);
+        ok(!!pb && ((pb.getAttribute('class') || '').includes('is-resolved')) === (st === 'resolved'), `[notice] the ${st} sample has the ${st} style`);
+        const pl: any[] = []; const pw = (e: any) => { if (e.tagName === 'A') pl.push(e); e.children.forEach(pw); }; if (pb) pw(pb);
+        ok(pl.some((a) => /^tel:/.test(a.getAttribute('href'))) && pl.some((a) => /^mailto:/.test(a.getAttribute('href'))), `[notice] the ${st} sample shows both contact kinds`);
+      }
+      const junk = run({ search: '?svxnotice=<img src=x onerror=alert(1)>', feed: okFeed });
+      junk.api.serviceNotice();
+      ok(junk.calls.length === 1, '[notice] any other svxnotice value is ignored and the feed is used');
+
+      const http500 = run({ feed: () => Promise.resolve({ ok: false, json: () => Promise.resolve({ notices: [NOTICE] }) }) });
+      http500.api.serviceNotice(); await tick(); await tick(); await tick();
+      ok(!bar(http500), '[notice] a non-2xx shows nothing');
+
+      const off = run(); off.ctx._KC.sn = undefined; off.api.serviceNotice();
+      ok(off.calls.length === 0 && !bar(off), '[notice] no feed configured ⇒ no request, nothing drawn');
+    })();
+  }
 
 // ── the status banner (portal.statusBanner) ──────────────────────────────────────────────────────────
   {
