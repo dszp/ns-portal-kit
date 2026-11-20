@@ -1111,6 +1111,12 @@ const splitAcctsOne = (): LinkReport => ({
   ok(ago('2026-09-03T09:00:00.000Z', t0) === '3 hours ago', '[ago] hours');
   ok(ago('2026-08-31T12:00:00.000Z', t0) === '3 days ago', '[ago] and days');
   ok(ago('not a date', t0) === '', '[ago] an unparseable stamp says nothing rather than "NaN minutes ago"');
+  // The portal bundles Datejs, whose Date.parse returns null (or a Date) instead of a number.
+  const DatejsDate: any = function (this: any, ...a: any[]) { return new (Date as any)(...a); };
+  DatejsDate.now = Date.now; DatejsDate.parse = () => null;
+  const agoDj = (iso: string, now: number): string => runInNewContext(`${rowScript(false)}\nobAgo(I,N)`, { I: iso, N: now, Date: DatejsDate }) as string;
+  ok(agoDj('2026-09-03T09:00:00.000Z', t0) === '3 hours ago', '[ago] reads the stamp under a page whose Date.parse is Datejs');
+  ok(agoDj('not a date', t0) === '', '[ago] and still says nothing for an unparseable one there');
 
   // The row stamp: a quick row is drawn from the derived index and carries a marker saying so.
   const quick: LinkReport = { ...REPORT(), mode: 'quick', verifiedAt: null, usageStale: true };

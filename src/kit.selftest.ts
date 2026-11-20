@@ -1361,13 +1361,13 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
     const NOTICE = { id: 'm365', title: 'Microsoft 365 outage', state: 'ongoing', summary: 'Email is delayed for some customers.',
       url: 'https://status.example.com/status/m365/', started: '2026-11-12T14:00:00Z', updated: null, until: null,
       contacts: [{ method: 'phone', label: '555-0100', href: 'tel:+15550100' }, { method: 'email', label: 'alt@example.com', href: 'mailto:alt@example.com' }] };
-    const run = (opts: { store?: Record<string, string>; feed?: (init: any) => Promise<any>; preexisting?: boolean; search?: string; timers?: boolean } = {}) => {
+    const run = (opts: { store?: Record<string, string>; feed?: (init: any) => Promise<any>; preexisting?: boolean; search?: string; timers?: boolean; date?: any } = {}) => {
       const dom = mkDom();
       if (opts.preexisting) { const p = dom.node('div'); p.id = 'portal-wrap'; dom.body.appendChild(p); }
       const store: Record<string, string> = { ...(opts.store || {}) };
       const calls: any[] = [];
       const ctx: any = {
-        document: dom.document, window: {} as any, JSON, Date, Array, isNaN,
+        document: dom.document, window: {} as any, JSON, Date: opts.date || Date, Array, isNaN,
         _KC: { sn: FEED },
         sessionStorage: { getItem: (k: string) => (k in store ? store[k] : null), setItem: (k: string, v: string) => { store[k] = String(v); }, removeItem: (k: string) => { delete store[k]; } },
         fetch: (url: string, init: any) => { calls.push({ url, init }); return opts.feed ? opts.feed(init) : new Promise(() => {}); },
@@ -1511,7 +1511,21 @@ const basic = mkTok({ sub: '100@acme.example', user_scope: 'Basic User', domain:
       fails.api.serviceNotice(); await tick(); await tick(); await tick();
       ok(!bar(fails) && !('__svxNoticeFeed' in fails.store), '[notice] a failed fetch shows nothing and forgets the feed');
 
-      // ── review fixes (2026-11-18) ──
+      // The live portal bundles Datejs, which REPLACES Date.parse with one that returns a Date or null —
+      // null for an ISO stamp with milliseconds, the exact shape the feed's until takes. A green notice
+      // (the only kind with an until) was dropped on every portal page while the preview and the Docs site,
+      // neither of which carries Datejs, showed it.
+      const DatejsDate: any = function (this: any, ...a: any[]) { return new (Date as any)(...a); };
+      DatejsDate.now = Date.now; DatejsDate.UTC = Date.UTC; DatejsDate.parse = () => null;
+      const greenFeed = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ notices: [{ ...NOTICE, state: 'resolved',
+        updated: '2026-11-20T23:35:51.979Z', until: new Date(Date.now() + 12 * 3600e3).toISOString() }] }) });
+      const dj = run({ feed: greenFeed, date: DatejsDate });
+      dj.api.serviceNotice(); await tick(); await tick(); await tick();
+      ok(bar(dj)?.getAttribute('class') === 'is-resolved', '[notice] a resolved notice with an until is drawn under a page whose Date.parse is Datejs');
+      const djPast = run({ date: DatejsDate });
+      ok(djPast.api.snPick({ notices: [{ ...NOTICE, until: '2020-01-01T00:00:00.000Z' }] }, Date.now()) === null,
+        '[notice] and a passed until still takes it down there');
+
       ok((d.calls[0].init || {}).referrerPolicy === 'no-referrer', '[notice] the portal page address is not sent as a Referer');
       // A remembered entry is RE-VALIDATED, never trusted: wrong shapes, old formats and bad schemes cannot
       // stop the fetch or reach an href.

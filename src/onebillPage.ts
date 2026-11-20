@@ -176,7 +176,7 @@ return '<div class="dim">('+(r.siteCount===1?'the only site on this domain':'one
 // How long ago, in words, for the header's "usage last verified" clause. Whole units only: a header
 // that says "4 minutes ago" and one that says "4.2 minutes ago" answer the same question, and only one
 // of them reads like a sentence. Anything under a minute is "just now" rather than a count of seconds.
-function obAgo(iso,nowMs){var t=Date.parse(String(iso||''));if(!isFinite(t))return '';
+function obAgo(iso,nowMs){var t=new Date(String(iso||'')).getTime();if(!isFinite(t))return '';
 var s=Math.floor((nowMs-t)/1000);if(s<60)return 'just now';
 var m=Math.floor(s/60);if(m<60)return m===1?'1 minute ago':m+' minutes ago';
 var h=Math.floor(m/60);if(h<24)return h===1?'1 hour ago':h+' hours ago';

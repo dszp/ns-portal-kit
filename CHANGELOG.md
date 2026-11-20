@@ -22,6 +22,16 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-11-20
+
+### Fixed
+
+- **A resolved service notice now shows in the portal.** The portal's page script replaces the browser's
+  date parser with one that cannot read the feed's timestamps, so every notice with an `until` (which is
+  every resolved one) was treated as already expired and not drawn. Ongoing notices and the
+  `?svxnotice=` preview carry no `until` and were not affected. The OneBill page's "usage last verified"
+  age had the same fault and is fixed with it.
+
 ## [0.10.1] — 2026-11-18
 
 ### Fixed
@@ -2491,6 +2501,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.10.2]: https://github.com/dszp/ns-portal-kit/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/dszp/ns-portal-kit/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dszp/ns-portal-kit/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/dszp/ns-portal-kit/compare/v0.9.1...v0.9.2

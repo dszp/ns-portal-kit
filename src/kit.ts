@@ -1547,7 +1547,9 @@ var n=a[0];if(!n||typeof n!=='object')return null;
 var s=typeof n.summary==='string'?n.summary.trim():'';if(!s)return null;
 // An until that cannot be read counts as passed: a notice that never comes down is worse than one that
 // comes down early, and the feed's own page still carries it.
-if(n.until!=null){var u=Date.parse(n.until);if(isNaN(u)||now>u)return null}
+// NEVER Date.parse in injected code: the portal bundles Datejs, which replaces it with one that returns a
+// Date or null, and null for the feed's own ISO-with-milliseconds stamps. The Date constructor is untouched.
+if(n.until!=null){var u=new Date(String(n.until)).getTime();if(isNaN(u)||now>u)return null}
 var url=typeof n.url==='string'&&/^https:\/\//i.test(n.url)?n.url:'';
 var cs=[],c=Array.isArray(n.contacts)?n.contacts:[];
 for(var i=0;i<c.length;i++){var x=c[i];
@@ -1621,7 +1623,7 @@ b.style.paddingTop=(_snPad.base+h)+'px'}catch(e){}}
 function snDraw(n){
 var old=document.getElementById('_svxnotice');
 // Re-checked here, not only in snPick: a remembered notice must not outlive its window either.
-if(n&&n.until!=null){var u=Date.parse(n.until);if(isNaN(u)||Date.now()>u)n=null}
+if(n&&n.until!=null){var u=new Date(String(n.until)).getTime();if(isNaN(u)||Date.now()>u)n=null}
 _snCur=n||null;
 if(!n){_snKey='';snUnfit(old);if(old&&old.parentNode)old.parentNode.removeChild(old);return}
 var key=JSON.stringify(n);if(old&&key===_snKey){snFit();return}
