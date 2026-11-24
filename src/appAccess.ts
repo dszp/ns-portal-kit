@@ -141,6 +141,8 @@ export interface AppAccessInput {
   autoActivate: boolean;
   /** NS `login-username`, verbatim. */
   loginUsername?: string;
+  /** The user's NS domain (`acme.12345.service`). Lets an SSO username be shown in its short form. */
+  nsDomain?: string;
   /** Ringotel SIP username (`<ext><suffix>`). */
   sipUsername?: string;
 }
@@ -162,9 +164,30 @@ function nsLoginUsable(input: AppAccessInput): boolean {
 }
 
 /**
+ * The SSO username as the sign-in dialog shows it: `<ext>@<first label>` (`1045@acme`), whichever form
+ * NetSapiens stores. Cores in the field hold a mix of short and full (`1045@acme.12345.service`) login
+ * names, and the SSO worker in `auto` mode accepts either spelling for either kind of record, so the
+ * dialog shows the one that is short enough to type on a phone. Only a login on the user's OWN domain is
+ * shortened; anything else (an email-shaped login, say) is shown verbatim, since a guess there would be
+ * a username that does not exist.
+ */
+function ssoDisplayUsername(login: string | undefined, nsDomain: string | undefined): string | undefined {
+  if (!login) return undefined;
+  const domain = (nsDomain ?? '').trim().toLowerCase();
+  const at = login.lastIndexOf('@');
+  if (!domain || at <= 0 || login.slice(at + 1).toLowerCase() !== domain) return login;
+  return `${login.slice(0, at)}@${domain.split('.')[0]}`;
+}
+
+/**
  * The whole decision. Pure. Advisory modes deliberately return NO username, so a caller structurally
  * cannot render credentials to someone who should not be signing in.
  */
+function ssoResult(input: AppAccessInput): { mode: 'sso'; username?: string } {
+  const username = ssoDisplayUsername(input.loginUsername, input.nsDomain);
+  return { mode: 'sso', ...(username ? { username } : {}) };
+}
+
 export function resolveAppAccess(input: AppAccessInput, env: AppAccessEnv): { mode: AppAccessMode; username?: string } {
   if (!input.orgActive) return { mode: 'unavailable' };
 
@@ -175,14 +198,14 @@ export function resolveAppAccess(input: AppAccessInput, env: AppAccessEnv): { mo
     // eligibility.ts); only a HARD identity (system/service, structurally-invalid ext) stays blocked.
     if (input.activated) {
       if (input.hardExcluded) return { mode: 'not-set-up' };
-      return { mode: 'sso', ...(input.loginUsername ? { username: input.loginUsername } : {}) };
+      return ssoResult(input);
     }
     // Not activated ⇒ the create-on-login path: needs BOTH eligibility AND create-on-login enabled.
     // create-on-login is a different setting from the SSO binding and is not readable here, so it
     // arrives as config; without it, an eligible user with no account would be told to sign in and fail.
     if (!input.eligible) return { mode: 'not-set-up' };
     if (!input.autoActivate) return { mode: 'not-set-up' };
-    return { mode: 'sso', ...(input.loginUsername ? { username: input.loginUsername } : {}) };
+    return ssoResult(input);
   }
 
   if (!input.activated) return { mode: 'not-set-up' };

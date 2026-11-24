@@ -668,7 +668,7 @@ const ok = (c: boolean, m: string) => {
     const ssoEnv = { ...pEnv, RINGOTEL_SSO_SERVICE: 'netsapiens_sso' };
     const r3 = await meCall('/me/app-access', ssoEnv);
     const b3 = await r3.json();
-    ok(r3.status === 200 && b3.mode === 'sso' && b3.username === `100@${domain}`, '[me/app-access] SSO bound + usable login ⇒ sso mode, login-username VERBATIM (never assembled as user@domain)');
+    ok(r3.status === 200 && b3.mode === 'sso' && b3.username === `100@${domain.split('.')[0]}`, '[me/app-access] SSO bound + usable login ⇒ sso mode, the stored login-username shown in its SHORT form');
 
     // ---- Fix 2: a transient upstream failure must degrade to "we cannot answer", never to a confident
     // WRONG advisory. Both scenarios are SSO-bound (reusing the org from the SSO-mode test just above),

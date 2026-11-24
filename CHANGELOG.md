@@ -22,6 +22,20 @@ release. The version at `/health` always matches a heading here.
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-11-24
+
+### Changed
+
+- **The app sign-in dialog shows the short username.** On the single sign-on path, a NetSapiens login
+  name on the user's own domain is shown as `<ext>@<first label>` (`1045@acme`), whether the core stores
+  that or the full `1045@acme.12345.service`. Pair it with an SSO service that accepts either spelling.
+  A login on any other domain, such as an email-style one, is shown as stored.
+
+### Dependencies
+
+- `@dszp/ringotel-lib` ^0.1.9, `wrangler` 4.166, `@cloudflare/workers-types`, `esbuild` and `tsx` to
+  their latest releases.
+
 ## [0.10.2] — 2026-11-20
 
 ### Fixed
@@ -2501,6 +2515,7 @@ Initial public release.
   implementation is planned but **not published yet**, so that half is currently yours to write.
   Standalone mode is complete and works today.
 
+[0.10.3]: https://github.com/dszp/ns-portal-kit/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/dszp/ns-portal-kit/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/dszp/ns-portal-kit/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dszp/ns-portal-kit/compare/v0.9.2...v0.10.0

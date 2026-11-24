@@ -1205,6 +1205,7 @@ async function computeAppAccessProjection(
     activated: st.activated ?? false,
     autoActivate: autoActivates(domain, env),
     loginUsername: str(rec['login-username']), // VERBATIM — never assembled as `${ext}@${domain}`
+    nsDomain: domain, // only to SHORTEN a login already on this domain — still never assembled from parts
     sipUsername: st.username,
   }, env);
 

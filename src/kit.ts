@@ -415,7 +415,7 @@ return 'In the email itself, or behind the one-time link in it.'}
 function aaModel(r,L){var m=r&&r.mode,sso=m==='sso',pw=m==='password';
 if(sso||pw){return {signable:true,advisory:null,fields:[
 {k:'Domain',v:(r.appDomain||''),hint:'The same for everyone in your organization.',warn:false,copy:true},
-{k:'Username',v:(r.username||''),hint:sso?'Your full portal sign-in — not just your extension.':'Your app username — not your portal sign-in.',warn:sso,copy:true},
+{k:'Username',v:(r.username||''),hint:sso?'Enter it as shown, including the part after the @.':'Your app username — not your portal sign-in.',warn:sso,copy:true},
 {k:'Password',v:(sso?'Your portal password':'From your welcome email'),hint:sso?'The same one you use here.':pwHint(r),warn:false,copy:false}
 ]}}
 return {signable:false,fields:[],advisory:{t:(m==='needs-portal-setup'

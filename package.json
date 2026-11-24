@@ -1,6 +1,6 @@
 {
   "name": "ns-portal-kit",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.11.0",
@@ -54,14 +54,14 @@
   },
   "dependencies": {
     "@dszp/netsapiens-lib": "^0.15.2",
-    "@dszp/ringotel-lib": "^0.1.8",
+    "@dszp/ringotel-lib": "^0.1.9",
     "@dszp/onebill-lib": "^0.7.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261015.1",
-    "esbuild": "^0.28.1",
-    "tsx": "^4.22.4",
+    "@cloudflare/workers-types": "^5.20261121.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "wrangler": "^4.158.0"
+    "wrangler": "^4.166.0"
   }
 }

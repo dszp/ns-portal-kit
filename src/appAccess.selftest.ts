@@ -118,6 +118,21 @@ ok(user({ orgActive: false }) === undefined, 'unavailable carries no username');
 // ── Gap 3: pin empty-string username behaviour ─────────────────────────────
 ok(user({ ssoService: SSO, loginUsername: '' }) === undefined, 'an empty login-username yields no username, never an empty one');
 
+// ── SSO username shows the SHORT form (`<ext>@<first label>`) whatever NS stores ──
+// The SSO worker accepts either spelling, so the dialog shows the one people can type.
+ok(user({ ssoService: SSO, loginUsername: '2118@acme.12345.service', nsDomain: 'acme.12345.service' }) === '2118@acme',
+   'a full login-username on the user\'s own domain is shown in its short form');
+ok(user({ ssoService: SSO, loginUsername: '2118@Acme.12345.Service', nsDomain: 'acme.12345.service' }) === '2118@acme',
+   'the domain match is case-insensitive');
+ok(user({ ssoService: SSO, loginUsername: '2118@acme', nsDomain: 'acme.12345.service' }) === '2118@acme',
+   'an already-short login-username is shown unchanged');
+ok(user({ ssoService: SSO, loginUsername: 'bob@example.com', nsDomain: 'acme.12345.service' }) === 'bob@example.com',
+   'a login on some OTHER domain (email-shaped) is shown verbatim, never shortened');
+ok(user({ ssoService: SSO, loginUsername: '2118@acme.12345.service' }) === '2118@acme.12345.service',
+   'no NS domain supplied ⇒ verbatim');
+ok(resolveAppAccess({ ...base, ssoService: undefined, sipUsername: '2118r', nsDomain: 'acme.12345.service' }, ENV).username === '2118r',
+   'the password path still shows the SIP username');
+
 // ── appAccessConfigError: loud, fail-closed guard (mirrors featuresConfigError) ────
 ok(appAccessConfigError({}) === null, 'no config at all ⇒ valid (null)');
 ok(appAccessConfigError({ PORTAL_APP_DOWNLOADS: '[{"label":"Get it","url":"https://e.example/app"}]', PORTAL_APPS_HIDE: 'A,B' }) === null, 'well-formed config ⇒ valid (null)');
